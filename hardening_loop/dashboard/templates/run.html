@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.external_run_id }}{% endblock %}
+{% block content %}
+<h1>Run {{ run.external_run_id }}{% if run.is_baseline %} <span class="pill">baseline</span>{% endif %}</h1>
+<div class="cards">
+  <div class="card"><div class="label">Source</div><div class="value mono" style="font-size:14px">{{ run.source_repo }}<br>{{ run.source_branch }} @ {{ run.source_sha }}</div><div class="sub">trigger {{ run.trigger.value }} · attempt {{ run.run_attempt }} · {{ run.platform }}</div></div>
+  <div class="card"><div class="label">Status</div><div class="value {{ 'ok' if run.status.value == 'complete' else 'bad' }}">{{ run.status.value }}</div><div class="sub">gate mode {{ run.scan_gate_mode.value }}</div></div>
+  {% if summary %}<div class="card"><div class="label">Gate</div><div class="value {{ 'ok' if summary.gate.get('passed') else 'bad' }}">{{ 'pass' if summary.gate.get('passed') else 'fail' }}</div><div class="sub">{{ summary.gate.get('reason') }}</div></div>
+  <div class="card"><div class="label">Raw / policy findings</div><div class="value">{{ summary.raw_total }} / {{ summary.policy_total }}</div><div class="sub">raw {{ summary.raw_by_severity }}<br>policy {{ summary.policy_by_severity }}</div></div>{% endif %}
+</div>
+<h2>Image identity</h2>
+<table>
+<tr><th>lean image id</th><td class="mono">{{ run.lean_digest or 'n/a' }}</td></tr>
+<tr><th>ci image id</th><td class="mono">{{ run.ci_digest or 'n/a' }}</td></tr>
+<tr><th>ci layer delta</th><td class="mono">{{ run.ci_layer_delta or 'n/a' }}</td></tr>
+<tr><th>tools</th><td class="mono">{{ run.tools }}</td></tr>
+<tr><th>approved VEX documents</th><td class="mono">{{ run.vex_documents|length }}</td></tr>
+</table>
+<h2>Jobs</h2>
+<table><tr><th>Job</th><th>Scanner</th><th>Mode</th><th>Target</th><th>Scope</th><th>Success</th><th>Tool version</th><th>DB built</th><th>Counts</th></tr>
+{% for j in jobs %}<tr><td>{{ j.name }}</td><td>{{ j.scanner.value if j.scanner else '' }}</td><td>{{ j.mode.value if j.mode else '' }}</td><td>{{ j.image_target.value if j.image_target else '' }}</td><td>{{ j.layer_scope }}</td><td class="{{ 'ok' if j.success else 'bad' }}">{{ 'yes' if j.success else 'NO' }}</td><td>{{ j.tool_version or '' }}</td><td class="muted">{{ j.db_built_at.strftime('%Y-%m-%d %H:%M') if j.db_built_at else '' }}</td><td class="mono">{{ j.counts }}</td></tr>{% endfor %}
+</table>
+<h2>Findings first seen or closed by this run ({{ findings|length }})</h2>
+{% include "_findings_table.html" %}
+<h2>Events</h2>
+<table><tr><th>When</th><th>Event</th><th>Reason</th></tr>
+{% for e in events %}<tr><td class="muted">{{ e.ts.strftime('%Y-%m-%d %H:%M') }}</td><td>{{ e.event }}</td><td class="mono">{{ e.reason }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

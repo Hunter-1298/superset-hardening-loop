@@ -3,8 +3,8 @@ in-memory doubles and records checks; the runner asserts zero outbound network f
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 from hardening_loop.classify.rules import parse_upper_bounds
@@ -108,7 +108,7 @@ DEP_FILES = ["pyproject.toml", "requirements/base.txt", "requirements/developmen
 
 @scenario("R0", "Real baseline fixture: ingest, group, open issues, bounded dispatch")
 def r0(w: World, r: ScenarioResult) -> None:
-    root = Path(__file__).resolve().parents[2]
+    root = w.settings.repo_root
     fixture = root / "fixtures" / "baseline" / BASELINE_SHA
     if not fixture.exists():
         r.expect("baseline fixture present", False, str(fixture))
@@ -973,6 +973,209 @@ def n5(w: World, r: ScenarioResult) -> None:
         observed={"state": wi.state.value, "reason": wi.blocked_reason},
     )
     r.expect("reason names approved path", "approved" in (wi.blocked_reason or ""))
+
+
+# ----------------------------------------------------------------------------- DEMO
+
+
+@scenario("DEMO", "Showcase: all five kinds in one database (dashboard default)")
+def demo(w: World, r: ScenarioResult) -> None:
+    """Sequential end-to-end story over every synthetic seed so one database exercises every
+    outcome the dashboard and run report render: fixed (with and without a retry),
+    approved_disposition, scanner_disagreement_resolved, needs_human and a regression."""
+    seeds = ["cryptography", "pillow", "requests", "paramiko", "libexpat1", "linux-libc-dev"]
+    configs = ["helm-run-as-root", "dockerfile-root", "image-no-healthcheck"]
+    w.settings.max_concurrent_sessions = 8
+    w.settings.global_acu_budget = 200.0
+    w.baseline(*seeds, configs=configs)
+    w.tick()
+    items = {wi.group_key: wi for wi in w.work_items()}
+    r.eq("seven HIGH/CRITICAL items dispatched", len(w.devin.created_requests()), 7)
+    r.eq("all five kinds present", {wi.kind for wi in items.values()}, set(Kind))
+    remaining = set(seeds)
+    remaining_cfg = set(configs)
+
+    def closing(merge_sha: str) -> int:
+        return w.ingest(w.closing_run(merge_sha, *sorted(remaining), configs=sorted(remaining_cfg)))
+
+    # 1. cryptography: first-try dependency upgrade.
+    wi = items["pypi:cryptography"]
+    wi, _ = _to_ready_for_human(
+        w, r, wi, _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.1
+    )
+    wi, merge = _merge(w, r, wi)
+    remaining.discard("cryptography")
+    w.apply_run(closing(merge))
+    r.eq("cryptography verified", w.state_of(wi.id or 0), WorkItemState.verified)
+
+    # 2. pillow: one red CI, same-session retry, then verified.
+    wi = items["pypi:pillow"]
+    url, number = w.devin_opens_pr(
+        wi, _dep_output("pillow", "10.2.0", "10.3.0"), files=DEP_FILES, acus=1.8
+    )
+    w.tick()
+    w.ci(w.gh.prs[number].head_sha, failing=["app-runs"])
+    w.tick()
+    sess = w.devin.sessions[wi.active_session_id or ""]
+    head2 = sha("demo-pillow-fix-2")
+    w.gh.push(number, head2)
+    w.devin.finish(
+        wi.active_session_id or "",
+        {**(sess.structured_output or {}), "pr_url": url},
+        acus=3.4,
+        pull_requests=[url],
+    )
+    w.tick()
+    w.ci(head2)
+    w.tick()
+    w.review_done(head2)
+    w.tick()
+    wi, merge = _merge(w, r, w.wi(wi.id or 0))
+    remaining.discard("pillow")
+    w.apply_run(closing(merge))
+    r.eq("pillow verified after retry", w.state_of(wi.id or 0), WorkItemState.verified)
+    r.eq("pillow used one retry", w.wi(wi.id or 0).retries_used, 1)
+
+    # 3. paramiko: no fix; reachability + proposed OpenVEX, approved disposition.
+    wi = items["nofix:pypi:paramiko"]
+    out: dict[str, Any] = {
+        "reachability": {
+            "imports_found": ["superset/db_engine_specs/ssh.py"],
+            "call_sites": [],
+            "runtime_paths": [],
+            "verdict": "unreachable",
+        },
+        "proposed_vex_path": "security/vex/proposed/cve-2023-48795.json",
+        "justification": "Terrapin needs an SSH server; Superset is only an SSH client.",
+    }
+    wi, _ = _to_ready_for_human(
+        w, r, wi, out, ["security/vex/proposed/cve-2023-48795.json"], acus=4.4
+    )
+    wi, merge = _merge(w, r, wi)
+    run = w.closing_run(merge, *sorted(remaining), configs=sorted(remaining_cfg))
+    run.policy_suppressed_keys = {"paramiko"}
+    run.vex_documents = [
+        approved_vex(
+            issue_url=wi.issue_url or "",
+            vuln_id="CVE-2023-48795",
+            purl="pkg:pypi/paramiko@3.4.0",
+            approver="Hunter-1298",
+        )
+    ]
+    w.apply_run(w.ingest(run))
+    r.eq("paramiko approved disposition", w.state_of(wi.id or 0), WorkItemState.verified)
+    r.eq(
+        "paramiko finding approved_disposition",
+        w.finding_by_vuln("CVE-2023-48795").state,
+        FindingState.approved_disposition,
+    )
+
+    # 4. libexpat1: container hardening (raw paramiko stays; policy suppressed by approved VEX).
+    wi = items["container:os-packages"]
+    out = {
+        "changes": [{"type": "package_removal", "detail": "apt-get upgrade libexpat1 in lean"}],
+        "image_size_before_after": {"before": 926202016, "after": 926100000},
+        "lean_smoke_local": True,
+    }
+    wi, _ = _to_ready_for_human(w, r, wi, out, ["Dockerfile"], acus=7.5)
+    wi, merge = _merge(w, r, wi)
+    remaining.discard("libexpat1")
+
+    def closing_with_vex(merge_sha: str) -> int:
+        run2 = w.closing_run(merge_sha, *sorted(remaining), configs=sorted(remaining_cfg))
+        run2.policy_suppressed_keys = {"paramiko"}
+        run2.vex_documents = [
+            approved_vex(
+                issue_url=items["nofix:pypi:paramiko"].issue_url or "",
+                vuln_id="CVE-2023-48795",
+                purl="pkg:pypi/paramiko@3.4.0",
+                approver="Hunter-1298",
+            )
+        ]
+        return w.ingest(run2)
+
+    w.apply_run(closing_with_vex(merge))
+    r.eq("libexpat1 verified", w.state_of(wi.id or 0), WorkItemState.verified)
+
+    # 5. linux-libc-dev: scanner disagreement, analysis only, human resolves, rescan confirms.
+    wi = items["disagreement:deb:linux-libc-dev"]
+    w.devin.finish(
+        wi.active_session_id or "",
+        {
+            "outcome": "no_change_needed",
+            "base_branch": "main",
+            "findings_addressed": [],
+            "findings_not_addressed": [{"id": "CVE-2024-40971", "reason": "headers only"}],
+            "reason": "Grype has no Debian tracker match; Trivy uses the NVD range.",
+            "evidence_urls": ["https://security-tracker.debian.org/tracker/CVE-2024-40971"],
+            "verdict": "trivy_correct",
+            "evidence": [
+                {"scanner": "trivy", "record": {"id": "CVE-2024-40971"}, "reasoning": "NVD range"},
+                {"scanner": "grype", "record": {}, "reasoning": "no match in Debian feed"},
+            ],
+            "recommended_action": "none",
+        },
+        acus=1.1,
+        pull_requests=[],
+    )
+    w.tick()
+    r.eq("disagreement -> needs_human", w.state_of(wi.id or 0), WorkItemState.needs_human)
+    w.gh.label(wi.issue_number or 0, HumanLabel.disagreement_resolved.value)
+    w.tick()
+    remaining.discard("linux-libc-dev")
+    later = sha("demo-main-after-disagreement")
+    w.gh.add_commit(later, w.gh.branches["main"])
+    w.gh.branches["main"] = later
+    w.apply_run(closing_with_vex(later))
+    r.eq("disagreement resolved", w.state_of(wi.id or 0), WorkItemState.verified)
+
+    # 6. Helm: runAsNonRoot values change.
+    wi = items["deploy:helm"]
+    out = {
+        "values_changed": [{"path": "securityContext.runAsNonRoot", "from": None, "to": True}],
+        "helm_lint": "1 chart(s) linted, 0 chart(s) failed",
+        "helm_template_diff_attachment": None,
+    }
+    wi, _ = _to_ready_for_human(w, r, wi, out, ["helm/superset/values.yaml"], acus=2.0)
+    wi, merge = _merge(w, r, wi)
+    remaining_cfg.discard("helm-run-as-root")
+    w.apply_run(closing_with_vex(merge))
+    r.eq("helm verified", w.state_of(wi.id or 0), WorkItemState.verified)
+
+    # 7. Dockerfile/container config group: Devin blocks -> needs_human stays open.
+    wi = items["container:dockerfile"]
+    w.devin.finish(
+        wi.active_session_id or "",
+        {
+            "outcome": "blocked",
+            "base_branch": "main",
+            "findings_addressed": [],
+            "findings_not_addressed": [{"id": "DS002", "reason": "entrypoint needs root"}],
+            "blocked_reason": "Switching the lean image to a non-root user changes the entrypoint "
+            "contract used by Helm; needs an architecture decision.",
+        },
+        acus=2.6,
+        pull_requests=[],
+    )
+    w.tick()
+    r.eq("dockerfile group -> needs_human", w.state_of(wi.id or 0), WorkItemState.needs_human)
+
+    # 8. Regression: cryptography reappears on a later main commit.
+    regressed = sha("demo-main-regressed")
+    w.gh.add_commit(regressed, w.gh.branches["main"])
+    w.gh.branches["main"] = regressed
+    remaining.add("cryptography")
+    counts = w.apply_run(closing_with_vex(regressed))
+    r.eq("regression detected", counts.get("regression"), 1)
+
+    states = Counter(wi.state for wi in w.work_items())
+    r.eq("verified items", states[WorkItemState.verified], 6)
+    r.eq("needs_human items", states[WorkItemState.needs_human], 1)
+    r.expect(
+        "regression item linked",
+        any(wi.regression_of_work_item_id is not None for wi in w.work_items()),
+    )
+    r.expect("controller never approved or merged", w.gh.never_merged_or_approved())
 
 
 __all__ = ["CONFIG_SEEDS", "SCENARIOS", "Scenario", "scenario"]

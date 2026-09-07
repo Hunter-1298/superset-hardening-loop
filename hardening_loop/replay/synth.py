@@ -312,7 +312,7 @@ class SyntheticRun:
 
 def ingest_synthetic(engine: Engine, run: SyntheticRun, external_run_id: str) -> IngestResult:
     with session_scope(engine) as db:
-        return ingest_run(db, run.meta(external_run_id), run.jobs(), upper_bounds={})
+        return ingest_run(db, run.meta(external_run_id), run.jobs(), upper_bounds={}, now=run.at)
 
 
 def approved_vex(*, issue_url: str, vuln_id: str, purl: str, approver: str) -> dict[str, Any]:

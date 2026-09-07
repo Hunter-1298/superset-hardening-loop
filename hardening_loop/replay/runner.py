@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from hardening_loop.db import rollback_journal_mode
 from hardening_loop.replay.netguard import NetworkAttemptError, no_network
 from hardening_loop.replay.scenarios import SCENARIOS
 from hardening_loop.replay.world import ScenarioResult, World
@@ -41,6 +42,8 @@ def run_scenario(name: str, out_dir: Path) -> ScenarioResult:
             result.expect("no outbound network", False, str(exc))
         except Exception:
             result.expect("scenario ran without exception", False, traceback.format_exc())
+        finally:
+            world.engine.dispose()  # checkpoints the WAL so the .sqlite3 file is self-contained
         result.network_attempts = list(guard.attempts)
     return result
 
@@ -65,11 +68,15 @@ def run_all(out_dir: Path, names: list[str] | None = None) -> ReplayReport:
     report.finished_at = datetime.now(UTC).isoformat()
     (out_dir / "replay-report.json").write_text(json.dumps(asdict(report), indent=2, default=str))
     (out_dir / "replay-report.md").write_text(render_markdown(report))
-    # The dashboard's default replay database is the end-to-end dependency scenario (R1) unless
-    # R0 (real baseline fixture) ran, which is the richer demonstration.
-    preferred = next((n for n in ("R0", "R1") if (out_dir / f"{n.lower()}.sqlite3").exists()), None)
+    # The dashboard's default replay database: the all-kinds showcase, else the real baseline
+    # fixture (R0), else the end-to-end dependency scenario (R1).
+    preferred = next(
+        (n for n in ("DEMO", "R0", "R1") if (out_dir / f"{n.lower()}.sqlite3").exists()), None
+    )
     if preferred is not None:
-        shutil.copyfile(out_dir / f"{preferred.lower()}.sqlite3", out_dir / "replay.sqlite3")
+        served = out_dir / "replay.sqlite3"
+        shutil.copyfile(out_dir / f"{preferred.lower()}.sqlite3", served)
+        rollback_journal_mode(served)
     return report
 
 

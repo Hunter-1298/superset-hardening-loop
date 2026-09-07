@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlmodel import select
 
 from hardening_loop import db as dbmod
@@ -93,7 +94,36 @@ def test_settings_secrets_not_in_repr(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.secret_values == ["cog_secret_value_123456", "ghp_secret"]
 
 
+def test_settings_empty_optional_env_means_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HL_ACU_COST_USD", "")
+    monkeypatch.setenv("HL_UPSTREAM_MASTER_SHA", " ")
+    s = Settings()
+    assert s.acu_cost_usd is None and s.upstream_master_sha is None
+    monkeypatch.setenv("HL_ACU_COST_USD", "2.25")
+    assert Settings().acu_cost_usd == 2.25
+    assert (Settings().repo_root / "fixtures" / "baseline").is_dir()
+
+
 def test_repo_allowlist_blocks_upstream() -> None:
     assert_repo_allowed("Hunter-1298/superset")
     with pytest.raises(PermissionError):
         assert_repo_allowed("apache/superset")
+
+
+def test_readonly_engine_rejects_writes_and_missing_files(tmp_path: Path) -> None:
+    path = tmp_path / "ro.sqlite3"
+    dbmod.open_database(path).dispose()
+    dbmod.rollback_journal_mode(path)
+    assert not (tmp_path / "ro.sqlite3-wal").exists()
+    engine = dbmod.open_database_readonly(path)
+    with engine.connect() as conn:
+        assert conn.execute(text("PRAGMA journal_mode")).scalar_one() == "delete"
+        assert conn.execute(text("PRAGMA query_only")).scalar_one() == 1
+    with (
+        pytest.raises(OperationalError, match=r"readonly|query_only"),
+        dbmod.session_scope(engine) as db,
+    ):
+        db.add(tables.Event(entity_type="x", entity_id=1, event="write", actor="test"))
+        db.commit()
+    with pytest.raises(FileNotFoundError):
+        dbmod.open_database_readonly(tmp_path / "missing.sqlite3")

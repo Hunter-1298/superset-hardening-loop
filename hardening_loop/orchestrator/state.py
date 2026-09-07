@@ -142,6 +142,7 @@ FINDING_TRANSITIONS: dict[tuple[FindingState, FindingEvent], FindingState] = {
     (_F.in_remediation, _FE.human_blocked): _F.human_blocked,
     (_F.in_remediation, _FE.disagreement_resolved): _F.scanner_disagreement_resolved,
     (_F.in_remediation, _FE.closing_vex): _F.approved_disposition,
+    (_F.in_remediation, _FE.closing_absent): _F.fixed,  # e.g. resolved disagreement, no PR
     (_F.awaiting_rescan, _FE.closing_absent): _F.fixed,
     (_F.awaiting_rescan, _FE.closing_vex): _F.approved_disposition,
     (_F.awaiting_rescan, _FE.human_blocked): _F.human_blocked,

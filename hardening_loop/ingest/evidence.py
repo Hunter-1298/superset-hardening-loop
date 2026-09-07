@@ -225,13 +225,30 @@ def load_baseline(path: Path) -> BaselineManifest:
     )
 
 
-def load_source_pyproject(root: Path, source_sha: str) -> str:
-    """Committed, checksum-verified copy of `pyproject.toml` at `source_sha` (fixtures/source/);
-    the upper-bound context for classification must be reproducible without a Superset checkout."""
-    path = root / "fixtures" / "source" / source_sha / "pyproject.toml"
+def load_source_file(root: Path, source_sha: str, name: str) -> str:
+    """Committed, checksum-verified copy of a Superset source file at `source_sha`
+    (fixtures/source/<sha>/); classification and reporting stay reproducible offline."""
+    path = root / "fixtures" / "source" / source_sha / name
     sums = path.with_name("SHA256SUMS").read_text().split()
     expected = dict(zip(sums[1::2], sums[0::2], strict=True))
     actual = sha256_file(path)
-    if expected.get("pyproject.toml") != actual:
+    if expected.get(name) != actual:
         raise EvidenceError(f"{path}: checksum mismatch ({actual})")
     return path.read_text()
+
+
+def load_source_pyproject(root: Path, source_sha: str) -> str:
+    return load_source_file(root, source_sha, "pyproject.toml")
+
+
+def parse_requirements_pins(text: str) -> dict[str, str]:
+    """`name==version` pins from a pip-compile output; names normalized like PURL names."""
+    pins: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line or line.startswith("-") or "==" not in line:
+            continue
+        name, version = line.split("==", 1)
+        name = name.split("[", 1)[0].strip().lower().replace("_", "-")
+        pins[name] = version.split(";", 1)[0].strip().split()[0]
+    return pins

@@ -110,7 +110,9 @@ def ingest_run(
     jobs: dict[str, ScanJobEvidence],
     *,
     upper_bounds: dict[str, SpecifierSet],
+    now: datetime | None = None,
 ) -> IngestResult:
+    ts = now or utcnow()
     existing = db.exec(
         select(ScanRun).where(ScanRun.external_run_id == meta.external_run_id)
     ).first()
@@ -155,6 +157,7 @@ def ingest_run(
         started_at=meta.started_at,
         finished_at=meta.finished_at,
         is_baseline=meta.is_baseline,
+        ingested_at=ts,
     )
     db.add(run)
     db.flush()
@@ -185,7 +188,7 @@ def ingest_run(
     by_sev: Counter[str] = Counter()
     for nf in normalized:
         cls = classify(nf, ctx)
-        finding, is_new = _upsert_finding(db, run_id, raw, nf, cls)
+        finding, is_new = _upsert_finding(db, run_id, raw, nf, cls, ts)
         assert finding.id is not None
         result.findings_new += int(is_new)
         by_kind[str(cls.kind.value) if cls.kind else "unclassified"] += 1
@@ -238,6 +241,7 @@ def ingest_run(
                     from_state=None,
                     to_state=finding.state.value,
                     reason=f"first seen in run {meta.external_run_id}; {cls.trace}",
+                    ts=ts,
                 )
             )
 
@@ -252,6 +256,7 @@ def ingest_run(
             event="ingested",
             to_state=run.status.value,
             reason=result.summary(),
+            ts=ts,
         )
     )
     return result
@@ -336,6 +341,7 @@ def _upsert_finding(
     raw: ScanJobEvidence,
     nf: NormalizedFinding,
     cls: Classification,
+    ts: datetime,
 ) -> tuple[Finding, bool]:
     finding = db.exec(select(Finding).where(Finding.dedupe_key == nf.dedupe_key)).first()
     is_new = finding is None
@@ -346,6 +352,7 @@ def _upsert_finding(
             layer=nf.layer,
             first_seen_run_id=run_id,
             last_seen_run_id=run_id,
+            created_at=ts,
             opening_db_built_at=min(
                 (d for d in (raw.tools.trivy_db_updated_at, raw.tools.grype_db_built_at) if d),
                 default=None,
@@ -371,7 +378,7 @@ def _upsert_finding(
     finding.classification_trace = cls.trace
     finding.unclassified_reason = cls.unclassified_reason
     finding.last_seen_run_id = run_id
-    finding.updated_at = utcnow()
+    finding.updated_at = ts
     if finding.state in _CLOSED_STATES:
         # Seen again after closure: that is a regression, recorded by the orchestrator, not here.
         pass

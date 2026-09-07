@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Work item #{{ wi.id }}{% endblock %}
+{% block content %}
+<h1>#{{ wi.id }} {{ wi.title }}</h1>
+<div class="cards">
+  <div class="card"><div class="label">Kind / group</div><div class="value" style="font-size:15px">{{ wi.kind.name }}</div><div class="sub mono">{{ wi.group_key }} · playbook {{ wi.kind.playbook_slug }}</div></div>
+  <div class="card"><div class="label">State</div><div class="value">{{ wi.state.value }}</div><div class="sub">{{ wi.verification_level.label }}{% if wi.human_resolution %} · {{ wi.human_resolution }}{% endif %}</div></div>
+  <div class="card"><div class="label">ACU</div><div class="value">{{ acus|num }} <span class="muted" style="font-size:13px">/ cap {{ wi.acu_cap }}</span></div><div class="sub">est. cost {{ cost|money }} · retries {{ wi.retries_used }}</div></div>
+  <div class="card"><div class="label">GitHub</div><div class="value" style="font-size:14px">{% if wi.issue_url %}<a href="{{ wi.issue_url }}">issue #{{ wi.issue_number }}</a>{% endif %}{% if wi.pr_url %} · <a href="{{ wi.pr_url }}">PR #{{ wi.pr_number }}</a>{% endif %}</div><div class="sub mono">head {{ wi.pr_head_sha|short }} · merge {{ wi.merge_sha|short }}</div></div>
+</div>
+{% if wi.blocked_reason %}<div class="banner"><strong>blocked_reason:</strong> {{ wi.blocked_reason }}</div>{% endif %}
+<h2>Timeline</h2>
+<table><tr><th>Created</th><th>Issue opened</th><th>PR opened</th><th>Merged</th><th>Verified</th></tr>
+<tr><td>{{ wi.created_at }}</td><td>{{ wi.issue_opened_at or '' }}</td><td>{{ wi.pr_opened_at or '' }}</td><td>{{ wi.merged_at or '' }}</td><td>{{ wi.verified_at or '' }}</td></tr></table>
+<h2>Member findings ({{ members|length }})</h2>
+{% with findings=members %}{% include "_findings_table.html" %}{% endwith %}
+<h2>Devin sessions</h2>
+<table><tr><th>Session</th><th>Status</th><th>Detail</th><th class="num">ACU</th><th class="num">Limit</th><th class="num">Msgs</th><th>PRs</th><th>Created</th><th>Finished</th></tr>
+{% for s in sessions %}<tr><td class="mono">{% if s.url %}<a href="{{ s.url }}">{{ s.devin_id }}</a>{% else %}{{ s.devin_id }}{% endif %}</td><td>{{ s.status }}</td><td>{{ s.status_detail or '' }}</td><td class="num">{{ s.acus_consumed|num }}</td><td class="num">{{ s.max_acu_limit }}</td><td class="num">{{ s.messages_sent }}</td><td class="mono">{{ s.pull_requests|map(attribute='url')|join(' ') }}</td><td class="muted">{{ s.created_at }}</td><td class="muted">{{ s.finished_at or '' }}</td></tr>
+{% if s.structured_output %}<tr><td colspan="9"><pre>{{ s.structured_output|tojson(indent=2) }}</pre></td></tr>{% endif %}
+{% else %}<tr><td colspan="9" class="muted">No sessions dispatched.</td></tr>{% endfor %}
+</table>
+{% if polls %}<h2>Session polls</h2>
+<table><tr><th>Polled</th><th>Status</th><th>Detail</th><th class="num">ACU</th><th>Decision</th><th>Reason</th></tr>
+{% for p in polls %}<tr><td class="muted">{{ p.polled_at }}</td><td>{{ p.status }}</td><td>{{ p.status_detail or '' }}</td><td class="num">{{ p.acus_consumed|num }}</td><td>{{ p.decision }}</td><td class="mono">{{ p.reason }}</td></tr>{% endfor %}
+</table>{% endif %}
+<h2>Pull requests</h2>
+<table><tr><th>PR</th><th>State</th><th>Head</th><th>Level</th><th>First head green</th><th>Diff policy</th><th>Review</th><th>Approved by</th></tr>
+{% for p in prs %}<tr><td><a href="{{ p.url }}">#{{ p.number }}</a> {{ p.head_branch }} → {{ p.base_branch }}</td><td>{{ p.state }}</td><td class="mono">{{ p.head_sha|short }}</td><td>{{ p.verification_level.label }}</td><td>{{ p.first_head_checks_green }}</td><td class="{{ 'ok' if p.diff_policy_ok else 'bad' }}">{{ p.diff_policy_ok }} {{ p.diff_policy_violations|join('; ') }}</td><td>{{ p.review_status or '' }} ({{ p.review_comment_count }})</td><td>{{ p.approved_by or '' }}</td></tr>
+{% else %}<tr><td colspan="8" class="muted">No pull request.</td></tr>{% endfor %}
+</table>
+{% if checks %}<h2>CI checks observed</h2>
+<table><tr><th>Head</th><th>Check</th><th>Status</th><th>Conclusion</th><th>Observed</th></tr>
+{% for c in checks %}<tr><td class="mono">{{ c.head_sha|short }}</td><td>{{ c.name }}</td><td>{{ c.status }}</td><td class="{{ 'ok' if c.conclusion == 'success' else ('bad' if c.conclusion else 'muted') }}">{{ c.conclusion or 'pending' }}</td><td class="muted">{{ c.observed_at }}</td></tr>{% endfor %}
+</table>{% endif %}
+<h2>Events ({{ events|length }})</h2>
+<table><tr><th>When</th><th>Actor</th><th>Entity</th><th>Event</th><th>Transition</th><th>Reason</th></tr>
+{% for e in events %}<tr><td class="muted">{{ e.ts.strftime('%Y-%m-%d %H:%M') }}</td><td>{{ e.actor }}</td><td>{{ e.entity_type }}:{{ e.entity_id }}</td><td>{{ e.event }}</td><td class="mono">{% if e.from_state or e.to_state %}{{ e.from_state }} → {{ e.to_state }}{% endif %}</td><td class="mono">{{ e.reason or '' }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

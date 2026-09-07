@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from hardening_loop.domain.enums import GateMode
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     max_dispatch_failures: int = Field(default=3, ge=1)
 
     replay_mode: bool = False
+
+    # Location of the committed `fixtures/` tree (baseline scan evidence, source snapshots).
+    # Defaults to the checkout root for an editable install; the image sets HL_REPO_ROOT=/app.
+    repo_root: Path = Path(__file__).resolve().parents[1]
+    upstream_master_sha: str | None = None
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = Field(default=8080, ge=1, le=65535)
+
+    @field_validator("acu_cost_usd", "upstream_master_sha", mode="before")
+    @classmethod
+    def _empty_env_is_unset(cls, value: object) -> object:
+        return None if isinstance(value, str) and value.strip() == "" else value
 
     @property
     def database_path(self) -> Path:
