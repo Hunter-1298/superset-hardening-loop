@@ -102,8 +102,8 @@ def _kind_label(value: object) -> str:
 
 def parse_kind(value: str | None) -> Kind | None:
     """`kind` query param: the enum number (`1`), the slug (`dependency_upgrade`) or
-    `unclassified` (returned as None). Anything else is a 422."""
-    if value is None or value == UNCLASSIFIED:
+    `unclassified` (returned as None). Blank means no filter; anything else is a 422."""
+    if not value or value == UNCLASSIFIED:
         return None
     try:
         return Kind(int(value)) if value.isdigit() else Kind[value]
@@ -115,8 +115,9 @@ def parse_kind(value: str | None) -> Kind | None:
 
 
 def parse_level(value: str | None) -> VerificationLevel | None:
-    """`level` query param: the number (`6`) or the name (`rescan_verified`). Else 422."""
-    if value is None or value == "":
+    """`level` query param: the number (`6`) or the name (`rescan_verified`). Blank means no
+    filter; anything else is a 422."""
+    if not value:
         return None
     try:
         return VerificationLevel(int(value)) if value.isdigit() else VerificationLevel[value]
@@ -433,6 +434,10 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
         layer: str | None = Query(default=None),
         run: int | None = Query(default=None),
     ) -> HTMLResponse:
+        kind = kind or None
+        state = state or None
+        severity = severity or None
+        layer = layer or None
         wanted = parse_kind(kind)
         with session_scope(engine) as db:
             stmt = select(Finding)
@@ -476,6 +481,8 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
         q: str | None = Query(default=None),
         queue: bool = Query(default=False),
     ) -> HTMLResponse:
+        state = state or None
+        severity = severity or None
         wanted = parse_kind(kind)
         wanted_level = parse_level(level)
         needle = (q or "").strip()

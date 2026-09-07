@@ -436,6 +436,14 @@ def test_work_item_filters_are_server_side(client: TestClient, engine: Engine) -
     html = client.get("/issues?state=needs_human&kind=3&q=x").text
     assert "Needs attention" in html and "Container hardening" in html
     assert "Search: <strong>x</strong>" in html
+    # submitting the form with every select on "Any" sends blank values: no filter, no 422
+    blank = "/issues?q=&state=&severity=&kind=&level="
+    assert ids(blank) == all_ids
+    assert 'id="f-queue" type="checkbox" name="queue" value="1"' in client.get(blank).text
+    assert ids("/issues?q=paramiko&state=&severity=&kind=&level=") == sorted(paramiko)
+    assert ids("/issues?queue=1&state=&severity=&kind=&level=") == sorted(queue)
+    findings_all = client.get("/findings").text.count("<tr")
+    assert client.get("/findings?severity=&state=&kind=&layer=").text.count("<tr") == findings_all
     # unknown state/severity values simply match nothing; kind/level aliases are validated
     for bogus in ("/issues?state=bogus", "/issues?severity=bogus"):
         r = client.get(bogus)

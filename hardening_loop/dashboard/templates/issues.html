@@ -39,7 +39,10 @@
       {% for lv in verification_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|level_label).text }}</option>{% endfor %}
     </select>
   </div>
-  {% if filters.queue %}<input type="hidden" name="queue" value="1">{% endif %}
+  <div class="field check">
+    <input id="f-queue" type="checkbox" name="queue" value="1"{% if filters.queue %} checked{% endif %}>
+    <label for="f-queue">Needs a person</label>
+  </div>
   <div class="actions">
     <button class="btn btn-primary" type="submit">Apply</button>
     {% if active %}<a class="btn" href="/issues">Clear</a>{% endif %}
