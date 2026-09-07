@@ -51,6 +51,23 @@ def _kind_label(value: object) -> str:
         return str(value)
 
 
+UNCLASSIFIED = "unclassified"
+
+
+def parse_kind(value: str | None) -> Kind | None:
+    """`kind` query param: the enum number (`1`), the slug (`dependency_upgrade`) or
+    `unclassified` (returned as None). Anything else is a 422."""
+    if value is None or value == UNCLASSIFIED:
+        return None
+    try:
+        return Kind(int(value)) if value.isdigit() else Kind[value]
+    except (ValueError, KeyError) as exc:
+        choices = ", ".join([*(str(k.value) for k in Kind), *(k.slug for k in Kind), UNCLASSIFIED])
+        raise HTTPException(
+            status_code=422, detail=f"unknown kind {value!r}; one of {choices}"
+        ) from exc
+
+
 def _level_label(value: object) -> str:
     try:
         return VerificationLevel(int(str(value))).label
@@ -199,16 +216,19 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     @app.get("/findings", response_class=HTMLResponse)
     def findings_page(
         request: Request,
-        kind: int | None = Query(default=None),
+        kind: str | None = Query(default=None),
         state: str | None = Query(default=None),
         severity: str | None = Query(default=None),
         layer: str | None = Query(default=None),
         run: int | None = Query(default=None),
     ) -> HTMLResponse:
+        wanted = parse_kind(kind)
         with session_scope(engine) as db:
             stmt = select(Finding)
             if kind is not None:
-                stmt = stmt.where(Finding.kind == Kind(kind))
+                stmt = stmt.where(
+                    col(Finding.kind).is_(None) if wanted is None else Finding.kind == wanted
+                )
             if state is not None:
                 stmt = stmt.where(col(Finding.state) == state)
             if severity is not None:
@@ -237,14 +257,15 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     def issues_page(
         request: Request,
         state: str | None = Query(default=None),
-        kind: int | None = Query(default=None),
+        kind: str | None = Query(default=None),
     ) -> HTMLResponse:
+        wanted = parse_kind(kind)
         with session_scope(engine) as db:
             stmt = select(WorkItem)
             if state is not None:
                 stmt = stmt.where(col(WorkItem.state) == state)
-            if kind is not None:
-                stmt = stmt.where(WorkItem.kind == Kind(kind))
+            if wanted is not None:
+                stmt = stmt.where(WorkItem.kind == wanted)
             items = db.exec(stmt.order_by(col(WorkItem.id).desc()).limit(MAX_ROWS)).all()
             sessions = db.exec(select(Session)).all()
             acu_by_wi: dict[int, float] = {}
@@ -392,14 +413,17 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
 
     @app.get("/api/findings")
     def api_findings(
-        kind: int | None = Query(default=None),
+        kind: str | None = Query(default=None),
         state: str | None = Query(default=None),
         run: int | None = Query(default=None),
     ) -> list[dict[str, Any]]:
+        wanted = parse_kind(kind)
         with session_scope(engine) as db:
             stmt = select(Finding).order_by(col(Finding.id))
             if kind is not None:
-                stmt = stmt.where(Finding.kind == Kind(kind))
+                stmt = stmt.where(
+                    col(Finding.kind).is_(None) if wanted is None else Finding.kind == wanted
+                )
             if state is not None:
                 stmt = stmt.where(col(Finding.state) == state)
             if run is not None:

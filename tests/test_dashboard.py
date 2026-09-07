@@ -3,6 +3,7 @@ replay `DEMO` database (real orchestrator, fake GitHub/Devin, zero network)."""
 
 from __future__ import annotations
 
+import re
 import statistics
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -179,7 +180,10 @@ PAGES = [
     "/runs/1",
     "/findings",
     "/findings?kind=1&state=fixed",
+    "/findings?kind=dependency_upgrade",
+    "/findings?kind=unclassified",
     "/issues",
+    "/issues?kind=helm_deploy_config",
     "/issues?state=needs_human",
     "/issues/2",
     "/prs",
@@ -212,6 +216,18 @@ def test_overview_shows_required_metrics(client: TestClient, metrics: Metrics) -
         assert label in html
     assert f">{metrics.open_high_critical}<" in html
     assert "80%" in html
+
+
+def test_overview_kind_links_resolve(client: TestClient) -> None:
+    html = client.get("/").text
+    hrefs = re.findall(r'href="(/findings\?kind=[^"]+)"', html)
+    assert hrefs, "overview should link each kind row to the findings page"
+    for href in hrefs:
+        assert client.get(href).status_code == 200, href
+    by_slug = client.get("/api/findings?kind=helm_deploy_config").json()
+    assert by_slug == client.get("/api/findings?kind=5").json() and by_slug
+    r = client.get("/findings?kind=bogus")
+    assert r.status_code == 422 and "unknown kind" in r.json()["detail"]
 
 
 def test_issue_page_shows_blocked_reason_and_events(client: TestClient) -> None:
