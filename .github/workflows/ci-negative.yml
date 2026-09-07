@@ -1,0 +1,154 @@
+name: ci-negative
+
+# Operator-triggered only. Never part of controller CI: each case pushes a throwaway branch to the
+# fork, opens a draft PR there, waits for the fork's `security-scan` checks and asserts they fail
+# (or, for dependency-regression, stay green in report mode while counts rise). Branches and PRs
+# are always closed and deleted afterwards.
+#
+# Requires the `FORK_TOKEN` secret: a fine-grained PAT scoped to Hunter-1298/superset with
+# Contents: read/write, Pull requests: read/write, Actions: read, Metadata: read.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "space-separated cases (broken-build broken-runtime dependency-regression ignore-file unapproved-vex) or 'all'"
+        default: all
+        required: true
+      fork_repo:
+        description: "fork to test against (never apache/superset)"
+        default: Hunter-1298/superset
+        required: true
+      base_branch:
+        default: main
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-negative
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      cases: ${{ steps.plan.outputs.cases }}
+    steps:
+      - id: plan
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.cases }}" = "all" ]; then
+            cases='["broken-build","broken-runtime","dependency-regression","ignore-file","unapproved-vex"]'
+          else
+            cases=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1].split()))' "${{ inputs.cases }}")
+          fi
+          echo "cases=$cases" >> "$GITHUB_OUTPUT"
+          test "${{ inputs.fork_repo }}" != "apache/superset"
+
+  case:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        case: ${{ fromJSON(needs.plan.outputs.cases) }}
+    env:
+      FORK_REPO: ${{ inputs.fork_repo }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      BRANCH: ci-negative/${{ matrix.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: controller
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: controller/pyproject.toml
+      - run: pip install -e "./controller"
+
+      - name: checkout fork base branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FORK_REPO }}
+          ref: ${{ env.BASE_BRANCH }}
+          token: ${{ secrets.FORK_TOKEN }}
+          path: superset
+          fetch-depth: 1
+
+      - name: apply mutation (${{ matrix.case }})
+        id: mutate
+        working-directory: superset
+        run: |
+          set -euo pipefail
+          hardening-loop ci-negative mutate "${{ matrix.case }}" --checkout . --changed-out /tmp/changed.txt
+          git diff --stat
+
+      - name: push throwaway branch
+        id: push
+        working-directory: superset
+        run: |
+          set -euo pipefail
+          git config user.name "hardening-loop ci-negative"
+          git config user.email "ci-negative@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          xargs -a /tmp/changed.txt git add --
+          git commit -m "ci-negative: ${{ matrix.case }} (expected to fail checks; auto-closed)"
+          git push origin "HEAD:refs/heads/$BRANCH"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: open draft PR, wait for fork checks, evaluate, clean up
+        env:
+          HL_GITHUB_TOKEN: ${{ secrets.FORK_TOKEN }}
+        run: |
+          hardening-loop ci-negative run "${{ matrix.case }}" \
+            --repo "$FORK_REPO" --base "$BASE_BRANCH" \
+            --branch "$BRANCH" --head-sha "${{ steps.push.outputs.head_sha }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --out "reports/${{ matrix.case }}/ci-negative-report.json" \
+            --work-dir "reports/${{ matrix.case }}/work"
+
+      - name: make sure the branch is gone even if the driver crashed
+        if: always() && steps.push.outcome == 'success'
+        working-directory: superset
+        run: git push origin --delete "$BRANCH" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-negative-${{ matrix.case }}
+          path: reports/${{ matrix.case }}/ci-negative-report.json
+          if-no-files-found: warn
+
+  summary:
+    needs: case
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ci-negative-*
+          path: reports
+          merge-multiple: false
+      - name: aggregate
+        run: |
+          python3 - <<'PY'
+          import glob, json, os
+          rows = []
+          for path in sorted(glob.glob("reports/*/ci-negative-report.json")):
+              r = json.load(open(path))
+              rows.append(r)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("## ci-negative\n\n| case | verdict | PR |\n|---|---|---|\n")
+              for r in rows:
+                  fh.write(f"| {r['case']} | {'PASS' if r['passed'] else 'FAIL'} | {r['pr_url']} |\n")
+          json.dump({"schema": "hardening-loop/ci-negative-summary/v1", "cases": rows}, open("ci-negative-report.json", "w"), indent=2)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-negative-report
+          path: ci-negative-report.json

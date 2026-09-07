@@ -100,7 +100,11 @@ def test_load_scan_job_carries_validated_approval(tmp_path: Path) -> None:
     assert ev.vuln_ids == {VULN}
     assert job.files[ev.evidence_file] == ev.sha256
     doc = job.vex_documents[0]
-    assert doc["x-approval"] == {"issue_url": ISSUE_URL, "approved_by": "hayden1298"}
+    assert doc["x-approval"] == {
+        "issue_url": ISSUE_URL,
+        "approved_by": "hayden1298",
+        "approved_at": "2026-09-01T12:00:00Z",
+    }
     assert doc["x-evidence"] == {
         "source_path": ev.source_path,
         "evidence_file": ev.evidence_file,
