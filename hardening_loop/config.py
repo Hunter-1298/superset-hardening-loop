@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     acu_cost_usd: float | None = None
     approver_logins: list[str] = ["Hunter-1298"]
     devin_review_status_context: str | None = None  # discovered by `doctor`, never assumed
+    # Check names that must be green on the PR head. Empty = every check run present must pass.
+    required_check_names: list[str] = []
+    max_dispatch_failures: int = Field(default=3, ge=1)
 
     replay_mode: bool = False
 

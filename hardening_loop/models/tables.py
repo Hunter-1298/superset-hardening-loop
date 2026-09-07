@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Column, Index, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Index, UniqueConstraint
+from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
 from hardening_loop.domain.enums import (
@@ -30,11 +31,30 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class UTCDateTime(TypeDecorator[datetime]):
+    """SQLite drops tzinfo; store UTC and re-attach it on load so arithmetic never mixes kinds."""
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value
+        return value.astimezone(UTC).replace(tzinfo=None)
+
+    def process_result_value(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
 class SchemaVersion(SQLModel, table=True):
     __tablename__ = "schema_version"
     id: int | None = Field(default=None, primary_key=True)
     version: int
-    applied_at: datetime = Field(default_factory=utcnow)
+    applied_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class ScanRun(SQLModel, table=True):
@@ -54,9 +74,9 @@ class ScanRun(SQLModel, table=True):
     scan_gate_mode: GateMode = GateMode.report
     vex_documents: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     status: ScanRunStatus = ScanRunStatus.incomplete
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    ingested_at: datetime = Field(default_factory=utcnow)
+    started_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    ingested_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     is_baseline: bool = False
 
 
@@ -72,9 +92,9 @@ class ScanJob(SQLModel, table=True):
     layer_scope: str  # "image" | "config" | "runtime"
     success: bool
     tool_version: str | None = None
-    db_built_at: datetime | None = None
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
+    db_built_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    started_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     artifact_path: str | None = None
     artifact_sha256: str | None = None
     counts: dict[str, int] = Field(default_factory=dict, sa_column=Column(JSON))
@@ -88,7 +108,7 @@ class Evidence(SQLModel, table=True):
     path: str
     sha256: str
     url: str | None = None
-    created_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class Finding(SQLModel, table=True):
@@ -127,11 +147,11 @@ class Finding(SQLModel, table=True):
     state: FindingState = FindingState.open
     first_seen_run_id: int = Field(foreign_key="scan_runs.id")
     last_seen_run_id: int = Field(foreign_key="scan_runs.id")
-    opening_db_built_at: datetime | None = None
+    opening_db_built_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     work_item_id: int | None = Field(default=None, foreign_key="work_items.id", index=True)
     closed_by_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class Sighting(SQLModel, table=True):
@@ -178,13 +198,15 @@ class WorkItem(SQLModel, table=True):
     merge_sha: str | None = None
     verification_level: VerificationLevel = VerificationLevel.none
     blocked_reason: str | None = None
+    human_resolution: str | None = None  # disposition:approved | disagreement:resolved
+    dispatch_failures: int = 0
     regression_of_work_item_id: int | None = Field(default=None, foreign_key="work_items.id")
-    created_at: datetime = Field(default_factory=utcnow)
-    updated_at: datetime = Field(default_factory=utcnow)
-    issue_opened_at: datetime | None = None
-    pr_opened_at: datetime | None = None
-    merged_at: datetime | None = None
-    verified_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    issue_opened_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    pr_opened_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    merged_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    verified_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
 
 
 class Session(SQLModel, table=True):
@@ -201,16 +223,16 @@ class Session(SQLModel, table=True):
     structured_output: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     pull_requests: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
     messages_sent: int = 0
-    created_at: datetime = Field(default_factory=utcnow)
-    last_polled_at: datetime | None = None
-    finished_at: datetime | None = None
+    created_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    last_polled_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
 
 
 class SessionPoll(SQLModel, table=True):
     __tablename__ = "session_polls"
     id: int | None = Field(default=None, primary_key=True)
     session_id: int = Field(foreign_key="sessions.id", index=True)
-    polled_at: datetime = Field(default_factory=utcnow)
+    polled_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     status: str
     status_detail: str | None = None
     acus_consumed: float
@@ -238,9 +260,9 @@ class PullRequest(SQLModel, table=True):
     review_status: str | None = None
     review_comment_count: int = 0
     approved_by: str | None = None
-    opened_at: datetime = Field(default_factory=utcnow)
-    merged_at: datetime | None = None
-    updated_at: datetime = Field(default_factory=utcnow)
+    opened_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    merged_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+    updated_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class PRCheck(SQLModel, table=True):
@@ -253,7 +275,7 @@ class PRCheck(SQLModel, table=True):
     status: str  # queued | in_progress | completed
     conclusion: str | None = None
     url: str | None = None
-    observed_at: datetime = Field(default_factory=utcnow)
+    observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class Event(SQLModel, table=True):
@@ -261,7 +283,7 @@ class Event(SQLModel, table=True):
 
     __tablename__ = "events"
     id: int | None = Field(default=None, primary_key=True)
-    ts: datetime = Field(default_factory=utcnow, index=True)
+    ts: datetime = Field(default_factory=utcnow, index=True, sa_type=UTCDateTime)
     actor: str  # controller | devin | human:<login> | ci | scanner
     entity_type: str  # work_item | finding | session | pull_request | scan_run
     entity_id: int = Field(index=True)
@@ -282,13 +304,13 @@ class NegativeRun(SQLModel, table=True):
     expected: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     observed: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     passed: bool
-    ran_at: datetime = Field(default_factory=utcnow)
+    ran_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class RunReport(SQLModel, table=True):
     __tablename__ = "run_reports"
     id: int | None = Field(default=None, primary_key=True)
-    generated_at: datetime = Field(default_factory=utcnow)
+    generated_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     baseline_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
     latest_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
     upstream_master_sha: str | None = None
@@ -300,6 +322,6 @@ class FixtureMeta(SQLModel, table=True):
     __tablename__ = "fixtures_meta"
     id: int | None = Field(default=None, primary_key=True)
     baseline_sha: str
-    captured_at: datetime | None = None
+    captured_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     manifest: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     sha256sums_verified: bool = False

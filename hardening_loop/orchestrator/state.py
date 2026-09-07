@@ -36,6 +36,7 @@ class WorkItemEvent(StrEnum):
     human_retry = "human_retry"
     human_abandoned = "human_abandoned"
     human_resolved = "human_resolved"  # e.g. disagreement:resolved, disposition:approved
+    superseded = "superseded"  # every member finding closed before any session ran
 
 
 class InvalidTransitionError(Exception):
@@ -52,6 +53,8 @@ WORK_ITEM_TRANSITIONS: dict[tuple[WorkItemState, WorkItemEvent], WorkItemState] 
     (_W.queued, _E.dispatch_approved): _W.queued,
     (_W.queued, _E.issue_created): _W.issue_open,
     (_W.queued, _E.human_abandoned): _W.abandoned,
+    (_W.queued, _E.superseded): _W.abandoned,
+    (_W.issue_open, _E.superseded): _W.abandoned,
     (_W.issue_open, _E.dispatch_started): _W.dispatching,
     (_W.issue_open, _E.human_abandoned): _W.abandoned,
     (_W.issue_open, _E.blocked): _W.needs_human,

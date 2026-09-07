@@ -60,7 +60,7 @@ class ScanJobEvidence(BaseModel):
     started_at: datetime
     finished_at: datetime
     files: dict[str, str]
-    vex_documents: list[dict[str, str]]
+    vex_documents: list[dict[str, Any]]
     tools: ToolVersions
     sbom: list[SbomComponent]
     trivy_vulns: list[RawVuln]
@@ -68,6 +68,15 @@ class ScanJobEvidence(BaseModel):
     image_config: list[RawConfigFinding]
     iac_config: list[RawConfigFinding]
     raw_reports: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Per-job success, keyed "trivy" | "grype" | "config". A verified evidence directory always
+    # means success; replay and live ingestion set False for jobs that did not complete.
+    job_success: dict[str, bool] = Field(
+        default_factory=lambda: {"trivy": True, "grype": True, "config": True}
+    )
+
+    @property
+    def all_jobs_succeeded(self) -> bool:
+        return all(self.job_success.values())
 
     @property
     def vulns(self) -> list[RawVuln]:
@@ -79,7 +88,7 @@ class ScanJobEvidence(BaseModel):
 
     @property
     def scanners_present(self) -> set[Scanner]:
-        return {Scanner.trivy, Scanner.grype}
+        return {s for s in (Scanner.trivy, Scanner.grype) if self.job_success.get(s.value, False)}
 
     def evidence_ref(self, name: str) -> str:
         return f"{self.path.name}/{name}@sha256:{self.files[name]}"
@@ -214,3 +223,15 @@ def load_baseline(path: Path) -> BaselineManifest:
         ci_layer_delta=manifest["ci_layer_delta"],
         jobs=jobs,
     )
+
+
+def load_source_pyproject(root: Path, source_sha: str) -> str:
+    """Committed, checksum-verified copy of `pyproject.toml` at `source_sha` (fixtures/source/);
+    the upper-bound context for classification must be reproducible without a Superset checkout."""
+    path = root / "fixtures" / "source" / source_sha / "pyproject.toml"
+    sums = path.with_name("SHA256SUMS").read_text().split()
+    expected = dict(zip(sums[1::2], sums[0::2], strict=True))
+    actual = sha256_file(path)
+    if expected.get("pyproject.toml") != actual:
+        raise EvidenceError(f"{path}: checksum mismatch ({actual})")
+    return path.read_text()

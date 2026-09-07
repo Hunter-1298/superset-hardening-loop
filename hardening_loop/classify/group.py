@@ -6,43 +6,82 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from hardening_loop.classify.rules import Classification
-from hardening_loop.domain.enums import Kind, Layer, Risk, Severity
+from hardening_loop.domain.enums import Ecosystem, Kind, Layer, Risk, Severity
 from hardening_loop.ingest.normalize import NormalizedFinding
+
+CONFIG_LAYERS: frozenset[Layer] = frozenset({Layer.dockerfile, Layer.helm, Layer.compose})
+
+
+def group_key_for(
+    kind: Kind | None,
+    *,
+    pkg_name: str | None,
+    ecosystem: Ecosystem,
+    layer: Layer,
+    dedupe_key: str,
+) -> str:
+    """Grouping key from plain attributes (shared by normalized findings and DB rows)."""
+    is_config = layer in CONFIG_LAYERS
+    match kind:
+        case Kind.dependency_upgrade:
+            return f"pypi:{pkg_name}"
+        case Kind.no_fix_reachability:
+            return f"nofix:{ecosystem}:{pkg_name}"
+        case Kind.container_hardening:
+            return "container:dockerfile" if is_config else f"container:{layer}-packages"
+        case Kind.scanner_disagreement:
+            return f"disagreement:{ecosystem}:{pkg_name}"
+        case Kind.helm_deploy_config:
+            return f"deploy:{layer}"
+        case None:
+            return f"unclassified:{dedupe_key}"
 
 
 def group_key(f: NormalizedFinding, c: Classification) -> str:
-    match c.kind:
+    return group_key_for(
+        c.kind,
+        pkg_name=f.pkg_name,
+        ecosystem=f.ecosystem,
+        layer=f.layer,
+        dedupe_key=f.dedupe_key,
+    )
+
+
+def title_for(
+    kind: Kind,
+    *,
+    vuln_ids: list[str],
+    pkg_name: str | None,
+    pkg_version: str | None,
+    layer: Layer,
+) -> str:
+    ids = sorted(set(vuln_ids))
+    shown = ", ".join(ids[:4]) + (f" (+{len(ids) - 4} more)" if len(ids) > 4 else "")
+    is_config = layer in CONFIG_LAYERS
+    match kind:
         case Kind.dependency_upgrade:
-            return f"pypi:{f.pkg_name}"
+            return f"Upgrade {pkg_name} {pkg_version}: {shown}"
         case Kind.no_fix_reachability:
-            return f"nofix:{f.ecosystem}:{f.pkg_name}"
+            return f"Reachability analysis / OpenVEX for {pkg_name}: {shown}"
         case Kind.container_hardening:
-            return "container:dockerfile" if f.is_config else f"container:{f.layer}-packages"
+            if is_config:
+                return f"Container hardening (Dockerfile): {shown}"
+            return f"Container hardening ({layer} packages): {shown}"
         case Kind.scanner_disagreement:
-            return f"disagreement:{f.ecosystem}:{f.pkg_name}"
+            return f"Scanner disagreement on {pkg_name}: {shown}"
         case Kind.helm_deploy_config:
-            return f"deploy:{f.layer}"
-        case None:
-            return f"unclassified:{f.dedupe_key}"
+            return f"Deployment security configuration ({layer}): {shown}"
 
 
 def group_title(kind: Kind, key: str, members: list[NormalizedFinding]) -> str:
-    ids = sorted({m.vuln_id for m in members})
-    shown = ", ".join(ids[:4]) + (f" (+{len(ids) - 4} more)" if len(ids) > 4 else "")
     first = members[0]
-    match kind:
-        case Kind.dependency_upgrade:
-            return f"Upgrade {first.pkg_name} {first.pkg_version}: {shown}"
-        case Kind.no_fix_reachability:
-            return f"Reachability analysis / OpenVEX for {first.pkg_name}: {shown}"
-        case Kind.container_hardening:
-            if first.is_config:
-                return f"Container hardening (Dockerfile): {shown}"
-            return f"Container hardening ({first.layer} packages): {shown}"
-        case Kind.scanner_disagreement:
-            return f"Scanner disagreement on {first.pkg_name}: {shown}"
-        case Kind.helm_deploy_config:
-            return f"Deployment security configuration ({first.layer}): {shown}"
+    return title_for(
+        kind,
+        vuln_ids=[m.vuln_id for m in members],
+        pkg_name=first.pkg_name,
+        pkg_version=first.pkg_version,
+        layer=first.layer,
+    )
 
 
 @dataclass

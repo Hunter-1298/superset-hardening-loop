@@ -110,7 +110,6 @@ def ingest_run(
     jobs: dict[str, ScanJobEvidence],
     *,
     upper_bounds: dict[str, SpecifierSet],
-    all_jobs_succeeded: bool = True,
 ) -> IngestResult:
     existing = db.exec(
         select(ScanRun).where(ScanRun.external_run_id == meta.external_run_id)
@@ -125,6 +124,7 @@ def ingest_run(
         raise ValueError(f"expected exactly one raw job per run, got {len(raw_jobs)}")
     raw = raw_jobs[0]
     policy = policy_jobs[0] if policy_jobs else None
+    all_jobs_succeeded = all(j.all_jobs_succeeded for j in jobs.values())
 
     tools = {
         "syft": raw.tools.syft,
@@ -167,7 +167,10 @@ def ingest_run(
     # Findings are opened from raw evidence.
     normalized = normalize(raw.vulns, raw.configs)
     ctx = ClassificationContext(
-        scanner_job_success={Scanner.trivy: True, Scanner.grype: True},
+        scanner_job_success={
+            Scanner.trivy: raw.job_success.get("trivy", False),
+            Scanner.grype: raw.job_success.get("grype", False),
+        },
         upper_bounds=upper_bounds,
     )
     policy_keys: set[str] = set()
@@ -272,13 +275,13 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
             mode=job.mode,
             image_target=job.image_target,
             layer_scope=job.layer_scope,
-            success=True,
+            success=job.job_success.get("trivy", False),
             tool_version=job.tools.trivy,
             db_built_at=job.tools.trivy_db_updated_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
             artifact_path=str(job.path / "trivy-vuln.json"),
-            artifact_sha256=job.files["trivy-vuln.json"],
+            artifact_sha256=job.files.get("trivy-vuln.json"),
             counts=_severity_counts(job.trivy_vulns),
         )
     )
@@ -290,13 +293,13 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
             mode=job.mode,
             image_target=job.image_target,
             layer_scope=job.layer_scope,
-            success=True,
+            success=job.job_success.get("grype", False),
             tool_version=job.tools.grype,
             db_built_at=job.tools.grype_db_built_at,
             started_at=job.started_at,
             finished_at=job.finished_at,
             artifact_path=str(job.path / "grype-vuln.json"),
-            artifact_sha256=job.files["grype-vuln.json"],
+            artifact_sha256=job.files.get("grype-vuln.json"),
             counts=_severity_counts(job.grype_vulns),
         )
     )
@@ -308,12 +311,12 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
             mode=job.mode,
             image_target=job.image_target,
             layer_scope="config",
-            success=True,
+            success=job.job_success.get("config", False),
             tool_version=job.tools.trivy,
             started_at=job.started_at,
             finished_at=job.finished_at,
             artifact_path=str(job.path / "trivy-config.json"),
-            artifact_sha256=job.files["trivy-config.json"],
+            artifact_sha256=job.files.get("trivy-config.json"),
             counts={
                 **_severity_counts(job.configs),
                 "image_config": len(job.image_config),
