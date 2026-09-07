@@ -23,6 +23,8 @@ from hardening_loop.ingest.vex import ApprovedVexDocument, load_vex_documents
 
 JOB_SCHEMA = "hardening-loop/scan-job/v1"
 MANIFEST_SCHEMA = "hardening-loop/baseline-manifest/v1"
+SCAN_MANIFEST_SCHEMA = "hardening-loop/scan-manifest/v1"
+MANIFEST_SCHEMAS = frozenset({MANIFEST_SCHEMA, SCAN_MANIFEST_SCHEMA})
 
 
 class EvidenceError(ValueError):
@@ -204,6 +206,8 @@ class BaselineManifest(BaseModel):
     images: dict[str, dict[str, Any]]
     ci_layer_delta: dict[str, Any]
     jobs: dict[str, ScanJobEvidence]
+    run: dict[str, Any] = Field(default_factory=dict)  # GitHub Actions run metadata, if any
+    gates: dict[str, Any] = Field(default_factory=dict)  # per policy job gate.json, if any
 
     @property
     def lean_image_id(self) -> str:
@@ -212,7 +216,7 @@ class BaselineManifest(BaseModel):
 
 def load_baseline(path: Path) -> BaselineManifest:
     manifest = _load_json(path / "manifest.json")
-    if manifest.get("schema") != MANIFEST_SCHEMA:
+    if manifest.get("schema") not in MANIFEST_SCHEMAS:
         raise EvidenceError(f"{path}: unexpected manifest schema {manifest.get('schema')!r}")
     _verify_files(path, dict(manifest["files"]))
     sums = (path / "SHA256SUMS").read_text().splitlines()
@@ -245,6 +249,8 @@ def load_baseline(path: Path) -> BaselineManifest:
         images=manifest["images"],
         ci_layer_delta=manifest["ci_layer_delta"],
         jobs=jobs,
+        run=dict(manifest.get("run") or {}),
+        gates=dict(manifest.get("gates") or {}),
     )
 
 
