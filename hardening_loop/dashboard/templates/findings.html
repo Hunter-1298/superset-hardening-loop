@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Findings · Superset hardening loop{% endblock %}
+{% block content %}
+<h1>Findings <span class="muted">({{ findings|length }})</span></h1>
+<p class="filters">Filters: {% for k, v in filters.items() if v is not none %}<span class="pill">{{ k }}={{ v }}</span> {% endfor %}<a href="/findings">clear</a>
+ · kind: {% for k in range(1, 6) %}<a href="/findings?kind={{ k }}">{{ k|kind }}</a> {% endfor %}<a href="/findings?kind=unclassified">unclassified</a>
+ · <a href="/findings?state=unclassified">unclassified</a> <a href="/findings?state=regression">regression</a> <a href="/findings?state=human_blocked">human_blocked</a></p>
+{% include "_findings_table.html" %}
+{% endblock %}

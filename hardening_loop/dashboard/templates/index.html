@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Overview · Superset hardening loop{% endblock %}
+{% block content %}
+<h1>Overview</h1>
+<div class="cards">
+  <div class="card"><div class="label">Open HIGH/CRITICAL</div><div class="value {{ 'bad' if m.open_high_critical else 'ok' }}">{{ m.open_high_critical }}</div><div class="sub">raw findings not in a closing state</div></div>
+  <div class="card"><div class="label">Gate ready for enforce</div><div class="value {{ 'ok' if m.gate_ready_for_enforce else 'warn' }}">{{ 'yes' if m.gate_ready_for_enforce else ('no' if m.gate_ready_for_enforce is not none else 'n/a') }}</div><div class="sub">policy HIGH/CRITICAL on latest {{ branch }} run == 0</div></div>
+  <div class="card"><div class="label">Active sessions</div><div class="value">{{ m.active_sessions }}</div><div class="sub">needs-human: {{ m.needs_human }} · retries: {{ m.retries_total }}</div></div>
+  <div class="card"><div class="label">First-try success</div><div class="value">{{ m.first_try_overall.rate|pct }}</div><div class="sub">{{ m.first_try_overall.succeeded }}/{{ m.first_try_overall.attempted }} PRs green on first head</div></div>
+  <div class="card"><div class="label">Remediation time</div><div class="value">{{ m.timing.median_hours|num(1) }} h</div><div class="sub">median · p90 {{ m.timing.p90_hours|num(1) }} h · n={{ m.timing.verified_count }}</div></div>
+  <div class="card"><div class="label">ACU per verified issue</div><div class="value">{{ m.cost.acu_per_verified_issue|num }}</div><div class="sub">total {{ m.cost.acu_total|num }} ACU · {{ m.cost.verified_items }} verified</div></div>
+  <div class="card"><div class="label">Est. cost per verified issue</div><div class="value">{{ m.cost.estimated_cost_per_verified_issue_usd|money }}</div><div class="sub">{% if m.cost.acu_cost_usd %}total {{ m.cost.estimated_cost_total_usd|money }} @ ${{ m.cost.acu_cost_usd }}/ACU{% else %}set HL_ACU_COST_USD to price ACUs{% endif %}</div></div>
+</div>
+
+<div class="grid2">
+<div>
+<h2>Issues by state</h2>
+<table><tr><th>State</th><th class="num">Count</th></tr>
+{% for s, n in m.issues_by_state|dictsort %}<tr><td><a href="/issues?state={{ s }}">{{ s }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}
+</table>
+<h2>Findings by kind</h2>
+<table><tr><th>Kind</th><th class="num">Findings</th><th class="num">First-try</th><th class="num">Median h</th><th class="num">P90 h</th></tr>
+{% for k, n in m.findings_by_kind|dictsort %}
+<tr><td><a href="/findings?kind={{ k }}">{{ k|kind }}</a></td><td class="num">{{ n }}</td>
+<td class="num">{{ m.first_try_by_kind[k].rate|pct if k in m.first_try_by_kind else 'n/a' }}</td>
+<td class="num">{{ m.timing_by_kind[k].median_hours|num(1) if k in m.timing_by_kind else 'n/a' }}</td>
+<td class="num">{{ m.timing_by_kind[k].p90_hours|num(1) if k in m.timing_by_kind else 'n/a' }}</td></tr>
+{% endfor %}
+</table>
+</div>
+<div>
+<h2>Findings by layer / scanner / state</h2>
+<table><tr><th>Layer</th><th class="num">Count</th></tr>{% for k, n in m.findings_by_layer|dictsort %}<tr><td><a href="/findings?layer={{ k }}">{{ k }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}</table>
+<br>
+<table><tr><th>Scanner</th><th class="num">Count</th></tr>{% for k, n in m.findings_by_scanner|dictsort %}<tr><td>{{ k }}</td><td class="num">{{ n }}</td></tr>{% endfor %}</table>
+<br>
+<table><tr><th>Finding state</th><th class="num">Count</th></tr>{% for k, n in m.findings_by_state|dictsort %}<tr><td><a href="/findings?state={{ k }}">{{ k }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}</table>
+</div>
+</div>
+
+<h2>Throughput (per day)</h2>
+<table><tr><th>Day</th><th class="num">Sessions started</th><th class="num">PRs opened</th><th class="num">Verified</th></tr>
+{% set days = (m.throughput.sessions_started_per_day.keys()|list + m.throughput.prs_opened_per_day.keys()|list + m.throughput.verified_per_day.keys()|list)|unique|sort %}
+{% for d in days %}<tr><td>{{ d }}</td><td class="num">{{ m.throughput.sessions_started_per_day.get(d, 0) }}</td><td class="num">{{ m.throughput.prs_opened_per_day.get(d, 0) }}</td><td class="num">{{ m.throughput.verified_per_day.get(d, 0) }}</td></tr>{% endfor %}
+</table>
+
+<h2>Recent scan runs</h2>
+{% include "_runs_table.html" %}
+{% endblock %}

@@ -1,0 +1,32 @@
+# No-spend demo:
+#   docker compose run --rm replay      # replay R0-R16, N1-N5, DEMO into the hl-data volume, zero network
+#   docker compose up dashboard         # read-only dashboard on http://localhost:8080
+#   docker compose cp dashboard:/data/replay/replay-report.md .
+# `network_mode: none` is an OS-level guard on top of the in-process NetworkGuard. The data volume
+# is owned by the unprivileged image user (uid 10001) and mounted read-only into the dashboard.
+services:
+  replay:
+    build: .
+    network_mode: none
+    command: ["replay", "--out", "/data/replay"]
+    volumes:
+      - hl-data:/data
+
+  dashboard:
+    build: .
+    command: ["serve", "--replay"]
+    environment:
+      HL_DATA_DIR: /data/replay
+      HL_DATABASE_FILE: replay.sqlite3
+      HL_ACU_COST_USD: ${HL_ACU_COST_USD:-}
+      HL_UPSTREAM_MASTER_SHA: ${HL_UPSTREAM_MASTER_SHA:-c03f3441bd565b9fd5f082d0b875c467eeae441c}
+    ports:
+      - "8080:8080"
+    volumes:
+      - hl-data:/data:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  hl-data:

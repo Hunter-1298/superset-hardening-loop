@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Issues · Superset hardening loop{% endblock %}
+{% block content %}
+<h1>Work items / issues <span class="muted">({{ items|length }})</span></h1>
+<p class="filters">Filters: {% for k, v in filters.items() if v is not none %}<span class="pill">{{ k }}={{ v }}</span> {% endfor %}<a href="/issues">clear</a>
+ · <a href="/issues?state=needs_human">needs_human</a> <a href="/issues?state=ready_for_human">ready_for_human</a> <a href="/issues?state=verified">verified</a></p>
+<table>
+<tr><th>#</th><th>Kind</th><th>Group</th><th>Severity</th><th>State</th><th>Verification</th><th class="num">ACU / cap</th><th class="num">Cost</th><th class="num">Retries</th><th>Issue</th><th>PR</th><th>Blocked reason</th></tr>
+{% for w in items %}
+<tr>
+<td><a href="/issues/{{ w.id }}">{{ w.id }}</a></td>
+<td>{{ w.kind.name }}</td>
+<td class="mono">{{ w.group_key }}{% if w.regression_of_work_item_id %} <span class="pill bad">regression of #{{ w.regression_of_work_item_id }}</span>{% endif %}</td>
+<td class="sev-{{ w.severity.value }}">{{ w.severity.value }}{% if w.risk.value != 'normal' %} <span class="pill warn">{{ w.risk.value }}</span>{% endif %}</td>
+<td class="{{ 'ok' if w.state.value == 'verified' else ('bad' if w.state.value in ('needs_human', 'failed', 'abandoned') else '') }}">{{ w.state.value }}</td>
+<td>{{ w.verification_level.label }}</td>
+<td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }} / {{ w.acu_cap }}</td>
+<td class="num">{{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money if acu_cost_usd is not none else 'n/a' }}</td>
+<td class="num">{{ w.retries_used }}</td>
+<td>{% if w.issue_url %}<a href="{{ w.issue_url }}">#{{ w.issue_number }}</a>{% endif %}</td>
+<td>{% if w.pr_url %}<a href="{{ w.pr_url }}">#{{ w.pr_number }}</a>{% endif %}</td>
+<td class="mono">{{ w.blocked_reason or '' }}{% if w.human_resolution %} <span class="pill info">{{ w.human_resolution }}</span>{% endif %}</td>
+</tr>
+{% else %}<tr><td colspan="12" class="muted">No work items.</td></tr>{% endfor %}
+</table>
+{% endblock %}

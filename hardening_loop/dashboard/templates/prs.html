@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}PRs · Superset hardening loop{% endblock %}
+{% block content %}
+<h1>Pull requests <span class="muted">({{ prs|length }})</span></h1>
+<h2>Highest verification level per PR</h2>
+<table><tr><th>Work item</th><th>Kind</th><th>PR</th><th>Level</th><th>First head green</th><th class="num">Retries</th><th>Item state</th></tr>
+{% for l in levels %}<tr><td><a href="/issues/{{ l.work_item_id }}">#{{ l.work_item_id }}</a></td><td>{{ l.kind|kind }}</td><td><a href="{{ l.pr_url }}">{{ l.pr_url }}</a></td><td>L{{ l.level }} {{ l.level_name }}</td><td>{{ l.first_head_checks_green }}</td><td class="num">{{ l.retries_used }}</td><td>{{ l.state }}</td></tr>
+{% else %}<tr><td colspan="7" class="muted">No PRs.</td></tr>{% endfor %}
+</table>
+<h2>All PR rows</h2>
+<table><tr><th>PR</th><th>Work item</th><th>State</th><th>Head</th><th>Merge</th><th>Level</th><th>Diff policy</th><th>Review</th><th>Approved by</th><th>Opened</th><th>Merged</th></tr>
+{% for p in prs %}<tr><td><a href="{{ p.url }}">{{ p.repo }}#{{ p.number }}</a></td><td><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td><td>{{ p.state }}</td><td class="mono">{{ p.head_sha|short }}</td><td class="mono">{{ p.merge_sha|short }}</td><td>{{ p.verification_level.label }}</td><td class="{{ 'ok' if p.diff_policy_ok else 'bad' }}">{{ p.diff_policy_ok }}</td><td>{{ p.review_status or '' }}</td><td>{{ p.approved_by or '' }}</td><td class="muted">{{ p.opened_at }}</td><td class="muted">{{ p.merged_at or '' }}</td></tr>{% endfor %}
+</table>
+{% endblock %}

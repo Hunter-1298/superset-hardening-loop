@@ -1,0 +1,59 @@
+{
+  "files": {
+    "grype-vuln.json": "32dd6bfa29d5d5d2285518998aa4147eb1c4c42aee55fe94ad6bb40220a780ca",
+    "sbom.cdx.json": "db542adf524770db5a6383271e348d8afd53d1effb518b2f7efd5b2c313ec4fb",
+    "tools.json": "4a0f83c3ea5ade99d26f72d4f9a21f31de4132e287c2b575a5933143d1d3618f",
+    "trivy-config.json": "5d3c45b936001f77461ba5aff41841dc29b27fc2e524757a16c4cec820c4ac08",
+    "trivy-image-config.json": "ccba821f59dfd9d1cde583006b215cde177d618577fed5b980d243cc13ccf483",
+    "trivy-vuln.json": "23e39f909f7d7bf68694c8d83734e869be9ba41f50fcedafdb4e137dd183ab4d"
+  },
+  "finished_at": "2026-09-07T00:52:22Z",
+  "image_ref": "docker:sha256:e3a88c342786852cf0916ea99bc973f4a1feff46e44dfe6ceae4ad8b546df29c",
+  "image_target": "lean",
+  "inputs": {
+    "grype": "sbom.cdx.json",
+    "syft": "image",
+    "trivy": "image",
+    "trivy-config": "source-tree"
+  },
+  "layer_scope": "image",
+  "mode": "policy",
+  "platform": "linux/amd64",
+  "schema": "hardening-loop/scan-job/v1",
+  "started_at": "2026-09-07T00:52:01Z",
+  "tools": {
+    "grype": {
+      "db": {
+        "built": "2026-09-06T06:27:35Z",
+        "from": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.9_2026-09-06T00:36:16Z_1788676055.tar.zst?checksum=sha256%3A3c93034d0475d25fc82addd47b2300f99564ea4f35fd9e0b957b701049a15020",
+        "path": "/home/ubuntu/.cache/grype/db/6/vulnerability.db",
+        "schemaVersion": "v6.1.9",
+        "valid": true
+      },
+      "version": "0.114.0"
+    },
+    "syft": {
+      "version": "1.45.1"
+    },
+    "trivy": {
+      "checks_bundle": {
+        "Digest": "sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c",
+        "DownloadedAt": "2026-09-07T00:35:10.919039047Z"
+      },
+      "java_db": {
+        "DownloadedAt": "2026-09-07T00:34:50.452910242Z",
+        "NextUpdate": "2026-09-09T01:37:59.115791356Z",
+        "UpdatedAt": "2026-09-06T01:37:59.11579188Z",
+        "Version": 1
+      },
+      "version": "0.71.2",
+      "vuln_db": {
+        "DownloadedAt": "2026-09-06T22:09:08.79802635Z",
+        "NextUpdate": "2026-09-07T19:02:10.600246692Z",
+        "UpdatedAt": "2026-09-06T19:02:10.600247113Z",
+        "Version": 2
+      }
+    }
+  },
+  "vex_documents": []
+}

@@ -1,0 +1,157 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 10.50kB done
+#1 DONE 0.0s
+
+#2 [auth] library/python:pull token for registry-1.docker.io
+#2 DONE 0.0s
+
+#3 [auth] library/node:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#4 [internal] load metadata for docker.io/library/node:20-trixie-slim
+#4 ...
+
+#5 [internal] load metadata for docker.io/library/python:3.11.14-slim-trixie
+#5 DONE 0.4s
+
+#4 [internal] load metadata for docker.io/library/node:20-trixie-slim
+#4 DONE 0.4s
+
+#6 [internal] load .dockerignore
+#6 transferring context: 1.28kB done
+#6 DONE 0.0s
+
+#7 [superset-node-ci 1/8] FROM docker.io/library/node:20-trixie-slim@sha256:abfbe12cc943141a0c9e8c0a57d710df1dadd95d35e8662cc02958b284d1f35b
+#7 DONE 0.0s
+
+#8 [python-base 1/6] FROM docker.io/library/python:3.11.14-slim-trixie@sha256:c8271b1f627d0068857dce5b53e14a9558603b527e46f1f901722f935b786a39
+#8 DONE 0.0s
+
+#9 [internal] load build context
+#9 transferring context: 616.44kB 0.3s done
+#9 DONE 0.3s
+
+#10 [python-base 4/6] COPY --chmod=755 docker/*.sh /app/docker/
+#10 CACHED
+
+#11 [lean 2/5] COPY superset-core superset-core
+#11 CACHED
+
+#12 [python-base 5/6] RUN pip install --no-cache-dir --upgrade uv
+#12 CACHED
+
+#13 [python-common  4/15] RUN --mount=type=cache,target=/app/superset_home/.cache/uv     if [ "false" = "true" ] || [ "false" = "true" ]; then         uv pip install playwright &&         playwright install-deps &&         if [ "false" = "true" ]; then playwright install chromium; fi &&         if [ "false" = "true" ]; then playwright install firefox; fi;     else         echo "Skipping browser installation";     fi
+#13 CACHED
+
+#14 [python-base 2/6] RUN mkdir -p /app/superset_home
+#14 CACHED
+
+#15 [python-translation-compiler 3/4] COPY superset/translations/ /app/translations_mo/
+#15 CACHED
+
+#16 [superset-node 2/3] COPY superset/translations /app/superset/translations
+#16 CACHED
+
+#17 [python-base 3/6] RUN useradd --user-group -d /app/superset_home -m --no-log-init --shell /bin/bash superset     && chmod -R 1777 /app/superset_home     && chown -R superset:superset /app/superset_home
+#17 CACHED
+
+#18 [superset-node-ci 3/8] RUN /app/docker/apt-install.sh build-essential python3 zstd
+#18 CACHED
+
+#19 [python-common 15/15] COPY --from=python-translation-compiler /app/translations_mo superset/translations
+#19 CACHED
+
+#20 [superset-node-ci 5/8] WORKDIR /app/superset-frontend
+#20 CACHED
+
+#21 [python-translation-compiler 1/4] COPY requirements/translations.txt requirements/
+#21 CACHED
+
+#22 [lean 3/5] RUN --mount=type=cache,target=/app/superset_home/.cache/uv     /app/docker/pip-install.sh --requires-build-essential -r requirements/base.txt
+#22 CACHED
+
+#23 [superset-node-ci 8/8] COPY superset-frontend /app/superset-frontend
+#23 CACHED
+
+#24 [python-common  8/15] COPY --chmod=755 ./docker/entrypoints/run-server.sh /usr/bin/
+#24 CACHED
+
+#25 [superset-node-ci 6/8] RUN mkdir -p /app/superset/static/assets              /app/superset/translations
+#25 CACHED
+
+#26 [lean 4/5] RUN --mount=type=cache,target=/app/superset_home/.cache/uv     uv pip install -e .
+#26 CACHED
+
+#27 [python-base 6/6] RUN uv venv /app/.venv
+#27 CACHED
+
+#28 [python-common  1/15] COPY --chmod=755 docker/entrypoints /app/docker/entrypoints
+#28 CACHED
+
+#29 [python-common 12/15] COPY superset superset
+#29 CACHED
+
+#30 [superset-node-ci 4/8] RUN /app/docker/frontend-mem-nag.sh
+#30 CACHED
+
+#31 [python-common  2/15] WORKDIR /app
+#31 CACHED
+
+#32 [python-translation-compiler 2/4] RUN --mount=type=cache,target=/root/.cache/uv     . /app/.venv/bin/activate && /app/docker/pip-install.sh --requires-build-essential -r requirements/translations.txt
+#32 CACHED
+
+#33 [lean 1/5] COPY requirements/base.txt requirements/
+#33 CACHED
+
+#34 [superset-node 3/3] RUN if [ "false" = "true" ]; then         npm run build-translation;     fi;     rm -rf /app/superset/translations/*/*/*.[po,mo];
+#34 CACHED
+
+#35 [python-common  6/15] COPY superset-frontend/package.json superset-frontend/
+#35 CACHED
+
+#36 [python-common  5/15] COPY pyproject.toml setup.py MANIFEST.in README.md ./
+#36 CACHED
+
+#37 [superset-node-ci 7/8] RUN --mount=type=bind,source=./superset-frontend/package.json,target=./package.json     --mount=type=bind,source=./superset-frontend/package-lock.json,target=./package-lock.json     --mount=type=cache,target=/root/.cache     --mount=type=cache,target=/root/.npm     if [ "false" = "false" ]; then         npm ci;     else         echo "Skipping 'npm ci' in dev mode";     fi
+#37 CACHED
+
+#38 [python-common  3/15] RUN mkdir -p       /app/pythonpath       superset/static       requirements       superset-frontend       apache_superset.egg-info       requirements     && touch superset/static/version_info.json
+#38 CACHED
+
+#39 [superset-node-ci 2/8] COPY docker/ /app/docker/
+#39 CACHED
+
+#40 [superset-node 1/3] RUN --mount=type=cache,target=/root/.npm     if [ "false" = "false" ]; then         echo "Running 'npm run build'";         npm run build;     else         echo "Skipping 'npm run build' in dev mode";     fi;
+#40 CACHED
+
+#41 [python-common  9/15] RUN /app/docker/apt-install.sh       curl       libsasl2-dev       libsasl2-modules-gssapi-mit       libpq-dev       libecpg-dev       libldap2-dev
+#41 CACHED
+
+#42 [python-common 10/15] RUN mkdir -p /app/data && chown -R superset:superset /app/data
+#42 CACHED
+
+#43 [python-common 14/15] COPY --from=superset-node /app/superset/translations superset/translations
+#43 CACHED
+
+#44 [python-common 11/15] COPY --from=superset-node /app/superset/static/assets superset/static/assets
+#44 CACHED
+
+#45 [python-translation-compiler 4/4] RUN if [ "false" = "true" ]; then         pybabel compile -d /app/translations_mo | true;     fi;     rm -f /app/translations_mo/*/*/*.[po,json]
+#45 CACHED
+
+#46 [python-common  7/15] COPY scripts/check-env.py scripts/
+#46 CACHED
+
+#47 [python-common 13/15] RUN rm superset/translations/*/*/*.po
+#47 CACHED
+
+#48 [lean 5/5] RUN python -m compileall /app/superset
+#48 CACHED
+
+#49 exporting to image
+#49 exporting layers done
+#49 writing image sha256:e3a88c342786852cf0916ea99bc973f4a1feff46e44dfe6ceae4ad8b546df29c done
+#49 naming to docker.io/library/hardening-baseline:lean-c83fb2bb1dcf done
+#49 DONE 0.0s

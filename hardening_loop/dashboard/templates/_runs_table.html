@@ -1,0 +1,15 @@
+<table>
+<tr><th>Run</th><th>Branch @ sha</th><th>Trigger</th><th>Status</th><th class="num">Raw C/H/M/L</th><th class="num">Policy C/H/M/L</th><th>Gate</th><th>Ingested</th></tr>
+{% for r in runs %}
+<tr>
+<td><a href="/runs/{{ r.id }}">{{ r.external_run_id }}</a>{% if r.is_baseline %} <span class="pill">baseline</span>{% endif %}</td>
+<td class="mono">{{ r.source_branch }} @ {{ r.source_sha|short }}</td>
+<td>{{ r.trigger }}</td>
+<td class="{{ 'ok' if r.status == 'complete' else 'bad' }}">{{ r.status }}</td>
+<td class="num">{{ r.raw_by_severity.get('CRITICAL', 0) }}/{{ r.raw_by_severity.get('HIGH', 0) }}/{{ r.raw_by_severity.get('MEDIUM', 0) }}/{{ r.raw_by_severity.get('LOW', 0) }} <span class="muted">({{ r.raw_total }})</span></td>
+<td class="num">{{ r.policy_by_severity.get('CRITICAL', 0) }}/{{ r.policy_by_severity.get('HIGH', 0) }}/{{ r.policy_by_severity.get('MEDIUM', 0) }}/{{ r.policy_by_severity.get('LOW', 0) }} <span class="muted">({{ r.policy_total }})</span></td>
+<td><span class="{{ 'ok' if r.gate.get('passed') else 'bad' }}">{{ r.gate.get('mode') }}: {{ 'pass' if r.gate.get('passed') else 'fail' }}</span>{% if r.gate.get('ready_for_enforce') %} <span class="pill ok">enforce-ready</span>{% endif %}</td>
+<td class="muted">{{ r.ingested_at.strftime('%Y-%m-%d %H:%M') }}</td>
+</tr>
+{% else %}<tr><td colspan="8" class="muted">No scan runs ingested.</td></tr>{% endfor %}
+</table>
