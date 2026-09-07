@@ -1,42 +1,296 @@
 {% extends "base.html" %}
-{% block title %}Work item #{{ wi.id }}{% endblock %}
+{% block title %}Work item #{{ wi.id }} · {{ wi.title }}{% endblock %}
 {% block content %}
-<h1>#{{ wi.id }} {{ wi.title }}</h1>
-<div class="cards">
-  <div class="card"><div class="label">Kind / group</div><div class="value" style="font-size:15px">{{ wi.kind.name }}</div><div class="sub mono">{{ wi.group_key }} · playbook {{ wi.kind.playbook_slug }}</div></div>
-  <div class="card"><div class="label">State</div><div class="value">{{ wi.state.value }}</div><div class="sub">{{ wi.verification_level.label }}{% if wi.human_resolution %} · {{ wi.human_resolution }}{% endif %}</div></div>
-  <div class="card"><div class="label">ACU</div><div class="value">{{ acus|num }} <span class="muted" style="font-size:13px">/ cap {{ wi.acu_cap }}</span></div><div class="sub">est. cost {{ cost|money }} · retries {{ wi.retries_used }}</div></div>
-  <div class="card"><div class="label">GitHub</div><div class="value" style="font-size:14px">{% if wi.issue_url %}<a href="{{ wi.issue_url }}">issue #{{ wi.issue_number }}</a>{% endif %}{% if wi.pr_url %} · <a href="{{ wi.pr_url }}">PR #{{ wi.pr_number }}</a>{% endif %}</div><div class="sub mono">head {{ wi.pr_head_sha|short }} · merge {{ wi.merge_sha|short }}</div></div>
+{% set lifecycle = events|selectattr("entity_type", "equalto", "work_item")|list %}
+{% set blocked_events = events|selectattr("event", "in", ["blocked", "failed", "budget_warning", "dispatch_failed"])|list %}
+{% set human_tone = "danger" if wi.state.value in ("needs_human", "failed") else "warning" %}
+
+{{ ui.page_header(wi.title, "One GitHub issue and one Devin session covering " ~ members|length ~ " related finding" ~ ("" if members|length == 1 else "s") ~ " on the " ~ wi.source_branch ~ " branch.", eyebrow="Work item #" ~ wi.id, crumbs=[("Work items", "/issues")]) }}
+
+<section class="panel" aria-labelledby="summary-heading">
+  <div class="panel-body hero">
+    <div>
+      <h2 id="summary-heading" class="sr-only">Summary</h2>
+      <div class="badges" aria-label="Status">
+        {{ ui.severity_badge(wi.severity) }}
+        {{ ui.state_badge(wi.state) }}
+        {{ ui.kind_badge(wi.kind) }}
+        {{ ui.level_badge(wi.verification_level) }}
+        {% if wi.risk.value != "normal" %}{{ ui.badge(wi.risk|risk_label) }}{% endif %}
+      </div>
+      <dl class="facts">
+        <div class="fact"><dt class="k">ACU used</dt><dd class="v">{{ acus|num }} <span class="muted">of {{ wi.acu_cap|num(0) }} cap</span></dd></div>
+        <div class="fact"><dt class="k">Estimated cost</dt><dd class="v">{{ cost|money }}</dd></div>
+        <div class="fact"><dt class="k">Retries</dt><dd class="v">{{ wi.retries_used }}</dd></div>
+        <div class="fact"><dt class="k">Findings</dt><dd class="v">{{ members|length }}</dd></div>
+        <div class="fact"><dt class="k">Created</dt><dd class="v">{{ wi.created_at|dt }}</dd></div>
+        {% if wi.verified_at %}<div class="fact"><dt class="k">Verified</dt><dd class="v">{{ wi.verified_at|dt }}</dd></div>{% endif %}
+      </dl>
+    </div>
+    <div class="link-list" aria-label="External links">
+      {% if wi.issue_url %}<a class="btn" href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a>{% endif %}
+      {% if wi.pr_url %}<a class="btn" href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a>{% endif %}
+      {% for s in sessions if s.url %}<a class="btn" href="{{ s.url }}" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a>{% endfor %}
+      {% if not wi.issue_url and not wi.pr_url and not sessions %}<span class="muted small">No GitHub or Devin links yet.</span>{% endif %}
+    </div>
+  </div>
+</section>
+
+{% if next_action %}
+<div class="callout callout-{{ human_tone }}" role="status">
+  <div class="body">
+    <span class="label">Next human action</span>
+    <p>{{ next_action }}</p>
+    {% if wi.issue_url or wi.pr_url %}<p class="small">Act in GitHub: {% if wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} · {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}. The dashboard is read-only.</p>{% endif %}
+  </div>
 </div>
-{% if wi.blocked_reason %}<div class="banner"><strong>blocked_reason:</strong> {{ wi.blocked_reason }}</div>{% endif %}
-{% if origin %}<div class="banner">Regression of <a href="/issues/{{ origin.id }}">#{{ origin.id }} {{ origin.title }}</a> ({{ origin.state.value }}, {{ origin.verification_level.label }}).</div>{% endif %}
-{% if regressions %}<div class="banner">Regressed later: {% for r in regressions %}<a href="/issues/{{ r.id }}">#{{ r.id }}</a> ({{ r.state.value }}){% if not loop.last %}, {% endif %}{% endfor %} — member findings below include those now owned by the regression item(s).</div>{% endif %}
-<h2>Timeline</h2>
-<table><tr><th>Created</th><th>Issue opened</th><th>PR opened</th><th>Merged</th><th>Verified</th></tr>
-<tr><td>{{ wi.created_at }}</td><td>{{ wi.issue_opened_at or '' }}</td><td>{{ wi.pr_opened_at or '' }}</td><td>{{ wi.merged_at or '' }}</td><td>{{ wi.verified_at or '' }}</td></tr></table>
-<h2>Member findings ({{ members|length }})</h2>
-{% with findings=members %}{% include "_findings_table.html" %}{% endwith %}
-<h2>Devin sessions</h2>
-<table><tr><th>Session</th><th>Status</th><th>Detail</th><th class="num">ACU</th><th class="num">Limit</th><th class="num">Msgs</th><th>PRs</th><th>Created</th><th>Finished</th></tr>
-{% for s in sessions %}<tr><td class="mono">{% if s.url %}<a href="{{ s.url }}">{{ s.devin_id }}</a>{% else %}{{ s.devin_id }}{% endif %}</td><td>{{ s.status }}</td><td>{{ s.status_detail or '' }}</td><td class="num">{{ s.acus_consumed|num }}</td><td class="num">{{ s.max_acu_limit }}</td><td class="num">{{ s.messages_sent }}</td><td class="mono">{% for p in s.pull_requests %}<a href="{{ p.pr_url }}">{{ p.pr_url }}</a>{% if p.pr_state %} ({{ p.pr_state }}){% endif %}{% if not loop.last %} {% endif %}{% endfor %}</td><td class="muted">{{ s.created_at }}</td><td class="muted">{{ s.finished_at or '' }}</td></tr>
-{% if s.structured_output %}<tr><td colspan="9"><pre>{{ s.structured_output|tojson(indent=2) }}</pre></td></tr>{% endif %}
-{% else %}<tr><td colspan="9" class="muted">No sessions dispatched.</td></tr>{% endfor %}
-</table>
-{% if polls %}<h2>Session polls</h2>
-<table><tr><th>Polled</th><th>Status</th><th>Detail</th><th class="num">ACU</th><th>Decision</th><th>Reason</th></tr>
-{% for p in polls %}<tr><td class="muted">{{ p.polled_at }}</td><td>{{ p.status }}</td><td>{{ p.status_detail or '' }}</td><td class="num">{{ p.acus_consumed|num }}</td><td>{{ p.decision }}</td><td class="mono">{{ p.reason }}</td></tr>{% endfor %}
-</table>{% endif %}
-<h2>Pull requests</h2>
-<table><tr><th>PR</th><th>State</th><th>Head</th><th>Level</th><th>First head green</th><th>Diff policy</th><th>Review</th><th>Approved by</th></tr>
-{% for p in prs %}<tr><td><a href="{{ p.url }}">#{{ p.number }}</a> {{ p.head_branch }} → {{ p.base_branch }}</td><td>{{ p.state }}</td><td class="mono">{{ p.head_sha|short }}</td><td>{{ p.verification_level.label }}</td><td>{{ p.first_head_checks_green }}</td><td class="{{ 'ok' if p.diff_policy_ok else 'bad' }}">{{ p.diff_policy_ok }} {{ p.diff_policy_violations|join('; ') }}</td><td>{{ p.review_status or '' }} ({{ p.review_comment_count }})</td><td>{{ p.approved_by or '' }}</td></tr>
-{% else %}<tr><td colspan="8" class="muted">No pull request.</td></tr>{% endfor %}
-</table>
-{% if checks %}<h2>CI checks observed</h2>
-<table><tr><th>Head</th><th>Check</th><th>Status</th><th>Conclusion</th><th>Observed</th></tr>
-{% for c in checks %}<tr><td class="mono">{{ c.head_sha|short }}</td><td>{{ c.name }}</td><td>{{ c.status }}</td><td class="{{ 'ok' if c.conclusion == 'success' else ('bad' if c.conclusion else 'muted') }}">{{ c.conclusion or 'pending' }}</td><td class="muted">{{ c.observed_at }}</td></tr>{% endfor %}
-</table>{% endif %}
-<h2>Events ({{ events|length }})</h2>
-<table><tr><th>When</th><th>Actor</th><th>Entity</th><th>Event</th><th>Transition</th><th>Reason</th></tr>
-{% for e in events %}<tr><td class="muted">{{ e.ts.strftime('%Y-%m-%d %H:%M') }}</td><td>{{ e.actor }}</td><td>{{ e.entity_type }}:{{ e.entity_id }}</td><td>{{ e.event }}</td><td class="mono">{% if e.from_state or e.to_state %}{{ e.from_state }} → {{ e.to_state }}{% endif %}</td><td class="mono">{{ e.reason or '' }}</td></tr>{% endfor %}
-</table>
+{% endif %}
+
+{% if origin %}
+<div class="callout callout-warning">
+  <div class="body"><span class="label">Regression</span>
+  <p>This work item reopens findings first fixed by <a href="/issues/{{ origin.id }}">#{{ origin.id }} {{ origin.title }}</a> ({{ (origin.state|wi_state).text }}, {{ (origin.verification_level|level_label).text }}).</p></div>
+</div>
+{% endif %}
+{% if regressions %}
+<div class="callout callout-warning">
+  <div class="body"><span class="label">Regressed later</span>
+  <p>Findings from this item reappeared and are tracked by {% for r in regressions %}<a href="/issues/{{ r.id }}">#{{ r.id }} {{ r.title }}</a> ({{ (r.state|wi_state).text }}){% if not loop.last %}, {% endif %}{% endfor %}. The findings table below includes those now owned by the regression item{{ "s" if regressions|length > 1 }}.</p></div>
+</div>
+{% endif %}
+
+<div class="grid grid-main">
+  <section class="panel" aria-labelledby="timeline-heading">
+    {{ ui.panel_head("Lifecycle", id="timeline-heading", hint=lifecycle|length ~ " transitions") }}
+    <div class="panel-body">
+      {% if lifecycle %}
+      <ol class="timeline">
+        {% for e in lifecycle %}
+        {% set lab = e.event|event_label %}
+        <li class="is-{{ lab.tone.value }}">
+          <div class="when">{{ e.ts|dt }} · {{ e.actor|actor_label }}</div>
+          <div class="what">{{ lab.text }}</div>
+          {% if e.from_state or e.to_state %}
+          <div class="transition">
+            {% if e.event == "verification_level" %}{{ (e.from_state|level_label).text }} → {{ (e.to_state|level_label).text }}
+            {% else %}{{ (e.from_state|wi_state).text if e.from_state else "—" }} → {{ (e.to_state|wi_state).text }}{% endif %}
+          </div>
+          {% endif %}
+          {% if e.reason %}<div class="why mono">{{ e.reason }}</div>{% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+      {% else %}
+      {{ ui.empty("No lifecycle events yet", "Transitions appear here as the controller, CI, Devin and people act on this item.", compact=True) }}
+      {% endif %}
+    </div>
+  </section>
+
+  <div class="stack">
+    <section class="panel" aria-labelledby="details-heading">
+      {{ ui.panel_head("Details", id="details-heading") }}
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>Group key</dt><dd class="mono">{{ wi.group_key }}</dd>
+          <dt>Playbook</dt><dd class="mono">{{ wi.kind.playbook_slug }}</dd>
+          <dt>Branch</dt><dd class="mono">{{ wi.source_branch }}</dd>
+          <dt>Risk</dt><dd>{{ (wi.risk|risk_label).text }}</dd>
+          <dt>ACU cap</dt><dd>{{ wi.acu_cap|num(0) }}</dd>
+          <dt>Dispatch failures</dt><dd>{{ wi.dispatch_failures }}</dd>
+          <dt>Active session</dt><dd class="mono">{{ wi.active_session_id or "—" }}</dd>
+          {% if wi.human_resolution %}<dt>Human resolution</dt><dd class="mono">{{ wi.human_resolution }}</dd>{% endif %}
+          <dt>PR head</dt><dd>{{ ui.sha(wi.pr_head_sha) }}</dd>
+          <dt>Merge commit</dt><dd>{{ ui.sha(wi.merge_sha) }}</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="dates-heading">
+      {{ ui.panel_head("Milestones", id="dates-heading") }}
+      <div class="panel-body">
+        <dl class="kv">
+          <dt>Created</dt><dd>{{ wi.created_at|dt }}</dd>
+          <dt>Issue opened</dt><dd>{{ wi.issue_opened_at|dt }}</dd>
+          <dt>PR opened</dt><dd>{{ wi.pr_opened_at|dt }}</dd>
+          <dt>Merged</dt><dd>{{ wi.merged_at|dt }}</dd>
+          <dt>Verified</dt><dd>{{ wi.verified_at|dt }}</dd>
+          <dt>Last updated</dt><dd>{{ wi.updated_at|dt }}</dd>
+        </dl>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="blocked-heading">
+      {{ ui.panel_head("Retries and blockers", id="blocked-heading") }}
+      <div class="panel-body">
+        {% if wi.blocked_reason or retry_events or blocked_events %}
+        {% if wi.blocked_reason %}<p class="small muted">Current blocked reason</p><p class="mono">{{ wi.blocked_reason }}</p>{% endif %}
+        {% if retry_events or blocked_events %}
+        <ul class="list-plain{% if wi.blocked_reason %} mt{% endif %}">
+          {% for e in (retry_events + blocked_events)|sort(attribute="ts") %}
+          <li><span class="small muted">{{ e.ts|dt }}</span> · {{ (e.event|event_label).text }}{% if e.reason %} <span class="mono small">{{ e.reason }}</span>{% endif %}</li>
+          {% endfor %}
+        </ul>
+        {% endif %}
+        {% else %}
+        {{ ui.empty("No retries or blockers", "This item has not needed a retry and is not blocked.", compact=True) }}
+        {% endif %}
+      </div>
+    </section>
+  </div>
+</div>
+
+<section class="panel" aria-labelledby="findings-heading">
+  {{ ui.panel_head("Findings", id="findings-heading", hint=members|length ~ " grouped into this item") }}
+  {% with findings=members, hide_work_item=True %}{% include "_findings_table.html" %}{% endwith %}
+</section>
+
+<section class="panel" aria-labelledby="sessions-heading">
+  {{ ui.panel_head("Devin sessions", id="sessions-heading", hint=sessions|length ~ " dispatched") }}
+  {% if sessions %}
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr>
+      <th scope="col">Session</th>
+      <th scope="col" class="w-badge">Status</th>
+      <th scope="col">Detail</th>
+      <th scope="col" class="num">ACU</th>
+      <th scope="col" class="num">Limit</th>
+      <th scope="col" class="num">Messages</th>
+      <th scope="col">Pull requests</th>
+      <th scope="col" class="w-date">Started</th>
+      <th scope="col" class="w-date">Finished</th>
+    </tr></thead>
+    <tbody>
+    {% for s in sessions %}
+    <tr>
+      <td>{% if s.url %}<a class="mono" href="{{ s.url }}" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %}{% if s.playbook_id %}<span class="secondary mono">playbook {{ s.playbook_id }}</span>{% endif %}</td>
+      <td>{{ ui.badge(s.status|plain_label) }}</td>
+      <td class="mono">{{ s.status_detail or "—" }}</td>
+      <td class="num">{{ s.acus_consumed|num }}</td>
+      <td class="num">{{ s.max_acu_limit|num(0) }}</td>
+      <td class="num">{{ s.messages_sent }}</td>
+      <td>{% for p in s.pull_requests %}<a href="{{ p.pr_url }}" rel="noopener">{{ p.pr_url|replace("https://github.com/", "") }}</a>{% if p.pr_state %} <span class="muted small">({{ (p.pr_state|pr_state).text }})</span>{% endif %}<br>{% else %}<span class="muted">—</span>{% endfor %}</td>
+      <td class="w-date">{{ s.created_at|dt }}</td>
+      <td class="w-date">{{ s.finished_at|dt }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% for s in sessions if s.structured_output %}
+  <details class="disclosure flush">
+    <summary>Structured output <span class="hint mono">{{ s.devin_id }}</span></summary>
+    <div class="disclosure-body padded"><pre>{{ s.structured_output|tojson(indent=2) }}</pre></div>
+  </details>
+  {% endfor %}
+  {% else %}
+  {{ ui.empty("No Devin session yet", "A session is dispatched once the GitHub issue exists and capacity and ACU budget allow it.") }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="prs-heading">
+  {{ ui.panel_head("Pull requests and CI checks", id="prs-heading") }}
+  {% if prs %}
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr>
+      <th scope="col">Pull request</th>
+      <th scope="col" class="w-badge">State</th>
+      <th scope="col" class="w-badge">Verification</th>
+      <th scope="col">Head</th>
+      <th scope="col" class="w-badge">First head green</th>
+      <th scope="col">Diff policy</th>
+      <th scope="col">Review</th>
+      <th scope="col">Approved by</th>
+    </tr></thead>
+    <tbody>
+    {% for p in prs %}
+    <tr>
+      <td><a class="primary" href="{{ p.url }}" rel="noopener">#{{ p.number }}</a><span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
+      <td>{{ ui.pr_state_badge(p.state) }}</td>
+      <td>{{ ui.level_badge(p.verification_level) }}</td>
+      <td>{{ ui.sha(p.head_sha) }}{% if p.merge_sha %}<span class="secondary">merge {{ ui.sha(p.merge_sha) }}</span>{% endif %}</td>
+      <td>{{ ui.yes_no_badge(p.first_head_checks_green, title="Did the first pushed head pass CI without a retry?") }}</td>
+      <td>{{ ui.yes_no_badge(p.diff_policy_ok, title="Does the diff stay inside the playbook's allowed paths?") }}{% if p.diff_policy_violations %}<span class="secondary mono">{{ p.diff_policy_violations|join("; ") }}</span>{% endif %}</td>
+      <td>{{ p.review_status or "—" }}<span class="secondary">{{ p.review_comment_count }} comment{{ "" if p.review_comment_count == 1 else "s" }}</span></td>
+      <td>{{ p.approved_by or "—" }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if checks %}
+  <details class="disclosure flush" open>
+    <summary>CI checks observed <span class="hint">{{ checks|length }}</span></summary>
+    <div class="disclosure-body table-wrap">
+      <table class="data">
+        <thead><tr><th scope="col">Head</th><th scope="col">Check</th><th scope="col" class="w-badge">Result</th><th scope="col">Status</th><th scope="col" class="w-date">Observed</th></tr></thead>
+        <tbody>
+        {% for c in checks %}
+        <tr>
+          <td>{{ ui.sha(c.head_sha) }}</td>
+          <td>{% if c.url %}<a href="{{ c.url }}" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}</td>
+          <td>{{ ui.check_badge(c.conclusion) }}</td>
+          <td class="mono">{{ c.status }}</td>
+          <td class="w-date">{{ c.observed_at|dt }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  {% endif %}
+  {% else %}
+  {{ ui.empty("No pull request yet", "Devin opens a pull request against " ~ wi.source_branch ~ " once it has a fix; disposition-only items never have one.") }}
+  {% endif %}
+</section>
+
+<section class="panel" aria-labelledby="scans-heading">
+  {{ ui.panel_head("Related scans", id="scans-heading", hint="where these findings first appeared or were confirmed absent") }}
+  {% with runs=scan_runs %}{% include "_runs_table.html" %}{% endwith %}
+</section>
+
+<details class="disclosure">
+  <summary>All events <span class="hint">{{ events|length }} across the work item, its findings, sessions and pull requests</span></summary>
+  <div class="disclosure-body table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col" class="w-date">When</th><th scope="col">Actor</th><th scope="col">Entity</th><th scope="col">Event</th><th scope="col">Transition</th><th scope="col">Reason</th></tr></thead>
+      <tbody>
+      {% for e in events %}
+      <tr>
+        <td class="w-date">{{ e.ts|dt }}</td>
+        <td>{{ e.actor|actor_label }}</td>
+        <td class="mono">{{ e.entity_type }}:{{ e.entity_id }}</td>
+        <td>{{ (e.event|event_label).text }}<span class="secondary mono">{{ e.event }}</span></td>
+        <td class="mono">{% if e.from_state or e.to_state %}{{ e.from_state or "—" }} → {{ e.to_state }}{% else %}—{% endif %}</td>
+        <td class="mono">{{ e.reason or "—" }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+
+{% if polls %}
+<details class="disclosure">
+  <summary>Session polls <span class="hint">{{ polls|length }} controller decisions</span></summary>
+  <div class="disclosure-body table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col" class="w-date">Polled</th><th scope="col">Status</th><th scope="col">Detail</th><th scope="col" class="num">ACU</th><th scope="col">Decision</th><th scope="col">Reason</th></tr></thead>
+      <tbody>
+      {% for p in polls %}
+      <tr>
+        <td class="w-date">{{ p.polled_at|dt }}</td>
+        <td class="mono">{{ p.status }}</td>
+        <td class="mono">{{ p.status_detail or "—" }}</td>
+        <td class="num">{{ p.acus_consumed|num }}</td>
+        <td>{{ (p.decision|plain_label).text }}</td>
+        <td class="mono">{{ p.reason }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
 {% endblock %}

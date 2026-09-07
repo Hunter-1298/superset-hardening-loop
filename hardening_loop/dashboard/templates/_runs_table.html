@@ -1,15 +1,34 @@
-<table>
-<tr><th>Run</th><th>Branch @ sha</th><th>Trigger</th><th>Status</th><th class="num">Raw C/H/M/L</th><th class="num">Policy C/H/M/L</th><th>Gate</th><th>Ingested</th></tr>
-{% for r in runs %}
-<tr>
-<td><a href="/runs/{{ r.id }}">{{ r.external_run_id }}</a>{% if r.is_baseline %} <span class="pill">baseline</span>{% endif %}</td>
-<td class="mono">{{ r.source_branch }} @ {{ r.source_sha|short }}</td>
-<td>{{ r.trigger }}</td>
-<td class="{{ 'ok' if r.status == 'complete' else 'bad' }}">{{ r.status }}</td>
-<td class="num">{{ r.raw_by_severity.get('CRITICAL', 0) }}/{{ r.raw_by_severity.get('HIGH', 0) }}/{{ r.raw_by_severity.get('MEDIUM', 0) }}/{{ r.raw_by_severity.get('LOW', 0) }} <span class="muted">({{ r.raw_total }})</span></td>
-<td class="num">{{ r.policy_by_severity.get('CRITICAL', 0) }}/{{ r.policy_by_severity.get('HIGH', 0) }}/{{ r.policy_by_severity.get('MEDIUM', 0) }}/{{ r.policy_by_severity.get('LOW', 0) }} <span class="muted">({{ r.policy_total }})</span></td>
-<td><span class="{{ 'ok' if r.gate.get('passed') else 'bad' }}">{{ r.gate.get('mode') }}: {{ 'pass' if r.gate.get('passed') else 'fail' }}</span>{% if r.gate.get('ready_for_enforce') %} <span class="pill ok">enforce-ready</span>{% endif %}</td>
-<td class="muted">{{ r.ingested_at.strftime('%Y-%m-%d %H:%M') }}</td>
-</tr>
-{% else %}<tr><td colspan="8" class="muted">No scan runs ingested.</td></tr>{% endfor %}
+{% if runs %}
+<div class="table-wrap">
+<table class="data">
+  <thead><tr>
+    <th scope="col">Scan</th>
+    <th scope="col">Branch</th>
+    <th scope="col" class="w-badge">Status</th>
+    <th scope="col" class="w-badge">Gate</th>
+    <th scope="col" class="num">Raw</th>
+    <th scope="col" class="num">Policy</th>
+    <th scope="col" class="num">Raw HIGH+CRIT</th>
+    <th scope="col" class="num">Policy HIGH+CRIT</th>
+    <th scope="col" class="w-date">Ingested</th>
+  </tr></thead>
+  <tbody>
+  {% for r in runs %}
+  <tr>
+    <td class="w-title"><a class="primary" href="/runs/{{ r.id }}">{{ r.external_run_id }}</a><span class="secondary">{{ r.trigger|trigger_label }}{% if r.is_baseline %} · baseline{% endif %} · <span class="mono">{{ r.source_sha|short }}</span></span></td>
+    <td class="mono">{{ r.source_branch }}</td>
+    <td>{{ ui.run_status_badge(r.status) }}</td>
+    <td>{{ ui.gate_badge(r.gate.passed, r.gate.mode) }}</td>
+    <td class="num">{{ r.raw_total }}</td>
+    <td class="num">{{ r.policy_total }}</td>
+    <td class="num">{{ r.raw_by_severity.get('HIGH', 0) + r.raw_by_severity.get('CRITICAL', 0) }}</td>
+    <td class="num">{{ r.policy_by_severity.get('HIGH', 0) + r.policy_by_severity.get('CRITICAL', 0) }}</td>
+    <td class="w-date"><time datetime="{{ r.ingested_at.isoformat() }}">{{ r.ingested_at|dt }}</time></td>
+  </tr>
+  {% endfor %}
+  </tbody>
 </table>
+</div>
+{% else %}
+{{ ui.empty("No scans yet", "Scan runs appear once the security-scan workflow (or a replay) has been ingested.", compact=True) }}
+{% endif %}

@@ -6,20 +6,33 @@ so it can never approve, merge, dispatch, or mutate state. Approvals stay in Git
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.engine import Engine
+from sqlalchemy.sql import ColumnElement
 from sqlmodel import and_, col, or_, select
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from hardening_loop.config import COMPARISON_BRANCH, Settings
+from hardening_loop.dashboard import labels
 from hardening_loop.db import open_database_readonly, session_scope
-from hardening_loop.domain.enums import Kind, VerificationLevel
-from hardening_loop.metrics import Metrics, compute_metrics
+from hardening_loop.domain.enums import (
+    FindingState,
+    Kind,
+    Layer,
+    Severity,
+    VerificationLevel,
+    WorkItemState,
+)
+from hardening_loop.metrics import Metrics, RunSummary, compute_metrics, summarize_run
 from hardening_loop.models.lineage import regression_descendants
 from hardening_loop.models.tables import (
     Event,
@@ -42,17 +55,49 @@ from hardening_loop.report.run_report import (
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 MAX_ROWS = 2000
+RECENT_ACTIVITY_ROWS = 12
+RECENT_RUNS = 6
+QUEUE_ROWS = 8
+
+UNCLASSIFIED = "unclassified"
+
+
+@dataclass(frozen=True)
+class NavItem:
+    """One sidebar entry. `prefixes` are the request paths that mark it as current."""
+
+    label: str
+    href: str
+    icon: str
+    prefixes: tuple[str, ...]
+    secondary: bool = False
+
+
+NAV: tuple[NavItem, ...] = (
+    NavItem("Overview", "/", "home", ("/",)),
+    NavItem("Work items", "/issues", "list", ("/issues",)),
+    NavItem("Scans", "/runs", "scan", ("/runs",)),
+    NavItem("Findings", "/findings", "finding", ("/findings",), secondary=True),
+    NavItem("Pull requests", "/prs", "pr", ("/prs",)),
+    NavItem("Report", "/report", "report", ("/report",)),
+)
+
+
+def nav_current(path: str) -> str | None:
+    """The href of the sidebar item that owns `path` (exact match for `/`, prefix otherwise)."""
+    for item in NAV:
+        for prefix in item.prefixes:
+            if prefix == "/" and path == "/":
+                return item.href
+            if prefix != "/" and (path == prefix or path.startswith(prefix + "/")):
+                return item.href
+    return None
 
 
 def _kind_label(value: object) -> str:
-    try:
-        return Kind(int(str(value))).name
-    except (ValueError, TypeError):
-        return str(value)
-
-
-UNCLASSIFIED = "unclassified"
+    return labels.kind(value).text
 
 
 def parse_kind(value: str | None) -> Kind | None:
@@ -66,6 +111,21 @@ def parse_kind(value: str | None) -> Kind | None:
         choices = ", ".join([*(str(k.value) for k in Kind), *(k.slug for k in Kind), UNCLASSIFIED])
         raise HTTPException(
             status_code=422, detail=f"unknown kind {value!r}; one of {choices}"
+        ) from exc
+
+
+def parse_level(value: str | None) -> VerificationLevel | None:
+    """`level` query param: the number (`6`) or the name (`rescan_verified`). Else 422."""
+    if value is None or value == "":
+        return None
+    try:
+        return VerificationLevel(int(value)) if value.isdigit() else VerificationLevel[value]
+    except (ValueError, KeyError) as exc:
+        choices = ", ".join(
+            [*(str(int(v)) for v in VerificationLevel), *(v.name for v in VerificationLevel)]
+        )
+        raise HTTPException(
+            status_code=422, detail=f"unknown verification level {value!r}; one of {choices}"
         ) from exc
 
 
@@ -92,14 +152,72 @@ def _short(sha: str | None) -> str:
     return (sha or "")[:12]
 
 
+def _dt(value: object) -> str:
+    """Compact UTC timestamp for tables: `2026-09-02 14:05`."""
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)
+
+
+def _hours(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    if value < 1:
+        return f"{value * 60:.0f} min"
+    return f"{value:.1f} h"
+
+
+def _delta(value: int | float | None) -> str:
+    if value is None:
+        return "n/a"
+    if value == 0:
+        return "0"
+    return f"{value:+d}" if isinstance(value, int) else f"{value:+.1f}"
+
+
 def _templates() -> Jinja2Templates:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    templates.env.filters["kind"] = _kind_label
-    templates.env.filters["level"] = _level_label
-    templates.env.filters["pct"] = _pct
-    templates.env.filters["num"] = _num
-    templates.env.filters["money"] = _money
-    templates.env.filters["short"] = _short
+    env = templates.env
+    env.filters["kind"] = _kind_label
+    env.filters["level"] = _level_label
+    env.filters["pct"] = _pct
+    env.filters["num"] = _num
+    env.filters["money"] = _money
+    env.filters["short"] = _short
+    env.filters["dt"] = _dt
+    env.filters["hours"] = _hours
+    env.filters["delta"] = _delta
+    env.filters["wi_state"] = labels.work_item_state
+    env.filters["finding_state"] = labels.finding_state
+    env.filters["kind_label"] = labels.kind
+    env.filters["severity_label"] = labels.severity
+    env.filters["level_label"] = labels.verification
+    env.filters["risk_label"] = labels.risk
+    env.filters["run_status"] = labels.run_status
+    env.filters["trigger_label"] = labels.trigger
+    env.filters["pr_state"] = labels.pr_state
+    env.filters["check_label"] = labels.check_conclusion
+    env.filters["outcome_label"] = labels.outcome
+    env.filters["scanner_label"] = labels.scanner_group
+    env.filters["layer_label"] = labels.layer
+    env.filters["yes_no"] = labels.yes_no
+    env.filters["event_label"] = labels.event
+    env.filters["actor_label"] = labels.actor
+    env.filters["plain_label"] = labels.plain
+    env.filters["relation_label"] = labels.relation
+    env.globals["gate_label"] = labels.gate
+    env.globals["nav_items"] = NAV
+    env.globals["nav_current"] = nav_current
+    env.globals["kinds"] = list(Kind)
+    env.globals["severities"] = list(Severity)
+    env.globals["work_item_states"] = list(WorkItemState)
+    env.globals["finding_states"] = list(FindingState)
+    env.globals["layers"] = list(Layer)
+    env.globals["verification_levels"] = list(VerificationLevel)
+    env.globals["human_action_states"] = labels.HUMAN_ACTION_STATES
+    env.globals["ui"] = env.get_template("_macros.html").module
     return templates
 
 
@@ -131,6 +249,40 @@ def build_report_for(engine: Engine, settings: Settings, now: datetime) -> Repor
     return body
 
 
+@dataclass(frozen=True)
+class HeaderContext:
+    """Compact operational context shown in the top bar of every page."""
+
+    latest_run: RunSummary | None
+    last_updated: datetime | None
+
+
+def header_context(engine: Engine, branch: str) -> HeaderContext:
+    """Latest scan of the remediation branch (falling back to any branch) and the newest
+    timestamp the database knows about, so the header never invents a value."""
+    with session_scope(engine) as db:
+        run = db.exec(
+            select(ScanRun).where(ScanRun.source_branch == branch).order_by(col(ScanRun.id).desc())
+        ).first()
+        if run is None:
+            run = db.exec(select(ScanRun).order_by(col(ScanRun.id).desc())).first()
+        last_event = db.exec(select(Event.ts).order_by(col(Event.ts).desc())).first()
+        if run is not None:
+            db.expunge(run)
+    summary = summarize_run(engine, run) if run is not None else None
+    stamps = [t for t in (last_event, run.ingested_at if run else None) if t is not None]
+    return HeaderContext(latest_run=summary, last_updated=max(stamps) if stamps else None)
+
+
+def _wants_html(request: Request) -> bool:
+    """Browsers (Accept: text/html) get an HTML error page on page routes; everything else,
+    including the JSON API and scripted clients, keeps FastAPI's JSON `{"detail": ...}`."""
+    path = request.url.path
+    if path.startswith(("/api/", "/static")) or path in ("/healthz", "/report.md"):
+        return False
+    return "text/html" in request.headers.get("accept", "")
+
+
 def create_app(settings: Settings | None = None, *, engine: Engine | None = None) -> FastAPI:
     settings = settings or Settings()
     engine = engine or open_database_readonly(settings.database_path)
@@ -138,6 +290,7 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     app.state.settings = settings
     app.state.engine = engine
     templates = _templates()
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.middleware("http")
     async def read_only(
@@ -154,7 +307,8 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     def metrics() -> Metrics:
         return compute_metrics(engine, acu_cost_usd=settings.acu_cost_usd, now=datetime.now(UTC))
 
-    def render(request: Request, name: str, **ctx: Any) -> HTMLResponse:
+    def render(request: Request, name: str, status_code: int = 200, **ctx: Any) -> HTMLResponse:
+        header = header_context(engine, settings.remediation_branch)
         base = {
             "request": request,
             "fork_repo": settings.fork_repo,
@@ -163,19 +317,71 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
             "gate_mode": settings.scan_gate_mode.value,
             "replay_mode": settings.replay_mode,
             "database": str(settings.database_path),
+            "current_path": request.url.path,
+            "latest_run": header.latest_run,
+            "last_updated": header.last_updated,
         }
-        return templates.TemplateResponse(request, name, {**base, **ctx})
+        return templates.TemplateResponse(request, name, {**base, **ctx}, status_code=status_code)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def html_or_json_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if not _wants_html(request):
+            return await http_exception_handler(request, exc)
+        return render(
+            request,
+            "error.html",
+            status_code=exc.status_code,
+            error_status=exc.status_code,
+            error_detail=str(exc.detail),
+        )
 
     # ------------------------------------------------------------------------------ pages
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         m = metrics()
-        return render(request, "index.html", m=m, runs=m.runs[-10:][::-1])
+        with session_scope(engine) as db:
+            queue = sorted(
+                db.exec(
+                    select(WorkItem).where(
+                        col(WorkItem.state).in_([s.value for s in labels.HUMAN_ACTION_STATES])
+                    )
+                ).all(),
+                key=lambda w: (-w.severity.rank, -(w.id or 0)),
+            )
+            recent_events = db.exec(
+                select(Event)
+                .where(Event.entity_type == "work_item")
+                .order_by(col(Event.ts).desc(), col(Event.id).desc())
+                .limit(RECENT_ACTIVITY_ROWS)
+            ).all()
+            titles = {
+                w.id: w.title
+                for w in db.exec(
+                    select(WorkItem).where(
+                        col(WorkItem.id).in_([e.entity_id for e in recent_events])
+                    )
+                ).all()
+            }
+            return render(
+                request,
+                "index.html",
+                m=m,
+                runs=m.runs[-RECENT_RUNS:][::-1],
+                queue=queue[:QUEUE_ROWS],
+                queue_total=len(queue),
+                recent_events=recent_events,
+                titles=titles,
+            )
 
     @app.get("/runs", response_class=HTMLResponse)
     def runs_page(request: Request) -> HTMLResponse:
-        return render(request, "runs.html", runs=metrics().runs[::-1])
+        m = metrics()
+        baseline = next((r for r in m.runs if r.is_baseline), None)
+        latest = next((r for r in m.runs if r.id == m.latest_main_run_id), None)
+        return render(
+            request, "runs.html", runs=m.runs[::-1], baseline=baseline, latest=latest, m=m
+        )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
     def run_page(request: Request, run_id: int) -> HTMLResponse:
@@ -204,6 +410,8 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
             ).all()
             m = metrics()
             summary = next((r for r in m.runs if r.id == run_id), None)
+            opened = [f for f in findings if f.first_seen_run_id == run_id]
+            closed = [f for f in findings if f.closed_by_run_id == run_id]
             return render(
                 request,
                 "run.html",
@@ -212,6 +420,8 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 jobs=jobs,
                 events=events,
                 findings=findings,
+                opened_count=len(opened),
+                closed_count=len(closed),
             )
 
     @app.get("/findings", response_class=HTMLResponse)
@@ -241,10 +451,12 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
             rows = db.exec(
                 stmt.order_by(col(Finding.severity), col(Finding.vuln_id)).limit(MAX_ROWS)
             ).all()
+            total = len(db.exec(select(Finding.id)).all())
             return render(
                 request,
                 "findings.html",
                 findings=rows,
+                total=total,
                 filters={
                     "kind": kind,
                     "state": state,
@@ -259,15 +471,45 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
         request: Request,
         state: str | None = Query(default=None),
         kind: str | None = Query(default=None),
+        severity: str | None = Query(default=None),
+        level: str | None = Query(default=None),
+        q: str | None = Query(default=None),
+        queue: bool = Query(default=False),
     ) -> HTMLResponse:
         wanted = parse_kind(kind)
+        wanted_level = parse_level(level)
+        needle = (q or "").strip()
         with session_scope(engine) as db:
             stmt = select(WorkItem)
-            if state is not None:
+            if queue:
+                stmt = stmt.where(
+                    col(WorkItem.state).in_([s.value for s in labels.HUMAN_ACTION_STATES])
+                )
+            if state:
                 stmt = stmt.where(col(WorkItem.state) == state)
             if wanted is not None:
                 stmt = stmt.where(WorkItem.kind == wanted)
+            if severity:
+                stmt = stmt.where(col(WorkItem.severity) == severity.upper())
+            if wanted_level is not None:
+                stmt = stmt.where(col(WorkItem.verification_level) == wanted_level)
+            if needle:
+                like = f"%{needle}%"
+                clauses: list[ColumnElement[bool]] = [
+                    col(WorkItem.title).ilike(like),
+                    col(WorkItem.group_key).ilike(like),
+                    col(WorkItem.blocked_reason).ilike(like),
+                ]
+                if needle.lstrip("#").isdigit():
+                    number = int(needle.lstrip("#"))
+                    clauses += [
+                        col(WorkItem.id) == number,
+                        col(WorkItem.issue_number) == number,
+                        col(WorkItem.pr_number) == number,
+                    ]
+                stmt = stmt.where(or_(*clauses))
             items = db.exec(stmt.order_by(col(WorkItem.id).desc()).limit(MAX_ROWS)).all()
+            total = len(db.exec(select(WorkItem.id)).all())
             sessions = db.exec(select(Session)).all()
             acu_by_wi: dict[int, float] = {}
             for s in sessions:
@@ -276,9 +518,17 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 request,
                 "issues.html",
                 items=items,
+                total=total,
                 acu_by_wi=acu_by_wi,
                 acu_cost_usd=settings.acu_cost_usd,
-                filters={"state": state, "kind": kind},
+                filters={
+                    "q": needle or None,
+                    "state": state or None,
+                    "kind": kind or None,
+                    "severity": severity or None,
+                    "level": level or None,
+                    "queue": "1" if queue else None,
+                },
             )
 
     @app.get("/issues/{wi_id}", response_class=HTMLResponse)
@@ -338,7 +588,13 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 )
                 .order_by(col(Event.ts), col(Event.id))
             ).all()
+            scan_run_ids = sorted(
+                {f.first_seen_run_id for f in members}
+                | {f.closed_by_run_id for f in members if f.closed_by_run_id is not None}
+            )
+            scan_runs = [r for r in metrics().runs if r.id in scan_run_ids] if scan_run_ids else []
             acus = sum(s.acus_consumed for s in sessions)
+            retry_events = [e for e in events if "retry" in e.event]
             return render(
                 request,
                 "issue.html",
@@ -351,8 +607,11 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 prs=prs,
                 checks=checks,
                 events=events,
+                retry_events=retry_events,
+                scan_runs=scan_runs,
                 acus=acus,
                 cost=acus * settings.acu_cost_usd if settings.acu_cost_usd is not None else None,
+                next_action=labels.next_human_action(wi.state, wi.blocked_reason, wi.pr_url),
             )
 
     @app.get("/prs", response_class=HTMLResponse)
@@ -360,7 +619,14 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
         m = metrics()
         with session_scope(engine) as db:
             prs = db.exec(select(PullRequest).order_by(col(PullRequest.id).desc())).all()
-            return render(request, "prs.html", prs=prs, levels=m.pr_levels)
+            titles = {
+                w.id: w.title
+                for w in db.exec(
+                    select(WorkItem).where(col(WorkItem.id).in_([p.work_item_id for p in prs]))
+                ).all()
+            }
+            levels = {lv.work_item_id: lv for lv in m.pr_levels}
+            return render(request, "prs.html", prs=prs, levels=levels, titles=titles, m=m)
 
     @app.get("/report", response_class=HTMLResponse)
     def report_page(request: Request, live: bool = Query(default=False)) -> HTMLResponse:

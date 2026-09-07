@@ -1,9 +1,65 @@
 {% extends "base.html" %}
 {% block title %}Findings · Superset hardening loop{% endblock %}
 {% block content %}
-<h1>Findings <span class="muted">({{ findings|length }})</span></h1>
-<p class="filters">Filters: {% for k, v in filters.items() if v is not none %}<span class="pill">{{ k }}={{ v }}</span> {% endfor %}<a href="/findings">clear</a>
- · kind: {% for k in range(1, 6) %}<a href="/findings?kind={{ k }}">{{ k|kind }}</a> {% endfor %}<a href="/findings?kind=unclassified">unclassified</a>
- · <a href="/findings?state=unclassified">unclassified</a> <a href="/findings?state=regression">regression</a> <a href="/findings?state=human_blocked">human_blocked</a></p>
+{% set active = [] %}
+{% for k, v in filters.items() if v is not none and v != "" %}{% set _ = active.append(k) %}{% endfor %}
+{{ ui.page_header("Findings", "Every normalized vulnerability and configuration finding from the raw scans, with the work item that owns it; nothing here is ever suppressed.", eyebrow=(findings|length ~ " of " ~ total ~ " shown")) }}
+
+<section class="panel">
+<form class="filters" method="get" action="/findings" role="search" aria-label="Filter findings">
+  <div class="field">
+    <label for="f-severity">Severity</label>
+    <select id="f-severity" name="severity">
+      <option value="">Any severity</option>
+      {% for s in severities %}<option value="{{ s.value }}"{% if filters.severity and filters.severity|upper == s.value %} selected{% endif %}>{{ (s|severity_label).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-state">State</label>
+    <select id="f-state" name="state">
+      <option value="">Any state</option>
+      {% for s in finding_states %}<option value="{{ s.value }}"{% if filters.state == s.value %} selected{% endif %}>{{ (s|finding_state).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-kind">Kind</label>
+    <select id="f-kind" name="kind">
+      <option value="">Any kind</option>
+      {% for k in kinds %}<option value="{{ k.slug }}"{% if filters.kind in (k.slug, k.value|string) %} selected{% endif %}>{{ (k|kind_label).text }}</option>{% endfor %}
+      <option value="unclassified"{% if filters.kind == "unclassified" %} selected{% endif %}>Unclassified</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-layer">Layer</label>
+    <select id="f-layer" name="layer">
+      <option value="">Any layer</option>
+      {% for l in layers %}<option value="{{ l.value }}"{% if filters.layer == l.value %} selected{% endif %}>{{ l|layer_label }}</option>{% endfor %}
+    </select>
+  </div>
+  {% if filters.run is not none %}<input type="hidden" name="run" value="{{ filters.run }}">{% endif %}
+  <div class="actions">
+    <button class="btn btn-primary" type="submit">Apply</button>
+    {% if active %}<a class="btn" href="/findings">Clear</a>{% endif %}
+  </div>
+</form>
+
+{% if active %}
+<div class="active-filters" aria-label="Active filters">
+  <span>Filtered by</span>
+  {% if filters.severity %}<span class="pill">Severity: <strong>{{ (filters.severity|severity_label).text }}</strong></span>{% endif %}
+  {% if filters.state %}<span class="pill">State: <strong>{{ (filters.state|finding_state).text }}</strong></span>{% endif %}
+  {% if filters.kind %}<span class="pill">Kind: <strong>{{ filters.kind|kind }}</strong></span>{% endif %}
+  {% if filters.layer %}<span class="pill">Layer: <strong>{{ filters.layer|layer_label }}</strong></span>{% endif %}
+  {% if filters.run is not none %}<span class="pill">First seen in <a href="/runs/{{ filters.run }}">scan #{{ filters.run }}</a></span>{% endif %}
+</div>
+{% endif %}
+
+{% if findings %}
 {% include "_findings_table.html" %}
+{% elif total == 0 %}
+{{ ui.empty("No findings yet", "Findings appear once a scan run has been ingested from the security-scan workflow or a replay.") }}
+{% else %}
+{{ ui.empty("No findings match these filters", "Try a broader severity or state, or clear the filters.") }}
+{% endif %}
+</section>
 {% endblock %}
