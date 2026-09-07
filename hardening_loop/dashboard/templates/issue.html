@@ -9,6 +9,8 @@
   <div class="card"><div class="label">GitHub</div><div class="value" style="font-size:14px">{% if wi.issue_url %}<a href="{{ wi.issue_url }}">issue #{{ wi.issue_number }}</a>{% endif %}{% if wi.pr_url %} · <a href="{{ wi.pr_url }}">PR #{{ wi.pr_number }}</a>{% endif %}</div><div class="sub mono">head {{ wi.pr_head_sha|short }} · merge {{ wi.merge_sha|short }}</div></div>
 </div>
 {% if wi.blocked_reason %}<div class="banner"><strong>blocked_reason:</strong> {{ wi.blocked_reason }}</div>{% endif %}
+{% if origin %}<div class="banner">Regression of <a href="/issues/{{ origin.id }}">#{{ origin.id }} {{ origin.title }}</a> ({{ origin.state.value }}, {{ origin.verification_level.label }}).</div>{% endif %}
+{% if regressions %}<div class="banner">Regressed later: {% for r in regressions %}<a href="/issues/{{ r.id }}">#{{ r.id }}</a> ({{ r.state.value }}){% if not loop.last %}, {% endif %}{% endfor %} — member findings below include those now owned by the regression item(s).</div>{% endif %}
 <h2>Timeline</h2>
 <table><tr><th>Created</th><th>Issue opened</th><th>PR opened</th><th>Merged</th><th>Verified</th></tr>
 <tr><td>{{ wi.created_at }}</td><td>{{ wi.issue_opened_at or '' }}</td><td>{{ wi.pr_opened_at or '' }}</td><td>{{ wi.merged_at or '' }}</td><td>{{ wi.verified_at or '' }}</td></tr></table>
@@ -16,7 +18,7 @@
 {% with findings=members %}{% include "_findings_table.html" %}{% endwith %}
 <h2>Devin sessions</h2>
 <table><tr><th>Session</th><th>Status</th><th>Detail</th><th class="num">ACU</th><th class="num">Limit</th><th class="num">Msgs</th><th>PRs</th><th>Created</th><th>Finished</th></tr>
-{% for s in sessions %}<tr><td class="mono">{% if s.url %}<a href="{{ s.url }}">{{ s.devin_id }}</a>{% else %}{{ s.devin_id }}{% endif %}</td><td>{{ s.status }}</td><td>{{ s.status_detail or '' }}</td><td class="num">{{ s.acus_consumed|num }}</td><td class="num">{{ s.max_acu_limit }}</td><td class="num">{{ s.messages_sent }}</td><td class="mono">{{ s.pull_requests|map(attribute='url')|join(' ') }}</td><td class="muted">{{ s.created_at }}</td><td class="muted">{{ s.finished_at or '' }}</td></tr>
+{% for s in sessions %}<tr><td class="mono">{% if s.url %}<a href="{{ s.url }}">{{ s.devin_id }}</a>{% else %}{{ s.devin_id }}{% endif %}</td><td>{{ s.status }}</td><td>{{ s.status_detail or '' }}</td><td class="num">{{ s.acus_consumed|num }}</td><td class="num">{{ s.max_acu_limit }}</td><td class="num">{{ s.messages_sent }}</td><td class="mono">{% for p in s.pull_requests %}<a href="{{ p.pr_url }}">{{ p.pr_url }}</a>{% if p.pr_state %} ({{ p.pr_state }}){% endif %}{% if not loop.last %} {% endif %}{% endfor %}</td><td class="muted">{{ s.created_at }}</td><td class="muted">{{ s.finished_at or '' }}</td></tr>
 {% if s.structured_output %}<tr><td colspan="9"><pre>{{ s.structured_output|tojson(indent=2) }}</pre></td></tr>{% endif %}
 {% else %}<tr><td colspan="9" class="muted">No sessions dispatched.</td></tr>{% endfor %}
 </table>

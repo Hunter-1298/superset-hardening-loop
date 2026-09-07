@@ -31,6 +31,7 @@ from hardening_loop.metrics import (
     raw_counts_by_severity,
     run_gate,
 )
+from hardening_loop.models.lineage import members_with_lineage, package_of_group_key
 from hardening_loop.models.tables import (
     Finding,
     PullRequest,
@@ -318,7 +319,7 @@ def dependency_rows(
         if w.kind is not Kind.dependency_upgrade or w.id is None:
             continue
         members = findings_by_wi.get(w.id, [])
-        package = w.group_key.split(":", 1)[1] if ":" in w.group_key else w.group_key
+        package = package_of_group_key(w.group_key)
         baseline_versions = sorted({f.pkg_version for f in members if f.pkg_version})
         sessions = sessions_by_wi.get(w.id, [])
         target = _target_from_sessions(sessions, package)
@@ -376,10 +377,7 @@ def build_report(
                 db.expunge(row)
 
     findings_by_id = {f.id: f for f in findings if f.id is not None}
-    findings_by_wi: dict[int, list[Finding]] = defaultdict(list)
-    for f in findings:
-        if f.work_item_id is not None:
-            findings_by_wi[f.work_item_id].append(f)
+    findings_by_wi = members_with_lineage(items, findings)
     sessions_by_wi: dict[int, list[Session]] = defaultdict(list)
     for s in sessions:
         sessions_by_wi[s.work_item_id].append(s)

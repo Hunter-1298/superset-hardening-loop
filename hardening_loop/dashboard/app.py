@@ -20,6 +20,7 @@ from hardening_loop.config import COMPARISON_BRANCH, Settings
 from hardening_loop.db import open_database_readonly, session_scope
 from hardening_loop.domain.enums import Kind, VerificationLevel
 from hardening_loop.metrics import Metrics, compute_metrics
+from hardening_loop.models.lineage import regression_descendants
 from hardening_loop.models.tables import (
     Event,
     Finding,
@@ -286,9 +287,19 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
             wi = db.get(WorkItem, wi_id)
             if wi is None:
                 raise HTTPException(404, f"work item {wi_id} not found")
+            all_items = db.exec(select(WorkItem)).all()
+            lineage_ids = [wi_id, *regression_descendants(all_items, wi_id)]
             members = db.exec(
-                select(Finding).where(Finding.work_item_id == wi_id).order_by(col(Finding.vuln_id))
+                select(Finding)
+                .where(col(Finding.work_item_id).in_(lineage_ids))
+                .order_by(col(Finding.vuln_id))
             ).all()
+            regressions = [w for w in all_items if w.id in lineage_ids[1:]]
+            origin = (
+                db.get(WorkItem, wi.regression_of_work_item_id)
+                if wi.regression_of_work_item_id is not None
+                else None
+            )
             sessions = db.exec(
                 select(Session).where(Session.work_item_id == wi_id).order_by(col(Session.id))
             ).all()
@@ -333,6 +344,8 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 "issue.html",
                 wi=wi,
                 members=members,
+                regressions=regressions,
+                origin=origin,
                 sessions=sessions,
                 polls=polls,
                 prs=prs,

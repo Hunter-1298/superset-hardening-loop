@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
-from sqlmodel import select
+from sqlmodel import col, select
 
 from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
@@ -237,6 +237,28 @@ def test_issue_page_shows_blocked_reason_and_events(client: TestClient) -> None:
     assert "rescan_verified" in html and "Devin sessions" in html and "Events" in html
 
 
+def test_issue_page_lists_session_prs_and_regression_lineage(
+    client: TestClient, engine: Engine
+) -> None:
+    with session_scope(engine) as db:
+        sess = db.exec(select(Session).where(Session.work_item_id == 2)).first()
+        assert sess is not None and sess.pull_requests
+        pr_url = sess.pull_requests[0]["pr_url"]
+        regression = db.exec(
+            select(WorkItem).where(col(WorkItem.regression_of_work_item_id).is_not(None))
+        ).first()
+        assert regression is not None and regression.regression_of_work_item_id is not None
+        origin_id, regression_id = regression.regression_of_work_item_id, regression.id
+        moved = db.exec(select(Finding).where(Finding.work_item_id == regression_id)).all()
+        assert moved
+    html = client.get("/issues/2").text
+    assert f'<a href="{pr_url}">{pr_url}</a>' in html
+    origin_html = client.get(f"/issues/{origin_id}").text
+    assert f'href="/issues/{regression_id}"' in origin_html
+    assert f"Member findings ({len(moved)})" in origin_html
+    assert f'href="/issues/{origin_id}"' in client.get(f"/issues/{regression_id}").text
+
+
 def test_api_endpoints(client: TestClient) -> None:
     assert client.get("/healthz").json()["read_only"] is True
     m = client.get("/api/metrics").json()
@@ -310,7 +332,21 @@ def test_report_compares_dependencies_with_upstream_master(
     assert pillow.min_fixed_version == "10.3.0"
     assert pillow.retries_used == 1 and pillow.verification_label == "L6 rescan_verified"
     assert rows["requests"].relation_to_upstream == "no_target"
-    assert rows["cryptography#r1"].state == "queued", "regression shows as its own row"
+
+
+def test_report_regression_keeps_package_and_lineage(engine: Engine, settings: Settings) -> None:
+    body = build_report_for(engine, settings, NOW)
+    crypto = [d for d in body.dependencies if d.package == "cryptography"]
+    assert len(crypto) == 2, "verified original plus its regression row"
+    verified = next(d for d in crypto if d.verification_label == "L6 rescan_verified")
+    regression = next(d for d in crypto if d.state == "queued")
+    assert regression.work_item_id != verified.work_item_id
+    for row in crypto:
+        assert row.upstream_master_version == "50.0.1"
+        assert row.baseline_version and row.min_fixed_version and row.vuln_ids
+    assert sum(verified.outcome_states.values()) == sum(regression.outcome_states.values())
+    wi_rows = {w.work_item_id: w for w in body.work_items}
+    assert wi_rows[verified.work_item_id].member_findings >= 1
 
 
 def test_report_without_upstream_fixture_is_explicit(engine: Engine, settings: Settings) -> None:
