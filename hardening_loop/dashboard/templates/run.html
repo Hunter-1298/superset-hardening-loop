@@ -2,58 +2,44 @@
 {% block title %}Scan {{ run.external_run_id }} · Superset hardening loop{% endblock %}
 {% block content %}
 {% set failed_jobs = jobs|rejectattr("success")|list %}
-{{ ui.page_header("Scan " ~ run.external_run_id, "One security-scan run of " ~ run.source_repo ~ " on " ~ run.source_branch ~ ": SBOM, raw and policy scans, runtime checks and the gate verdict for a single immutable image.", eyebrow=("Baseline scan" if run.is_baseline else "Scan run"), crumbs=[("Scans", "/runs")]) }}
+{% call ui.page_header("Scan " ~ run.external_run_id, ("Baseline scan" if run.is_baseline else "Scan") ~ " of " ~ run.source_repo ~ " on " ~ run.source_branch ~ " at " ~ (run.source_sha|short) ~ ", " ~ (run.trigger|trigger_label)|lower ~ ", ingested " ~ run.ingested_at|dt ~ ".", crumbs=[("Scans", "/runs"), (run.external_run_id, None)]) %}
+  <a href="/findings?run={{ run.id }}">Findings first seen here</a>
+  {% if not run.is_baseline %}<a href="/report">Compare with baseline</a>{% endif %}
+{% endcall %}
 
-<section class="panel" aria-labelledby="summary-heading">
-  <div class="panel-body hero">
-    <div>
-      <h2 id="summary-heading" class="sr-only">Summary</h2>
-      <div class="badges" aria-label="Status">
-        {{ ui.run_status_badge(run.status) }}
-        {% if summary %}{{ ui.gate_badge(summary.gate.get("passed"), run.scan_gate_mode.value) }}{% else %}{{ ui.badge(run.scan_gate_mode|plain_label) }}{% endif %}
-        {% if run.is_baseline %}{{ ui.badge(("baseline")|plain_label) }}{% endif %}
-        {{ ui.badge(run.trigger|trigger_label|plain_label) }}
-      </div>
-      <dl class="facts">
-        {% if summary %}
-        <div class="fact"><dt class="k">Policy HIGH + CRITICAL</dt><dd class="v">{{ summary.policy_by_severity.get("HIGH", 0) + summary.policy_by_severity.get("CRITICAL", 0) }}</dd></div>
-        <div class="fact"><dt class="k">Raw HIGH + CRITICAL</dt><dd class="v">{{ summary.raw_by_severity.get("HIGH", 0) + summary.raw_by_severity.get("CRITICAL", 0) }}</dd></div>
-        <div class="fact"><dt class="k">Raw / policy findings</dt><dd class="v">{{ summary.raw_total }} / {{ summary.policy_total }}</dd></div>
-        {% endif %}
-        <div class="fact"><dt class="k">Findings first seen</dt><dd class="v">{{ opened_count }}</dd></div>
-        <div class="fact"><dt class="k">Findings closed</dt><dd class="v">{{ closed_count }}</dd></div>
-        <div class="fact"><dt class="k">Jobs</dt><dd class="v">{{ jobs|length - failed_jobs|length }} of {{ jobs|length }} succeeded</dd></div>
-        <div class="fact"><dt class="k">Ingested</dt><dd class="v">{{ run.ingested_at|dt }}</dd></div>
-      </dl>
-    </div>
-    <div class="link-list" aria-label="Related pages">
-      <a class="btn" href="/findings?run={{ run.id }}">Findings first seen here</a>
-      {% if not run.is_baseline %}<a class="btn" href="/report">Compare with baseline</a>{% endif %}
-    </div>
-  </div>
+<section class="stats compact" aria-label="Summary">
+  {{ ui.stat("Status", ui.run_status_badge(run.status)) }}
+  {% if summary %}
+  {{ ui.stat("Gate", ui.gate_badge(summary.gate.get("passed"), run.scan_gate_mode.value)) }}
+  {{ ui.stat("Policy HIGH + CRITICAL", summary.policy_by_severity.get("HIGH", 0) + summary.policy_by_severity.get("CRITICAL", 0)) }}
+  {{ ui.stat("Raw HIGH + CRITICAL", summary.raw_by_severity.get("HIGH", 0) + summary.raw_by_severity.get("CRITICAL", 0)) }}
+  {{ ui.stat("Raw / policy findings", summary.raw_total ~ " / " ~ summary.policy_total) }}
+  {% else %}
+  {{ ui.stat("Gate mode", (run.scan_gate_mode|plain_label).text) }}
+  {% endif %}
+  {{ ui.stat("First seen / closed", opened_count ~ " / " ~ closed_count) }}
+  {{ ui.stat("Jobs succeeded", (jobs|length - failed_jobs|length) ~ " of " ~ jobs|length, tone=("danger" if failed_jobs else None)) }}
 </section>
 
 {% if summary and summary.gate.get("reason") %}
-<div class="callout callout-{{ 'success' if summary.gate.get('passed') else 'danger' }}">
-  <div class="body"><span class="label">Gate verdict</span><p>{{ summary.gate.get("reason") }}</p></div>
+<div class="notice notice-{{ 'success' if summary.gate.get('passed') else 'danger' }}">
+  <p><strong>Gate verdict.</strong> {{ summary.gate.get("reason") }}</p>
 </div>
 {% endif %}
 {% if failed_jobs %}
-<div class="callout callout-danger" role="status">
-  <div class="body"><span class="label">Incomplete evidence</span>
-  <p>{{ failed_jobs|map(attribute="name")|join(", ") }} did not succeed. A run with a failed job never proves a finding absent, so it cannot close work items.</p></div>
+<div class="notice notice-danger" role="status">
+  <p><strong>Incomplete evidence.</strong> {{ failed_jobs|map(attribute="name")|join(", ") }} did not succeed, so this run cannot prove any finding absent or close work items.</p>
 </div>
 {% endif %}
 
-<div class="grid grid-main">
-  <section class="panel" aria-labelledby="jobs-heading">
-    {{ ui.panel_head("Jobs", id="jobs-heading", hint="scanners, runtime checks and their databases") }}
+<section class="section" aria-labelledby="jobs-heading">
+    {{ ui.section_head("Jobs", id="jobs-heading", count=jobs|length) }}
     {% if jobs %}
     <div class="table-wrap">
     <table class="data">
       <thead><tr>
         <th scope="col">Job</th>
-        <th scope="col" class="w-badge">Succeeded</th>
+        <th scope="col">Succeeded</th>
         <th scope="col">Scanner</th>
         <th scope="col">Mode</th>
         <th scope="col">Target</th>
@@ -65,7 +51,7 @@
       <tbody>
       {% for j in jobs %}
       <tr>
-        <td><span class="primary mono">{{ j.name }}</span></td>
+        <td class="nowrap"><span class="primary mono">{{ j.name }}</span></td>
         <td>{{ ui.badge(j.success|yes_no) }}</td>
         <td>{{ (j.scanner.value|capitalize) if j.scanner else "—" }}</td>
         <td>{{ (j.mode|plain_label).text if j.mode else "—" }}</td>
@@ -80,13 +66,13 @@
     </table>
     </div>
     {% else %}
-    {{ ui.empty("No jobs recorded", "The scan manifest listed no jobs for this run.", compact=True) }}
+    {{ ui.empty("No jobs recorded", compact=True) }}
     {% endif %}
-  </section>
+</section>
 
-  <section class="panel" aria-labelledby="identity-heading">
-    {{ ui.panel_head("Image identity", id="identity-heading") }}
-    <div class="panel-body">
+<section class="card" aria-labelledby="identity-heading">
+    {{ ui.section_head("Image identity", id="identity-heading") }}
+    <div class="card-body">
       <dl class="kv">
         <dt>Repository</dt><dd class="mono">{{ run.source_repo }}</dd>
         <dt>Branch</dt><dd class="mono">{{ run.source_branch }}</dd>
@@ -99,22 +85,21 @@
         <dt>Started</dt><dd>{{ run.started_at|dt }}</dd>
         <dt>Finished</dt><dd>{{ run.finished_at|dt }}</dd>
       </dl>
+      {% if run.tools or run.ci_layer_delta %}
+      <details class="disclosure mt">
+        <summary>Tool versions and CI layer delta</summary>
+        <div class="disclosure-body">
+          {% if run.tools %}<dl class="kv">{% for k, v in run.tools.items() %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl>{% endif %}
+          {% if run.ci_layer_delta %}<p class="small muted{% if run.tools %} mt{% endif %}">Layers the <code>ci</code> image adds on top of <code>lean</code></p><pre>{{ run.ci_layer_delta|tojson(indent=2) }}</pre>{% endif %}
+        </div>
+      </details>
+      {% endif %}
     </div>
-    {% if run.tools or run.ci_layer_delta %}
-    <details class="disclosure flush">
-      <summary>Tool versions and CI layer delta</summary>
-      <div class="disclosure-body padded">
-        {% if run.tools %}<dl class="kv">{% for k, v in run.tools.items() %}<dt>{{ k }}</dt><dd class="mono">{{ v }}</dd>{% endfor %}</dl>{% endif %}
-        {% if run.ci_layer_delta %}<p class="small muted{% if run.tools %} mt{% endif %}">Layers the <code>ci</code> image adds on top of <code>lean</code></p><pre>{{ run.ci_layer_delta|tojson(indent=2) }}</pre>{% endif %}
-      </div>
-    </details>
-    {% endif %}
-  </section>
-</div>
+</section>
 
 {% if summary %}
-<section class="panel" aria-labelledby="severity-heading">
-  {{ ui.panel_head("Findings by severity", id="severity-heading", hint="raw is the unsuppressed count; policy applies approved OpenVEX only") }}
+<section class="section" aria-labelledby="severity-heading">
+  {{ ui.section_head("Findings by severity", id="severity-heading") }}
   <div class="table-wrap">
   <table class="data">
     <thead><tr><th scope="col">Severity</th><th scope="col" class="num">Raw</th><th scope="col" class="num">Policy</th><th scope="col" class="num">Suppressed by approved VEX</th></tr></thead>
@@ -129,13 +114,13 @@
 </section>
 {% endif %}
 
-<section class="panel" aria-labelledby="findings-heading">
-  {{ ui.panel_head("Findings first seen or closed by this scan", id="findings-heading", hint=findings|length ~ " shown") }}
+<section class="section" aria-labelledby="findings-heading">
+  {{ ui.section_head("Findings first seen or closed by this scan", id="findings-heading", count=findings|length) }}
   {% include "_findings_table.html" %}
 </section>
 
 <details class="disclosure">
-  <summary>Scan events <span class="hint">{{ events|length }}</span></summary>
+  <summary>Scan events <span class="muted">{{ events|length }}</span></summary>
   <div class="disclosure-body table-wrap">
     {% if events %}
     <table class="data">
@@ -147,7 +132,7 @@
       </tbody>
     </table>
     {% else %}
-    {{ ui.empty("No events", None, compact=True) }}
+    {{ ui.empty("No events", compact=True) }}
     {% endif %}
   </div>
 </details>

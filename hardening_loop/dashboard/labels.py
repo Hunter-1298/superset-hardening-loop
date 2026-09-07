@@ -192,9 +192,15 @@ def plain(value: object) -> Label:
 
 
 def work_item_state(value: object) -> Label:
+    """Lifecycle events also record verification-level names in `to_state`, so those
+    resolve to their verification label instead of the generic fallback."""
     try:
         return WORK_ITEM_STATE_LABELS[WorkItemState(str(value))]
     except ValueError:
+        pass
+    try:
+        return VERIFICATION_LABELS[VerificationLevel[str(value)]]
+    except KeyError:
         return _fallback(value)
 
 
@@ -226,11 +232,17 @@ def severity(value: object) -> Label:
 
 
 def verification(value: object) -> Label:
+    """Accepts the enum, its numeric rank, or its name; `None` renders as a dash."""
+    if value is None:
+        return Label("—", Tone.neutral)
     if isinstance(value, VerificationLevel):
         return VERIFICATION_LABELS[value]
+    raw = str(value)
     try:
-        return VERIFICATION_LABELS[VerificationLevel(int(str(value)))]
-    except (ValueError, TypeError):
+        return VERIFICATION_LABELS[
+            VerificationLevel(int(raw)) if raw.isdigit() else VerificationLevel[raw]
+        ]
+    except (ValueError, KeyError):
         return _fallback(value)
 
 

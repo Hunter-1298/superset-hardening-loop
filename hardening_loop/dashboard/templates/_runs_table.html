@@ -2,10 +2,9 @@
 <div class="table-wrap">
 <table class="data">
   <thead><tr>
-    <th scope="col">Scan</th>
-    <th scope="col">Branch</th>
-    <th scope="col" class="w-badge">Status</th>
-    <th scope="col" class="w-badge">Gate</th>
+    <th scope="col" class="w-title">Scan</th>
+    <th scope="col">Status</th>
+    <th scope="col">Gate</th>
     <th scope="col" class="num">Raw</th>
     <th scope="col" class="num">Policy</th>
     <th scope="col" class="num">Raw HIGH+CRIT</th>
@@ -15,8 +14,7 @@
   <tbody>
   {% for r in runs %}
   <tr>
-    <td class="w-title"><a class="primary" href="/runs/{{ r.id }}">{{ r.external_run_id }}</a><span class="secondary">{{ r.trigger|trigger_label }}{% if r.is_baseline %} · baseline{% endif %} · <span class="mono">{{ r.source_sha|short }}</span></span></td>
-    <td class="mono">{{ r.source_branch }}</td>
+    <td class="w-title"><a class="primary" href="/runs/{{ r.id }}">{{ r.external_run_id }}</a><span class="secondary"><span class="mono">{{ r.source_branch }}</span> · <span class="mono">{{ r.source_sha|short }}</span> · {{ r.trigger|trigger_label }}{% if r.is_baseline %} · baseline{% endif %}</span></td>
     <td>{{ ui.run_status_badge(r.status) }}</td>
     <td>{{ ui.gate_badge(r.gate.passed, r.gate.mode) }}</td>
     <td class="num">{{ r.raw_total }}</td>
@@ -30,5 +28,5 @@
 </table>
 </div>
 {% else %}
-{{ ui.empty("No scans yet", "Scan runs appear once the security-scan workflow (or a replay) has been ingested.", compact=True) }}
+{{ ui.empty("No scans yet", compact=True) }}
 {% endif %}

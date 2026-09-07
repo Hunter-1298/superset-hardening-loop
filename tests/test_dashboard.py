@@ -279,7 +279,7 @@ def test_issue_page_lists_session_prs_and_regression_lineage(
     assert f'<a href="{pr_url}" rel="noopener">' in html
     origin_html = client.get(f"/issues/{origin_id}").text
     assert f'href="/issues/{regression_id}"' in origin_html
-    assert f"{len(moved)} grouped into this item" in origin_html
+    assert f'id="findings-heading">Findings <span class="count">{len(moved)}</span>' in origin_html
     assert f'href="/issues/{origin_id}"' in client.get(f"/issues/{regression_id}").text
 
 

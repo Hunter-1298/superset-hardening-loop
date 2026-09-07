@@ -70,18 +70,17 @@ class NavItem:
 
     label: str
     href: str
-    icon: str
     prefixes: tuple[str, ...]
     secondary: bool = False
 
 
 NAV: tuple[NavItem, ...] = (
-    NavItem("Overview", "/", "home", ("/",)),
-    NavItem("Work items", "/issues", "list", ("/issues",)),
-    NavItem("Scans", "/runs", "scan", ("/runs",)),
-    NavItem("Findings", "/findings", "finding", ("/findings",), secondary=True),
-    NavItem("Pull requests", "/prs", "pr", ("/prs",)),
-    NavItem("Report", "/report", "report", ("/report",)),
+    NavItem("Overview", "/", ("/",)),
+    NavItem("Work items", "/issues", ("/issues",)),
+    NavItem("Scans", "/runs", ("/runs",)),
+    NavItem("Findings", "/findings", ("/findings",), secondary=True),
+    NavItem("Pull requests", "/prs", ("/prs",)),
+    NavItem("Report", "/report", ("/report",)),
 )
 
 

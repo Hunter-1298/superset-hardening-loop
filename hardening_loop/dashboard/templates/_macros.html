@@ -1,18 +1,22 @@
-{# Reusable presentation macros. Every badge carries its text label; colour is never the only cue. #}
+{# Reusable presentation macros. Status text always accompanies colour. #}
 
 {% macro badge(label, title=None) -%}
 <span class="badge badge-{{ label.tone.value }}"{% if title or label.hint %} title="{{ title or label.hint }}"{% endif %}>{{ label.text }}</span>
 {%- endmacro %}
 
+{% macro plain(label, title=None) -%}
+<span class="label-text"{% if title or label.hint %} title="{{ title or label.hint }}"{% endif %}>{{ label.text }}</span>
+{%- endmacro %}
+
 {% macro state_badge(state) -%}{{ badge(state|wi_state) }}{%- endmacro %}
 {% macro finding_state_badge(state) -%}{{ badge(state|finding_state) }}{%- endmacro %}
 {% macro severity_badge(sev) -%}{{ badge(sev|severity_label) }}{%- endmacro %}
-{% macro kind_badge(kind) -%}{{ badge(kind|kind_label) }}{%- endmacro %}
-{% macro level_badge(level) -%}{{ badge(level|level_label, title=level|level) }}{%- endmacro %}
+{% macro kind_badge(kind) -%}{{ plain(kind|kind_label) }}{%- endmacro %}
+{% macro level_badge(level) -%}{{ plain(level|level_label, title=level|level) }}{%- endmacro %}
 {% macro run_status_badge(status) -%}{{ badge(status|run_status) }}{%- endmacro %}
 {% macro pr_state_badge(state) -%}{{ badge(state|pr_state) }}{%- endmacro %}
 {% macro check_badge(conclusion) -%}{{ badge(conclusion|check_label) }}{%- endmacro %}
-{% macro yes_no_badge(value, title=None) -%}{{ badge(value|yes_no, title=title) }}{%- endmacro %}
+{% macro yes_no_badge(value, title=None) -%}{{ plain(value|yes_no, title=title) }}{%- endmacro %}
 {% macro gate_badge(passed, mode) -%}{{ badge(gate_label(passed, mode)) }}{%- endmacro %}
 
 {% macro sha(value, length=12) -%}
@@ -31,11 +35,10 @@
 </div>
 {%- endmacro %}
 
-{% macro page_header(title, lede, eyebrow=None, crumbs=None) -%}
+{% macro page_header(title, lede, crumbs=None) -%}
 <header class="page-header">
   <div>
-    {% if crumbs %}<nav class="breadcrumb" aria-label="Breadcrumb">{% for text, href in crumbs %}<a href="{{ href }}">{{ text }}</a><span aria-hidden="true">/</span>{% endfor %}<span>{{ eyebrow or title }}</span></nav>{% endif %}
-    {% if eyebrow and not crumbs %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}
+    {% if crumbs %}<nav class="breadcrumb" aria-label="Breadcrumb">{% for text, href in crumbs %}{% if loop.last %}<span aria-current="page">{{ text }}</span>{% else %}<a href="{{ href }}">{{ text }}</a><span aria-hidden="true">/</span>{% endif %}{% endfor %}</nav>{% endif %}
     <h1>{{ title }}</h1>
     <p class="lede">{{ lede }}</p>
   </div>
@@ -43,31 +46,21 @@
 </header>
 {%- endmacro %}
 
-{% macro panel_head(title, id=None, hint=None, more_href=None, more_text=None, level=2) -%}
-<div class="panel-head">
-  <h{{ level }}{% if id %} id="{{ id }}"{% endif %}>{{ title }}{% if hint %} <span class="hint">{{ hint }}</span>{% endif %}</h{{ level }}>
+{% macro section_head(title, id=None, count=None, more_href=None, more_text=None, level=2) -%}
+<div class="section-head">
+  <h{{ level }}{% if id %} id="{{ id }}"{% endif %}>{{ title }}{% if count is not none %} <span class="count">{{ count }}</span>{% endif %}</h{{ level }}>
   {% if more_href %}<a class="more" href="{{ more_href }}">{{ more_text or 'View all' }}</a>{% endif %}
 </div>
 {%- endmacro %}
 
-{% macro kpi(label, value, sub=None, tone=None, href=None, primary=False) -%}
-<div class="kpi{% if primary %} is-primary{% endif %}">
+{% macro stat(label, value, note=None, tone=None, href=None) -%}
+<div class="stat">
   <div class="label">{{ label }}</div>
   <div class="value{% if tone %} is-{{ tone }}{% endif %}">{% if href %}<a href="{{ href }}">{{ value }}</a>{% else %}{{ value }}{% endif %}</div>
-  {% if sub %}<div class="sub">{{ sub }}</div>{% endif %}
+  {% if note %}<div class="note">{{ note }}</div>{% endif %}
 </div>
 {%- endmacro %}
 
 {% macro external_link(href, text) -%}
 <a href="{{ href }}" rel="noopener">{{ text }}<span class="sr-only"> (opens GitHub or Devin)</span></a>
-{%- endmacro %}
-
-{% macro icon(name) -%}
-{%- if name == 'home' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 7.5 8 2.5l6 5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V7.5Z"/><path d="M6.5 14V9.5h3V14"/></svg>
-{%- elif name == 'list' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M5 4h9M5 8h9M5 12h9"/><circle cx="2.5" cy="4" r=".9" fill="currentColor" stroke="none"/><circle cx="2.5" cy="8" r=".9" fill="currentColor" stroke="none"/><circle cx="2.5" cy="12" r=".9" fill="currentColor" stroke="none"/></svg>
-{%- elif name == 'scan' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2M2 8h12"/></svg>
-{%- elif name == 'finding' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg>
-{%- elif name == 'pr' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="4" cy="3.5" r="1.5"/><circle cx="4" cy="12.5" r="1.5"/><circle cx="12" cy="12.5" r="1.5"/><path d="M4 5v6M12 11V7a2 2 0 0 0-2-2H8"/><path d="m9.5 3.5 -1.5 1.5 1.5 1.5"/></svg>
-{%- elif name == 'report' -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M4 2h5.5L13 5.5V14H4z"/><path d="M9.5 2v3.5H13M6 9h4M6 11.5h4"/></svg>
-{%- else -%}<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/></svg>{%- endif -%}
 {%- endmacro %}

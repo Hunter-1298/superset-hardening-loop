@@ -12,45 +12,37 @@
 <div class="shell">
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-top">
-      <a class="brand" href="/"><span class="brand-mark" aria-hidden="true">HL</span><span>Hardening loop<span class="brand-sub">Superset CVE remediation</span></span></a>
-      <button class="nav-toggle" type="button" aria-controls="primary-nav" aria-expanded="false" data-nav-toggle>
-        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
-        Menu
-      </button>
+      <a class="brand" href="/">Hardening loop</a>
+      <button class="nav-toggle" type="button" aria-controls="primary-nav" aria-expanded="false" data-nav-toggle>Menu</button>
     </div>
     <nav id="primary-nav" aria-label="Primary">
       {% set current = nav_current(current_path) %}
       <ul class="nav-list">
         {% for item in nav_items %}
-        <li><a class="nav-link{% if item.secondary %} is-secondary{% endif %}" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}>{% if not item.secondary %}{{ ui.icon(item.icon) }}{% endif %}<span>{{ item.label }}</span></a></li>
+        <li><a class="nav-link{% if item.secondary %} is-secondary{% endif %}" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}><span>{{ item.label }}</span></a></li>
         {% endfor %}
       </ul>
     </nav>
     <div class="nav-footer">
-      <span>Read-only view · approvals and merges happen in GitHub</span>
       <a href="/api/metrics">Metrics JSON</a>
       <a href="/api/docs">API reference</a>
+      <span>Read-only. Approvals and merges happen in GitHub.</span>
     </div>
   </aside>
 
   <div class="content">
     <header class="topbar" aria-label="Current context">
-      <div class="topbar-context">
-        <span class="context-item"><span class="k">Repository</span> <span class="v mono">{{ fork_repo }}</span></span>
-        <span class="context-item"><span class="k">Branch</span> <span class="v mono">{{ branch }}</span></span>
-        <span class="context-item"><span class="k">Latest scan</span>
-          {% if latest_run %}<a class="v" href="/runs/{{ latest_run.id }}">{{ ui.run_status_badge(latest_run.status) }}</a> {{ ui.gate_badge(latest_run.gate.passed, latest_run.gate.mode) }}{% else %}<span class="v muted">No scans yet</span>{% endif %}
-        </span>
+      <div class="topbar-scope mono">
+        <span class="sr-only">Repository</span><span>{{ fork_repo }}</span><span class="sep" aria-hidden="true">/</span><span class="sr-only">Branch</span><span>{{ branch }}</span>
       </div>
-      <div class="topbar-meta">
-        <span>Gate mode <strong>{{ gate_mode }}</strong></span>
-        <span>Last updated <time datetime="{{ last_updated.isoformat() if last_updated else '' }}">{{ last_updated|dt }} UTC</time></span>
-        {% if replay_mode %}<span class="badge badge-info">Replay · no spend</span>{% endif %}
+      <div class="topbar-status">
+        <span><span class="sr-only">Latest scan</span>{% if latest_run %}<a href="/runs/{{ latest_run.id }}" class="mono">{{ latest_run.external_run_id }}</a> {{ ui.run_status_badge(latest_run.status) }} {{ ui.gate_badge(latest_run.gate.passed, latest_run.gate.mode) }}{% else %}<span class="muted">No scans yet</span>{% endif %}</span>
+        <span class="muted"><span class="sr-only">Last updated</span><time datetime="{{ last_updated.isoformat() if last_updated else '' }}">{{ last_updated|dt }} UTC</time></span>
       </div>
     </header>
 
     <main id="main" tabindex="-1">
-      {% if replay_mode %}<div class="banner banner-replay" role="note"><strong>Replay mode:</strong> all data below was produced by the real orchestrator against in-memory GitHub/Devin doubles with outbound network blocked. No Devin ACUs were spent.</div>{% endif %}
+      {% if replay_mode %}<p class="replay-note" role="note"><strong>Replay mode:</strong> the orchestrator ran against local GitHub and Devin doubles with outbound network blocked. No Devin ACUs were spent.</p>{% endif %}
       {% block content %}{% endblock %}
     </main>
   </div>

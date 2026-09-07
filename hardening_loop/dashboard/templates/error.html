@@ -3,14 +3,7 @@
 {% block content %}
 {{ ui.page_header(
   "Page not found" if error_status == 404 else ("Invalid request" if error_status == 422 else "Something went wrong"),
-  "The dashboard could not show this page.",
-  eyebrow="Error " ~ error_status
+  "HTTP " ~ error_status ~ ". " ~ error_detail
 ) }}
-<section class="panel">
-  <div class="panel-body">
-    {% call ui.empty("HTTP " ~ error_status, error_detail) %}
-    <p class="hint"><a href="/">Back to the overview</a> · <a href="/issues">Browse work items</a> · <a href="/runs">Browse scans</a></p>
-    {% endcall %}
-  </div>
-</section>
+<p><a href="/">Back to the overview</a> · <a href="/issues">Work items</a> · <a href="/runs">Scans</a></p>
 {% endblock %}

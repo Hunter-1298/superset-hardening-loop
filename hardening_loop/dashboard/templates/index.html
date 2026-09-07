@@ -1,55 +1,50 @@
 {% extends "base.html" %}
 {% block title %}Overview · Superset hardening loop{% endblock %}
 {% block content %}
-{{ ui.page_header("Overview", "Where remediation of " ~ fork_repo ~ " on " ~ branch ~ " stands: what needs a person, what the scanners still see, and what Devin has closed.") }}
+{{ ui.page_header("Overview", "Remediation of " ~ fork_repo ~ " on " ~ branch ~ ", as of the latest ingested scan.") }}
 
-<section class="grid grid-kpi" aria-label="Key metrics">
-  {{ ui.kpi("Open HIGH/CRITICAL", m.open_high_critical, "raw findings not in a closing state", tone=("danger" if m.open_high_critical else "success"), href="/findings", primary=True) }}
-  {{ ui.kpi("Needs attention", queue_total, "work items blocked on a person", tone=("danger" if queue_total else "success"), href="/issues?queue=1", primary=True) }}
+<section class="stats" aria-label="Key metrics">
+  {{ ui.stat("Open HIGH/CRITICAL", m.open_high_critical, tone=("danger" if m.open_high_critical else "success"), href="/findings") }}
+  {{ ui.stat("Needs attention", queue_total, tone=("danger" if queue_total else "success"), href="/issues?queue=1") }}
   {% if m.gate_ready_for_enforce is none %}
-    {{ ui.kpi("Gate ready for enforce", "n/a", "no scan of " ~ branch ~ " yet") }}
+    {{ ui.stat("Gate ready for enforce", "n/a", note="no scan of " ~ branch ~ " yet") }}
   {% else %}
-    {{ ui.kpi("Gate ready for enforce", "Yes" if m.gate_ready_for_enforce else "No", "policy HIGH/CRITICAL on latest " ~ branch ~ " scan must be 0", tone=("success" if m.gate_ready_for_enforce else "warning"), href=("/runs/" ~ m.latest_main_run_id if m.latest_main_run_id else None)) }}
+    {{ ui.stat("Gate ready for enforce", "Yes" if m.gate_ready_for_enforce else "No", tone=("success" if m.gate_ready_for_enforce else "warning"), href=("/runs/" ~ m.latest_main_run_id if m.latest_main_run_id else None)) }}
   {% endif %}
-  {{ ui.kpi("First-try success", m.first_try_overall.rate|pct, m.first_try_overall.succeeded ~ " of " ~ m.first_try_overall.attempted ~ " PRs green on the first head", href="/prs") }}
-  {{ ui.kpi("Median remediation time", m.timing.median_hours|hours, "p90 " ~ (m.timing.p90_hours|hours) ~ " · " ~ m.timing.verified_count ~ " verified") }}
+  {{ ui.stat("First-try success", m.first_try_overall.rate|pct, note=m.first_try_overall.succeeded ~ " of " ~ m.first_try_overall.attempted ~ " PRs", href="/prs") }}
+  {{ ui.stat("Median remediation time", m.timing.median_hours|hours, note="p90 " ~ (m.timing.p90_hours|hours)) }}
   {% if m.cost.acu_cost_usd %}
-    {{ ui.kpi("Cost per verified issue", m.cost.estimated_cost_per_verified_issue_usd|money, (m.cost.acu_per_verified_issue|num) ~ " ACU per verified issue · " ~ (m.cost.acu_total|num) ~ " ACU total") }}
+    {{ ui.stat("Cost per verified issue", m.cost.estimated_cost_per_verified_issue_usd|money, note=(m.cost.acu_per_verified_issue|num) ~ " ACU per verified issue") }}
   {% else %}
-    {{ ui.kpi("ACU per verified issue", m.cost.acu_per_verified_issue|num, (m.cost.acu_total|num) ~ " ACU total · set HL_ACU_COST_USD to price ACUs") }}
+    {{ ui.stat("ACU per verified issue", m.cost.acu_per_verified_issue|num, note=(m.cost.acu_total|num) ~ " ACU total") }}
   {% endif %}
 </section>
 
 <div class="grid grid-main">
-  <section class="panel" aria-labelledby="queue-title">
-    <div class="panel-head">
-      <h2 id="queue-title">Needs attention <span class="hint">{{ queue_total }} work item{{ '' if queue_total == 1 else 's' }} waiting on a person</span></h2>
-      <a class="more" href="/issues?queue=1">View all</a>
-    </div>
-    <div class="panel-body flush">
-      {% if queue %}
-      <ol class="list-plain" aria-label="Work queue">
-        {% for w in queue %}
-        <li class="queue-item">
-          <div>
-            <a class="title" href="/issues/{{ w.id }}">#{{ w.id }} {{ w.title }}</a>
-            <div class="meta">{{ ui.kind_badge(w.kind) }}{% if w.blocked_reason %}<span>Blocked</span>{% endif %}{% if w.issue_url %}<a href="{{ w.issue_url }}">Issue #{{ w.issue_number }}</a>{% endif %}{% if w.pr_url %}<a href="{{ w.pr_url }}">PR #{{ w.pr_number }}</a>{% endif %}</div>
-            {% if w.blocked_reason %}<p class="reason">{{ w.blocked_reason|blocked_reason }}</p>{% endif %}
-          </div>
-          <div class="badges">{{ ui.severity_badge(w.severity) }}{{ ui.state_badge(w.state) }}</div>
-        </li>
-        {% endfor %}
-      </ol>
-      {% if queue_total > queue|length %}<p class="panel-note">Showing {{ queue|length }} of {{ queue_total }}. <a href="/issues?queue=1">See the full list.</a></p>{% endif %}
-      {% else %}
-      {{ ui.empty("Nothing needs attention", "Every work item is either progressing automatically or already verified.", compact=True) }}
-      {% endif %}
-    </div>
+  <section class="card" aria-labelledby="queue-title">
+    {{ ui.section_head("Needs attention", id="queue-title", count=queue_total, more_href="/issues?queue=1", more_text="All") }}
+    {% if queue %}
+    <ol class="list-plain" aria-label="Work queue">
+      {% for w in queue %}
+      <li class="queue-item">
+        <div>
+          <a class="title" href="/issues/{{ w.id }}">{{ w.title }}</a>
+          <div class="meta"><span class="mono">#{{ w.id }}</span> · {{ (w.severity|severity_label).text }} · {{ (w.kind|kind_label).text }}{% if w.issue_url %} · <a href="{{ w.issue_url }}">Issue #{{ w.issue_number }}</a>{% endif %}{% if w.pr_url %} · <a href="{{ w.pr_url }}">PR #{{ w.pr_number }}</a>{% endif %}</div>
+          {% if w.blocked_reason %}<p class="reason">{{ w.blocked_reason|blocked_reason }}</p>{% endif %}
+        </div>
+        <div class="state">{{ ui.state_badge(w.state) }}</div>
+      </li>
+      {% endfor %}
+    </ol>
+    {% if queue_total > queue|length %}<p class="card-note">Showing {{ queue|length }} of {{ queue_total }}.</p>{% endif %}
+    {% else %}
+    {{ ui.empty("Nothing needs attention", compact=True) }}
+    {% endif %}
   </section>
 
   <div class="stack">
-    <section class="panel" aria-labelledby="states-title">
-      {{ ui.panel_head("Work items by state", id="states-title", more_href="/issues", more_text="All work items") }}
+    <section class="card" aria-labelledby="states-title">
+      {{ ui.section_head("Work items by state", id="states-title", more_href="/issues", more_text="All") }}
       {% set states = [] %}
       {% for s, n in m.issues_by_state.items() if n %}{% set _ = states.append((s, n)) %}{% endfor %}
       {% if states %}
@@ -59,16 +54,16 @@
         {% endfor %}
       </ul>
       {% else %}
-      {{ ui.empty("No work items yet", "Work items appear after the first scan is classified.", compact=True) }}
+      {{ ui.empty("No work items yet", compact=True) }}
       {% endif %}
     </section>
 
-    <section class="panel" aria-labelledby="prlevel-title">
-      {{ ui.panel_head("Verification level per PR", id="prlevel-title", hint=m.pr_levels|length ~ " PRs", more_href="/prs", more_text="All pull requests") }}
+    <section class="card" aria-labelledby="prlevel-title">
+      {{ ui.section_head("Verification level per PR", id="prlevel-title", more_href="/prs", more_text="All") }}
       {% if m.pr_levels %}
       <ul class="stat-list">
         {% for lv in verification_levels|reverse %}{% set n = m.pr_levels|selectattr("level", "equalto", lv.value)|list|length %}{% if n %}
-        <li><span>{{ ui.level_badge(lv) }}</span><span class="n">{{ n }}</span></li>
+        <li>{{ ui.level_badge(lv) }}<span class="n">{{ n }}</span></li>
         {% endif %}{% endfor %}
       </ul>
       {% else %}
@@ -78,76 +73,71 @@
   </div>
 </div>
 
-<div class="grid grid-main">
-  <section class="panel" aria-labelledby="runs-title">
-    {{ ui.panel_head("Recent scans", id="runs-title", more_href="/runs", more_text="All scans") }}
-    {% include "_runs_table.html" %}
-  </section>
+<section class="section" aria-labelledby="runs-title">
+  {{ ui.section_head("Recent scans", id="runs-title", more_href="/runs", more_text="All scans") }}
+  {% include "_runs_table.html" %}
+</section>
 
-  <section class="panel" aria-labelledby="activity-title">
-    {{ ui.panel_head("Recent remediation activity", id="activity-title", more_href="/issues") }}
-    <div class="panel-body">
-      {% if recent_events %}
-      <ol class="timeline">
-        {% for e in recent_events %}
-        <li class="{% if e.to_state in ('verified', 'merged') %}is-success{% elif e.to_state in ('needs_human', 'failed', 'checks_failed') %}is-danger{% else %}is-info{% endif %}">
-          <div class="when"><time datetime="{{ e.ts.isoformat() }}">{{ e.ts|dt }}</time> · <span class="who">{{ e.actor }}</span></div>
-          <div class="what"><a href="/issues/{{ e.entity_id }}">#{{ e.entity_id }} {{ titles.get(e.entity_id, 'work item') }}</a></div>
-          <div class="transition">{{ e.event|replace('_', ' ') }}{% if e.to_state %} → {{ (e.to_state|wi_state).text }}{% endif %}</div>
-        </li>
-        {% endfor %}
-      </ol>
-      {% else %}
-      {{ ui.empty("No remediation activity yet", "Events appear once work items are created and dispatched.", compact=True) }}
-      {% endif %}
-    </div>
-  </section>
-</div>
+<section class="card" aria-labelledby="activity-title">
+  {{ ui.section_head("Recent remediation activity", id="activity-title", more_href="/issues", more_text="All work items") }}
+  {% if recent_events %}
+  <ol class="activity">
+    {% for e in recent_events %}
+    <li>
+      <span class="when"><time datetime="{{ e.ts.isoformat() }}">{{ e.ts|dt }}</time></span>
+      <span class="what"><a href="/issues/{{ e.entity_id }}">{{ titles.get(e.entity_id, 'Work item #' ~ e.entity_id) }}</a> <span class="to">{{ (e.event|event_label).text|lower }}{% if e.to_state %} → {{ (e.to_state|wi_state).text }}{% endif %} · {{ e.actor|actor_label }}</span></span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  {{ ui.empty("No remediation activity yet", compact=True) }}
+  {% endif %}
+</section>
 
 <details class="disclosure">
-  <summary>Findings breakdown <span class="hint">by kind, layer, scanner and state, with first-try and timing per kind</span></summary>
-  <div class="disclosure-body">
-    <div class="grid grid-2 tight">
-      <div class="table-wrap">
-        <table class="data">
-          <caption>Findings by kind</caption>
-          <thead><tr><th scope="col">Kind</th><th scope="col" class="num">Findings</th><th scope="col" class="num">First-try</th><th scope="col" class="num">Median</th><th scope="col" class="num">P90</th></tr></thead>
-          <tbody>
-          {% for k, n in m.findings_by_kind|dictsort %}
-          <tr><td><a href="/findings?kind={{ k }}">{{ k|kind }}</a></td><td class="num">{{ n }}</td>
-            <td class="num">{{ m.first_try_by_kind[k].rate|pct if k in m.first_try_by_kind else 'n/a' }}</td>
-            <td class="num">{{ m.timing_by_kind[k].median_hours|hours if k in m.timing_by_kind else 'n/a' }}</td>
-            <td class="num">{{ m.timing_by_kind[k].p90_hours|hours if k in m.timing_by_kind else 'n/a' }}</td></tr>
-          {% else %}<tr><td colspan="5" class="muted">No findings.</td></tr>{% endfor %}
-          </tbody>
-        </table>
-      </div>
-      <div class="table-wrap">
-        <table class="data">
-          <caption>Findings by layer, scanner and state</caption>
-          <thead><tr><th scope="col">Group</th><th scope="col">Value</th><th scope="col" class="num">Findings</th></tr></thead>
-          <tbody>
-          {% for k, n in m.findings_by_layer|dictsort %}<tr><td class="muted">Layer</td><td><a href="/findings?layer={{ k }}">{{ k|layer_label }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}
-          {% for k, n in m.findings_by_scanner|dictsort %}<tr><td class="muted">Scanner</td><td>{{ k|scanner_label }}</td><td class="num">{{ n }}</td></tr>{% endfor %}
-          {% for k, n in m.findings_by_state|dictsort %}<tr><td class="muted">State</td><td><a href="/findings?state={{ k }}">{{ ui.finding_state_badge(k) }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}
-          </tbody>
-        </table>
-      </div>
+  <summary>Findings breakdown</summary>
+  <div class="disclosure-body grid grid-2">
+    <div class="table-wrap">
+      <table class="data">
+        <caption>Findings by kind</caption>
+        <thead><tr><th scope="col">Kind</th><th scope="col" class="num">Findings</th><th scope="col" class="num">First-try</th><th scope="col" class="num">Median</th><th scope="col" class="num">P90</th></tr></thead>
+        <tbody>
+        {% for k, n in m.findings_by_kind|dictsort %}
+        <tr><td><a href="/findings?kind={{ k }}">{{ k|kind }}</a></td><td class="num">{{ n }}</td>
+          <td class="num">{{ m.first_try_by_kind[k].rate|pct if k in m.first_try_by_kind else 'n/a' }}</td>
+          <td class="num">{{ m.timing_by_kind[k].median_hours|hours if k in m.timing_by_kind else 'n/a' }}</td>
+          <td class="num">{{ m.timing_by_kind[k].p90_hours|hours if k in m.timing_by_kind else 'n/a' }}</td></tr>
+        {% else %}<tr><td colspan="5" class="muted">No findings.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="table-wrap">
+      <table class="data">
+        <caption>Findings by layer, scanner and state</caption>
+        <thead><tr><th scope="col">Group</th><th scope="col">Value</th><th scope="col" class="num">Findings</th></tr></thead>
+        <tbody>
+        {% for k, n in m.findings_by_layer|dictsort %}<tr><td class="muted">Layer</td><td><a href="/findings?layer={{ k }}">{{ k|layer_label }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}
+        {% for k, n in m.findings_by_scanner|dictsort %}<tr><td class="muted">Scanner</td><td>{{ k|scanner_label }}</td><td class="num">{{ n }}</td></tr>{% endfor %}
+        {% for k, n in m.findings_by_state|dictsort %}<tr><td class="muted">State</td><td><a href="/findings?state={{ k }}">{{ ui.finding_state_badge(k) }}</a></td><td class="num">{{ n }}</td></tr>{% endfor %}
+        </tbody>
+      </table>
     </div>
   </div>
 </details>
 
 <details class="disclosure">
-  <summary>Throughput per day <span class="hint">sessions started, PRs opened, items verified</span></summary>
-  <div class="disclosure-body table-wrap">
+  <summary>Throughput per day</summary>
+  <div class="disclosure-body">
     {% set days = (m.throughput.sessions_started_per_day.keys()|list + m.throughput.prs_opened_per_day.keys()|list + m.throughput.verified_per_day.keys()|list)|unique|sort %}
     {% if days %}
+    <div class="table-wrap">
     <table class="data">
       <thead><tr><th scope="col">Day</th><th scope="col" class="num">Sessions started</th><th scope="col" class="num">PRs opened</th><th scope="col" class="num">Verified</th></tr></thead>
       <tbody>
       {% for d in days %}<tr><td>{{ d }}</td><td class="num">{{ m.throughput.sessions_started_per_day.get(d, 0) }}</td><td class="num">{{ m.throughput.prs_opened_per_day.get(d, 0) }}</td><td class="num">{{ m.throughput.verified_per_day.get(d, 0) }}</td></tr>{% endfor %}
       </tbody>
     </table>
+    </div>
     {% else %}
     {{ ui.empty("No throughput yet", compact=True) }}
     {% endif %}

@@ -8,28 +8,28 @@
 {% set regression_total = report.outcomes.get("regression", 0) %}
 {% set blocked_total = report.outcomes.get("human_blocked", 0) %}
 {% set needs_person_total = report.work_items_by_state.get("needs_human", 0) + report.work_items_by_state.get("ready_for_human", 0) + report.work_items_by_state.get("failed", 0) %}
-{% call ui.page_header("Run report", "Baseline versus the latest " ~ branch ~ " scan, every finding outcome, and each dependency upgrade compared with the " ~ comparison_branch ~ " pins; the same report is available as Markdown and JSON.", eyebrow=("Generated " ~ report.generated_at|dt)) %}
-  <a class="btn" href="/report.md">Markdown</a>
-  <a class="btn" href="/api/report">JSON</a>
-  <a class="btn" href="/report?live=1">Recompute now</a>
+{% call ui.page_header("Run report", "Baseline against the latest " ~ branch ~ " scan, with every finding outcome and each dependency upgrade compared to " ~ comparison_branch ~ ".") %}
+  <a href="/report.md">Markdown</a>
+  <a href="/api/report">JSON</a>
+  <a href="/report?live=1">Recompute now</a>
 {% endcall %}
+<p class="small muted">Generated {{ report.generated_at|dt }} · {{ source }}</p>
 
-<p class="small muted">Source: {{ source }}</p>
-{% for n in report.notes %}
-<div class="callout callout-warning" role="status"><div class="body"><span class="label">Note</span><p>{{ n }}</p></div></div>
-{% endfor %}
+{% if report.notes %}
+<div class="notice notice-warning" role="status">{% for n in report.notes %}<p>{{ n }}</p>{% endfor %}</div>
+{% endif %}
 
 {% if b or l %}
-<section class="panel" aria-labelledby="decision-heading">
-  {{ ui.panel_head("Where the remediation branch stands", id="decision-heading", hint="policy counts decide the gate; raw counts are never suppressed") }}
-  <div class="panel-body compare">
+<section class="section" aria-labelledby="decision-heading">
+  {{ ui.section_head("Where the remediation branch stands", id="decision-heading") }}
+  <div class="card compare">
     <div class="col">
       <h3>Baseline</h3>
       {% if b %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
       <div class="big">{{ b.policy_by_severity.get("HIGH", 0) + b.policy_by_severity.get("CRITICAL", 0) }}</div>
-      <div class="row"><span class="k">Policy HIGH + CRITICAL</span></div>
       <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ b.raw_by_severity.get("HIGH", 0) + b.raw_by_severity.get("CRITICAL", 0) }}</span></div>
-      <div class="row"><span class="k">All findings (raw / policy)</span><span>{{ b.raw_total }} / {{ b.policy_total }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ b.raw_total }} / {{ b.policy_total }}</span></div>
       <div class="row"><span class="k">Gate</span>{{ ui.gate_badge(b.gate_passed, b.gate_mode) }}</div>
       <div class="row"><span class="k">Scan</span><a href="/runs/{{ b.id }}">{{ b.external_run_id }}</a></div>
       <div class="row"><span class="k">Commit</span>{{ ui.sha(b.source_sha) }}</div>
@@ -40,49 +40,45 @@
       {% if b and l %}
       {% set bh = b.policy_by_severity.get("HIGH", 0) + b.policy_by_severity.get("CRITICAL", 0) %}
       {% set lh = l.policy_by_severity.get("HIGH", 0) + l.policy_by_severity.get("CRITICAL", 0) %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
       <div class="big">{{ ui.delta(lh - bh) }}</div>
-      <div class="row"><span class="k">Policy HIGH + CRITICAL</span></div>
       <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ ui.delta((l.raw_by_severity.get("HIGH", 0) + l.raw_by_severity.get("CRITICAL", 0)) - (b.raw_by_severity.get("HIGH", 0) + b.raw_by_severity.get("CRITICAL", 0))) }}</span></div>
-      <div class="row"><span class="k">All findings (raw / policy)</span><span>{{ ui.delta(l.raw_total - b.raw_total) }} / {{ ui.delta(l.policy_total - b.policy_total) }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ ui.delta(l.raw_total - b.raw_total) }} / {{ ui.delta(l.policy_total - b.policy_total) }}</span></div>
       <div class="row"><span class="k">Ready for enforce mode</span>{{ ui.yes_no_badge(l.gate_ready_for_enforce, title="True only when policy HIGH and CRITICAL are both zero") }}</div>
       <div class="row"><span class="k">Can close findings</span>{{ ui.yes_no_badge(report.latest_is_closing_candidate, title="Complete, successful scan of " ~ branch ~ " with every original detector") }}</div>
-      {% else %}<p class="muted">The comparison appears once both a baseline and a later {{ branch }} scan exist.</p>{% endif %}
+      {% else %}<p class="muted">Appears once both a baseline and a later {{ branch }} scan exist.</p>{% endif %}
     </div>
     <div class="col">
       <h3>Latest {{ branch }}</h3>
       {% if l %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
       <div class="big">{{ l.policy_by_severity.get("HIGH", 0) + l.policy_by_severity.get("CRITICAL", 0) }}</div>
-      <div class="row"><span class="k">Policy HIGH + CRITICAL</span></div>
       <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ l.raw_by_severity.get("HIGH", 0) + l.raw_by_severity.get("CRITICAL", 0) }}</span></div>
-      <div class="row"><span class="k">All findings (raw / policy)</span><span>{{ l.raw_total }} / {{ l.policy_total }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ l.raw_total }} / {{ l.policy_total }}</span></div>
       <div class="row"><span class="k">Gate</span>{{ ui.gate_badge(l.gate_passed, l.gate_mode) }}</div>
       <div class="row"><span class="k">Scan</span><a href="/runs/{{ l.id }}">{{ l.external_run_id }}</a></div>
       <div class="row"><span class="k">Commit</span>{{ ui.sha(l.source_sha) }}</div>
       {% else %}<p class="muted">No later scan of {{ branch }} yet.</p>{% endif %}
     </div>
+    {% if l %}<div class="verdict"><strong>Latest gate verdict.</strong> {{ l.gate_reason }}</div>{% endif %}
   </div>
-  {% if l %}
-  <div class="callout callout-{{ 'success' if l.gate_passed else 'danger' }} flush">
-    <div class="body"><span class="label">Latest gate verdict</span><p>{{ l.gate_reason }}</p></div>
-  </div>
-  {% endif %}
 </section>
 {% else %}
 {{ ui.empty("No scans to report on", "The report fills in once a baseline scan has been ingested.") }}
 {% endif %}
 
-<section class="grid grid-kpi" aria-label="Remediation outcomes">
-  {{ ui.kpi("Findings fixed", fixed_total, sub="absent from a later complete scan", tone="success" if fixed_total else None) }}
-  {{ ui.kpi("Approved dispositions", disposition_total, sub="findings covered by human-approved OpenVEX") }}
-  {{ ui.kpi("Findings in regression", regression_total, sub="reappeared after closure, not yet regrouped", tone="danger" if regression_total else None) }}
-  {{ ui.kpi("Findings closed as blocked", blocked_total, sub="human-blocked finding outcome", tone="warning" if blocked_total else None) }}
-  {{ ui.kpi("Work items needing a person", needs_person_total, sub="needs attention, ready for review or failed", tone="warning" if needs_person_total else None) }}
-  {{ ui.kpi("ACU used", report.acu_total|num, sub=report.verified_items ~ " verified · " ~ report.retries_total ~ " retries") }}
-  {{ ui.kpi("Estimated cost", report.estimated_cost_total_usd|money, sub=("$" ~ report.acu_cost_usd ~ " per ACU") if report.acu_cost_usd else "ACU price not configured") }}
+<section class="stats compact" aria-label="Remediation outcomes">
+  {{ ui.stat("Findings fixed", fixed_total, tone="success" if fixed_total else None) }}
+  {{ ui.stat("Approved dispositions", disposition_total) }}
+  {{ ui.stat("Findings in regression", regression_total, tone="danger" if regression_total else None) }}
+  {{ ui.stat("Findings closed as blocked", blocked_total, tone="warning" if blocked_total else None) }}
+  {{ ui.stat("Work items needing a person", needs_person_total, tone="warning" if needs_person_total else None) }}
+  {{ ui.stat("ACU used", report.acu_total|num, note=report.verified_items ~ " verified · " ~ report.retries_total ~ " retries") }}
+  {{ ui.stat("Estimated cost", report.estimated_cost_total_usd|money, note=("$" ~ report.acu_cost_usd ~ " per ACU") if report.acu_cost_usd else "ACU price not configured") }}
 </section>
 
-<section class="panel" aria-labelledby="deps-heading">
-  {{ ui.panel_head("Dependency upgrades compared with " ~ comparison_branch, id="deps-heading", hint=(("pins from " ~ report.upstream_pins_source) if report.upstream_pins_source else None)) }}
+<section class="section" aria-labelledby="deps-heading">
+  {{ ui.section_head("Dependency upgrades compared with " ~ comparison_branch, id="deps-heading", count=report.dependencies|length) }}
   {% if report.dependencies %}
   <div class="table-wrap allow-sticky">
   <table class="data">
@@ -92,8 +88,8 @@
       <th scope="col">Devin target</th>
       <th scope="col">{{ comparison_branch }}</th>
       <th scope="col">Compared with upstream</th>
-      <th scope="col" class="w-badge">State</th>
-      <th scope="col" class="w-badge">Verification</th>
+      <th scope="col">State</th>
+      <th scope="col">Verification</th>
       <th scope="col" class="num">ACU</th>
       <th scope="col" class="num">Retries</th>
       <th scope="col">Links</th>
@@ -101,7 +97,7 @@
     <tbody>
     {% for d in report.dependencies %}
     <tr>
-      <td class="w-title"><a class="primary mono" href="/issues/{{ d.work_item_id }}">{{ d.package }}</a><span class="secondary mono">#{{ d.work_item_id }} · {{ d.vuln_ids|join(", ") }}</span>{% if d.bound_blocked %}<span class="secondary">{{ ui.badge(("bound-blocked upgrade")|plain_label, title="A pyproject upper bound blocks the minimum fixed version " ~ (d.min_fixed_version or "")) }}</span>{% endif %}</td>
+      <td class="w-title"><a class="primary mono" href="/issues/{{ d.work_item_id }}">{{ d.package }}</a><span class="secondary mono">#{{ d.work_item_id }} · {{ d.vuln_ids|join(", ") }}</span>{% if d.bound_blocked %}<span class="secondary" title="A pyproject upper bound blocks the minimum fixed version {{ d.min_fixed_version or '' }}">upper bound blocks the upgrade</span>{% endif %}</td>
       <td class="mono">{{ d.baseline_version or "—" }}</td>
       <td class="mono">{{ d.devin_target_version or "—" }}{% if d.min_fixed_version %}<span class="secondary">fix ≥ {{ d.min_fixed_version }}</span>{% endif %}</td>
       <td class="mono">{{ d.upstream_master_version or "—" }}</td>
@@ -116,14 +112,15 @@
     </tbody>
   </table>
   </div>
+  {% if report.upstream_pins_source %}<p class="small muted mt">Upstream pins from <span class="mono">{{ report.upstream_pins_source }}</span>.</p>{% endif %}
   {% else %}
-  {{ ui.empty("No dependency-upgrade work items", "Rows appear once fixable Python dependency findings have been grouped into work items.", compact=True) }}
+  {{ ui.empty("No dependency-upgrade work items", compact=True) }}
   {% endif %}
 </section>
 
 <div class="grid grid-2">
-  <section class="panel" aria-labelledby="sev-heading">
-    {{ ui.panel_head("Severity change, baseline to latest", id="sev-heading") }}
+  <section class="section" aria-labelledby="sev-heading">
+    {{ ui.section_head("Severity change, baseline to latest", id="sev-heading") }}
     {% if report.severity_deltas %}
     <div class="table-wrap">
     <table class="data">
@@ -142,12 +139,12 @@
     </table>
     </div>
     {% else %}
-    {{ ui.empty("No comparison yet", None, compact=True) }}
+    {{ ui.empty("No comparison yet", compact=True) }}
     {% endif %}
   </section>
 
-  <section class="panel" aria-labelledby="outcomes-heading">
-    {{ ui.panel_head("Finding outcomes and work item states", id="outcomes-heading") }}
+  <section class="section" aria-labelledby="outcomes-heading">
+    {{ ui.section_head("Finding outcomes and work item states", id="outcomes-heading") }}
     <div class="table-wrap">
     <table class="data">
       <thead><tr><th scope="col">Finding outcome</th><th scope="col" class="num">Findings</th></tr></thead>
@@ -166,19 +163,19 @@
 </div>
 
 <details class="disclosure">
-  <summary>All work items <span class="hint">{{ report.work_items|length }}</span></summary>
+  <summary>All work items <span class="muted">{{ report.work_items|length }}</span></summary>
   <div class="disclosure-body table-wrap">
     {% if report.work_items %}
     <table class="data">
       <thead><tr>
         <th scope="col" class="w-title">Work item</th>
-        <th scope="col" class="w-badge">Kind</th>
-        <th scope="col" class="w-badge">State</th>
-        <th scope="col" class="w-badge">Verification</th>
+        <th scope="col">Kind</th>
+        <th scope="col">State</th>
+        <th scope="col">Verification</th>
         <th scope="col" class="num">ACU</th>
         <th scope="col" class="num">Cost</th>
         <th scope="col" class="num">Retries</th>
-        <th scope="col" class="w-badge">First head green</th>
+        <th scope="col">First head green</th>
         <th scope="col">Member outcomes</th>
       </tr></thead>
       <tbody>
@@ -191,26 +188,26 @@
         <td class="num">{{ w.acus|num }}<span class="secondary">cap {{ w.acu_cap|num }}</span></td>
         <td class="num">{{ w.estimated_cost_usd|money }}</td>
         <td class="num">{{ w.retries_used }}</td>
-        <td>{% if w.first_head_checks_green is none %}{{ ui.badge(None|check_label) }}{% else %}{{ ui.yes_no_badge(w.first_head_checks_green) }}{% endif %}</td>
+        <td>{% if w.first_head_checks_green is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(w.first_head_checks_green) }}{% endif %}</td>
         <td class="small">{{ w.member_findings }} finding{{ "" if w.member_findings == 1 else "s" }}: {% for k, n in w.member_outcomes.items() %}{{ n }} {{ k|outcome_label|lower }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
       </tr>
       {% endfor %}
       </tbody>
     </table>
     {% else %}
-    {{ ui.empty("No work items", None, compact=True) }}
+    {{ ui.empty("No work items", compact=True) }}
     {% endif %}
   </div>
 </details>
 
 {% if b or l %}
 <details class="disclosure">
-  <summary>Raw scan facts <span class="hint">tools, digests, jobs, per-layer and per-scanner counts</span></summary>
+  <summary>Raw scan facts</summary>
   <div class="disclosure-body padded grid grid-2">
     {% for label, r in [("Baseline", b), ("Latest " ~ branch, l)] if r %}
     <div>
-      <h3 class="small">{{ label }} — <span class="mono">{{ r.external_run_id }}</span></h3>
-      <dl class="kv">
+      <h3>{{ label }} <span class="mono muted">{{ r.external_run_id }}</span></h3>
+      <dl class="kv mt">
         <dt>Branch</dt><dd class="mono">{{ r.source_branch }}</dd>
         <dt>Commit</dt><dd>{{ ui.sha(r.source_sha, 40) }}</dd>
         <dt>Trigger</dt><dd>{{ r.trigger|trigger_label }}</dd>

@@ -3,15 +3,15 @@
 <div class="table-wrap">
 <table class="data">
   <thead><tr>
-    <th scope="col" class="w-badge">Severity</th>
+    <th scope="col">Severity</th>
     <th scope="col" class="w-title">Finding</th>
     <th scope="col">Package or resource</th>
-    <th scope="col" class="w-badge">Kind</th>
+    <th scope="col">Kind</th>
     <th scope="col">Layer</th>
     <th scope="col">Scanners</th>
     <th scope="col">Fix available</th>
-    <th scope="col" class="w-badge">State</th>
-    {% if not hide_work_item %}<th scope="col" class="w-id">Work item</th>{% endif %}
+    <th scope="col">State</th>
+    {% if not hide_work_item %}<th scope="col">Work item</th>{% endif %}
   </tr></thead>
   <tbody>
   {% for f in findings %}
@@ -22,14 +22,14 @@
     <td>{{ ui.kind_badge(f.kind) }}{% if f.unclassified_reason %}<span class="secondary">{{ f.unclassified_reason }}</span>{% endif %}</td>
     <td>{{ f.layer|layer_label }}</td>
     <td>{{ ("both" if f.reported_by_trivy and f.reported_by_grype else ("trivy_only" if f.reported_by_trivy else ("grype_only" if f.reported_by_grype else "config")))|scanner_label }}</td>
-    <td class="mono small">{% for s, v in f.fix_versions_by_scanner.items() %}{{ s }}: {{ v|join(", ") or "—" }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td>
+    <td class="mono small nowrap">{% for s, v in f.fix_versions_by_scanner.items() %}{{ s }}: {{ v|join(", ") or "—" }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td>
     <td>{{ ui.finding_state_badge(f.state) }}</td>
-    {% if not hide_work_item %}<td class="w-id">{% if f.work_item_id %}<a href="/issues/{{ f.work_item_id }}">#{{ f.work_item_id }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}
+    {% if not hide_work_item %}<td>{% if f.work_item_id %}<a href="/issues/{{ f.work_item_id }}">#{{ f.work_item_id }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}
   </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
 {% else %}
-{{ ui.empty("No findings", "Nothing matches here.", compact=True) }}
+{{ ui.empty("No findings", compact=True) }}
 {% endif %}

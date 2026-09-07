@@ -5,30 +5,30 @@
 {% set open_prs = prs|selectattr("state", "equalto", "open")|list %}
 {% set verified = levels.values()|selectattr("level_name", "equalto", "rescan_verified")|list %}
 {% set first_try = levels.values()|selectattr("first_head_checks_green", "equalto", True)|list %}
-{{ ui.page_header("Pull requests", "Every remediation pull request Devin opened on the fork, with the highest verification level each one reached; reviews, approvals and merges happen in GitHub.", eyebrow=(prs|length ~ " pull request" ~ ("" if prs|length == 1 else "s"))) }}
+{{ ui.page_header("Pull requests", prs|length ~ " remediation pull request" ~ ("" if prs|length == 1 else "s") ~ " opened by Devin on the fork. Reviews, approvals and merges happen in GitHub.") }}
 
 {% if prs %}
-<section class="grid grid-4" aria-label="Pull request summary">
-  {{ ui.kpi("Open", open_prs|length, sub="awaiting review or CI") }}
-  {{ ui.kpi("Merged by a person", merged|length, sub="of " ~ prs|length ~ " opened") }}
-  {{ ui.kpi("Verified by rescan", verified|length, sub="highest level reached", tone="success" if verified else None) }}
-  {{ ui.kpi("Green on first head", first_try|length, sub="no retry needed") }}
+<section class="stats compact" aria-label="Pull request summary">
+  {{ ui.stat("Open", open_prs|length) }}
+  {{ ui.stat("Merged by a person", merged|length, note="of " ~ prs|length ~ " opened") }}
+  {{ ui.stat("Verified by rescan", verified|length, tone="success" if verified else None) }}
+  {{ ui.stat("Green on first head", first_try|length) }}
 </section>
 {% endif %}
 
-<section class="panel" aria-labelledby="levels-heading">
-  {{ ui.panel_head("Highest verification level per pull request", id="levels-heading", hint="one row per work item that opened a PR") }}
+<section class="section" aria-labelledby="levels-heading">
+  {{ ui.section_head("Highest verification level per pull request", id="levels-heading", count=levels|length) }}
   {% if levels %}
   <div class="table-wrap allow-sticky">
   <table class="data">
     <thead><tr>
       <th scope="col" class="w-title">Work item</th>
       <th scope="col">Pull request</th>
-      <th scope="col" class="w-badge">Verification</th>
-      <th scope="col" class="w-badge">Kind</th>
-      <th scope="col" class="w-badge">First head green</th>
+      <th scope="col">Verification</th>
+      <th scope="col">Kind</th>
+      <th scope="col">First head green</th>
       <th scope="col" class="num">Retries</th>
-      <th scope="col" class="w-badge">Item state</th>
+      <th scope="col">Item state</th>
     </tr></thead>
     <tbody>
     {% for l in levels.values()|sort(attribute="level", reverse=True) %}
@@ -37,7 +37,7 @@
       <td>{{ ui.external_link(l.pr_url, l.pr_url|replace("https://github.com/", "")) }}</td>
       <td>{{ ui.level_badge(l.level) }}</td>
       <td>{{ ui.kind_badge(l.kind) }}</td>
-      <td>{% if l.first_head_checks_green is none %}{{ ui.badge(None|check_label) }}{% else %}{{ ui.yes_no_badge(l.first_head_checks_green, title="CI on the first pushed head") }}{% endif %}</td>
+      <td>{% if l.first_head_checks_green is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(l.first_head_checks_green, title="CI on the first pushed head") }}{% endif %}</td>
       <td class="num">{{ l.retries_used }}</td>
       <td>{{ ui.state_badge(l.state) }}</td>
     </tr>
@@ -52,17 +52,17 @@
 
 {% if prs %}
 <details class="disclosure">
-  <summary>All pull request records <span class="hint">{{ prs|length }}</span></summary>
+  <summary>All pull request records <span class="muted">{{ prs|length }}</span></summary>
   <div class="disclosure-body table-wrap">
     <table class="data">
       <thead><tr>
         <th scope="col">Pull request</th>
-        <th scope="col" class="w-id">Work item</th>
-        <th scope="col" class="w-badge">State</th>
-        <th scope="col" class="w-badge">Verification</th>
+        <th scope="col">Work item</th>
+        <th scope="col">State</th>
+        <th scope="col">Verification</th>
         <th scope="col">Head</th>
         <th scope="col">Merge commit</th>
-        <th scope="col" class="w-badge">Diff policy</th>
+        <th scope="col">Diff policy</th>
         <th scope="col">Devin Review</th>
         <th scope="col">Approved by</th>
         <th scope="col" class="w-date">Opened</th>
@@ -72,13 +72,13 @@
       {% for p in prs %}
       <tr>
         <td>{{ ui.external_link(p.url, p.repo ~ "#" ~ p.number) }}<span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
-        <td class="w-id"><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td>
+        <td><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td>
         <td>{{ ui.pr_state_badge(p.state) }}</td>
         <td>{{ ui.level_badge(p.verification_level) }}</td>
         <td>{{ ui.sha(p.head_sha) }}</td>
         <td>{{ ui.sha(p.merge_sha) }}</td>
-        <td>{% if p.diff_policy_ok is none %}{{ ui.badge(None|check_label) }}{% else %}{{ ui.yes_no_badge(p.diff_policy_ok, title=(p.diff_policy_violations|join("; ") if p.diff_policy_violations else "Only allowed files changed")) }}{% endif %}</td>
-        <td>{% if p.review_status %}{{ ui.badge(p.review_status|plain_label) }}{% if p.review_comment_count %}<span class="secondary">{{ p.review_comment_count }} comment{{ "" if p.review_comment_count == 1 else "s" }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{% if p.diff_policy_ok is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(p.diff_policy_ok, title=(p.diff_policy_violations|join("; ") if p.diff_policy_violations else "Only allowed files changed")) }}{% endif %}</td>
+        <td>{% if p.review_status %}{{ (p.review_status|plain_label).text }}{% if p.review_comment_count %}<span class="secondary">{{ p.review_comment_count }} comment{{ "" if p.review_comment_count == 1 else "s" }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
         <td>{{ p.approved_by or "—" }}</td>
         <td class="w-date">{{ p.opened_at|dt }}</td>
         <td class="w-date">{{ p.merged_at|dt }}</td>
