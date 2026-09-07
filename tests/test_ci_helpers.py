@@ -273,7 +273,33 @@ def _run() -> WorkflowRun:
         workflow_sha=BASELINE_SHA,
         ref="refs/heads/main",
         gate_mode=GateMode.report,
+        job_results={"lean-smoke": "success", "app-runs": "success"},
     )
+
+
+def test_workflow_run_runtime_verified_requires_every_runtime_job_green() -> None:
+    assert _run().runtime_verified is True
+    broken = WorkflowRun(
+        run_id=1,
+        run_attempt=1,
+        event="pull_request",
+        workflow_sha="a" * 40,
+        ref="refs/pull/9/merge",
+        gate_mode=GateMode.report,
+        head_sha="b" * 40,
+        job_results={"lean-smoke": "success", "app-runs": "failure"},
+    )
+    assert broken.runtime_verified is False
+    assert broken.to_dict()["head_sha"] == "b" * 40
+    none_recorded = WorkflowRun(
+        run_id=1,
+        run_attempt=1,
+        event="push",
+        workflow_sha="a" * 40,
+        ref="r",
+        gate_mode=GateMode.report,
+    )
+    assert none_recorded.runtime_verified is False
 
 
 def _images() -> dict[ImageTarget, RegistryImage]:
@@ -334,6 +360,8 @@ def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) ->
     assert set(loaded.jobs) == {"lean-raw", "lean-policy", "ci-raw"}
     assert loaded.lean_image_id == LEAN_DIGEST
     assert loaded.run["run_id"] == 42 and loaded.gates["lean-policy"]["passed"] is True
+    assert loaded.run["runtime_verified"] is True
+    assert loaded.run["job_results"] == {"app-runs": "success", "lean-smoke": "success"}
 
 
 def test_write_scan_manifest_refuses_incomplete_run(tmp_path: Path) -> None:

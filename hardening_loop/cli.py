@@ -178,6 +178,8 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
         ref=args.ref,
         gate_mode=GateMode(args.gate_mode),
         server_url=args.server_url,
+        head_sha=args.head_sha or None,
+        job_results=dict(spec.split("=", 1) for spec in args.job_result or []),
     )
     gate_files = {}
     for spec in args.gate or []:
@@ -349,6 +351,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="job dir that must be present, e.g. lean-raw (repeatable)",
     )
     sm.add_argument("--gate", action="append", metavar="JOB=gate.json", help="gate verdicts")
+    sm.add_argument("--head-sha", help="PR head SHA when --source-sha is the merge commit")
+    sm.add_argument(
+        "--job-result",
+        action="append",
+        metavar="JOB=RESULT",
+        help="GitHub `needs.<job>.result` of a runtime job to record (repeatable)",
+    )
     sm.set_defaults(fn=cmd_scan_manifest)
 
     neg = sub.add_parser("ci-negative", help="operator-triggered negative suite against the fork")

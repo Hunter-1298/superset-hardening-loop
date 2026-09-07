@@ -299,10 +299,17 @@ class WorkflowRun:
     ref: str
     gate_mode: GateMode
     server_url: str = "https://github.com"
+    head_sha: str | None = None  # PR head when `source_sha` is the synthetic merge commit
+    job_results: dict[str, str] = field(default_factory=dict)  # job name -> GitHub result
 
     @property
     def trigger(self) -> Trigger:
         return Trigger(self.event)
+
+    @property
+    def runtime_verified(self) -> bool:
+        """True only when every recorded runtime job (lean-smoke, app-runs, ...) succeeded."""
+        return bool(self.job_results) and all(r == "success" for r in self.job_results.values())
 
     def url(self, repo: str) -> str:
         return f"{self.server_url}/{repo}/actions/runs/{self.run_id}/attempts/{self.run_attempt}"
@@ -315,6 +322,9 @@ class WorkflowRun:
             "workflow_sha": self.workflow_sha,
             "ref": self.ref,
             "scan_gate_mode": self.gate_mode.value,
+            "head_sha": self.head_sha,
+            "job_results": dict(sorted(self.job_results.items())),
+            "runtime_verified": self.runtime_verified,
         }
 
 
