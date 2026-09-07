@@ -68,12 +68,34 @@ def _version_at_least(actual: str | None, pinned: str) -> bool:
 
 
 def original_detectors(finding: Finding) -> set[Scanner]:
+    """The scanners that reported the finding when it was opened. Later scans rewrite
+    `reported_by_*`; closure requirements must not move with them."""
     dets: set[Scanner] = set()
-    if finding.reported_by_trivy:
+    if finding.opened_by_trivy:
         dets.add(Scanner.trivy)
-    if finding.reported_by_grype:
+    if finding.opened_by_grype:
         dets.add(Scanner.grype)
     return dets
+
+
+def _job_reasons(name: str, det: Scanner, job: ScanJob, finding: Finding) -> list[str]:
+    """Every job whose absence is read as a fix — raw and policy alike — has to be the right image,
+    a pinned-or-newer scanner and a database no older than the one that opened the finding."""
+    out: list[str] = []
+    if (
+        job.image_target is not None
+        and finding.image_target is not None
+        and job.image_target != finding.image_target
+    ):
+        out.append(f"{name} scanned {job.image_target}, need {finding.image_target}")
+    if not _version_at_least(job.tool_version, PINNED_VERSIONS[det]):
+        out.append(f"{name} {job.tool_version} < pinned {PINNED_VERSIONS[det]}")
+    if finding.opening_db_built_at is not None:
+        if job.db_built_at is None:
+            out.append(f"{name} has no db timestamp: freshness unproven")
+        elif job.db_built_at < finding.opening_db_built_at:
+            out.append(f"{name} db {job.db_built_at} older than opening run")
+    return out
 
 
 def validate_closing_run(
@@ -114,30 +136,13 @@ def validate_closing_run(
         if not detectors:
             reasons.append("finding has no original detector")
         for det in detectors:
-            job = by_name.get(f"{det.value}-raw")
-            if job is None or not job.success:
-                reasons.append(f"{det.value}-raw job missing or failed")
-                continue
-            if (
-                job.image_target is not None
-                and finding.image_target is not None
-                and job.image_target != finding.image_target
-            ):
-                reasons.append(
-                    f"{det.value} scanned {job.image_target}, need {finding.image_target}"
-                )
-            if not _version_at_least(job.tool_version, PINNED_VERSIONS[det]):
-                reasons.append(f"{det.value} {job.tool_version} < pinned {PINNED_VERSIONS[det]}")
-            if (
-                finding.opening_db_built_at is not None
-                and job.db_built_at is not None
-                and job.db_built_at < finding.opening_db_built_at
-            ):
-                reasons.append(f"{det.value} db {job.db_built_at} older than opening run")
-            if require_policy:
-                pjob = by_name.get(f"{det.value}-policy")
-                if pjob is None or not pjob.success:
-                    reasons.append(f"{det.value}-policy job missing or failed")
+            names = [f"{det.value}-raw"] + ([f"{det.value}-policy"] if require_policy else [])
+            for name in names:
+                job = by_name.get(name)
+                if job is None or not job.success:
+                    reasons.append(f"{name} job missing or failed")
+                    continue
+                reasons.extend(_job_reasons(name, det, job, finding))
     for j in jobs:
         if not j.success:
             reasons.append(f"job {j.name} failed")

@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from operator import attrgetter
 
 from packaging.specifiers import SpecifierSet
 from sqlalchemy import Engine
@@ -124,8 +125,19 @@ def ingest_run(
     policy_jobs = [j for j in jobs.values() if j.mode is ScanMode.policy]
     if len(raw_jobs) != 1:
         raise ValueError(f"expected exactly one raw job per run, got {len(raw_jobs)}")
+    if len(policy_jobs) > 1:
+        raise ValueError(f"expected at most one policy job per run, got {len(policy_jobs)}")
     raw = raw_jobs[0]
     policy = policy_jobs[0] if policy_jobs else None
+    if raw.platform != meta.platform:
+        raise ValueError(f"raw job platform {raw.platform} != run platform {meta.platform}")
+    if policy is not None:
+        subject = attrgetter("image_ref", "image_target", "platform", "layer_scope")
+        if subject(policy) != subject(raw):
+            raise ValueError(
+                f"policy job scanned {subject(policy)}, raw job scanned {subject(raw)}: "
+                "suppressions of one image cannot speak for another"
+            )
     all_jobs_succeeded = all(j.all_jobs_succeeded for j in jobs.values())
 
     tools = {
@@ -361,6 +373,8 @@ def _upsert_finding(
                 (d for d in (raw.tools.trivy_db_updated_at, raw.tools.grype_db_built_at) if d),
                 default=None,
             ),
+            opened_by_trivy=Scanner.trivy in nf.reported_by,
+            opened_by_grype=Scanner.grype in nf.reported_by,
         )
     finding.purl = nf.purl
     finding.pkg_name = nf.pkg_name

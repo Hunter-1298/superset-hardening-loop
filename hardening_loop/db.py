@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from hardening_loop.models import tables
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
