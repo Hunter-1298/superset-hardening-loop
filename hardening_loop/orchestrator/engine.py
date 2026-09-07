@@ -96,6 +96,16 @@ class SystemClock:
         return utcnow()
 
 
+@dataclass(frozen=True)
+class AcuBudgetPosition:
+    consumed: float
+    outstanding: float
+
+    @property
+    def committed(self) -> float:
+        return self.consumed + self.outstanding
+
+
 @dataclass
 class TickReport:
     work_items_created: int = 0
@@ -395,8 +405,9 @@ class Orchestrator:
         issues = self.open_issues()
         created = adopted = 0
         with session_scope(self.engine) as db:
+            adopted += self._recover_dispatching(db)
             active = self._active_session_count(db)
-            spent = self._acu_spent(db)
+            budget = self._acu_budget_position(db)
             candidates = db.exec(
                 select(WorkItem)
                 .where(WorkItem.state == WorkItemState.issue_open)
@@ -412,7 +423,7 @@ class Orchestrator:
                 labels = self.gh.get_issue(self.repo, wi.issue_number).labels
                 if not dispatch_allowed(wi.severity, labels):
                     continue
-                if spent + wi.acu_cap > self.settings.global_acu_budget:
+                if budget.committed + wi.acu_cap > self.settings.global_acu_budget:
                     self._event(
                         db,
                         entity_type="work_item",
@@ -420,19 +431,46 @@ class Orchestrator:
                         event="budget_deferred",
                         from_state=wi.state.value,
                         to_state=wi.state.value,
-                        reason=f"spent={spent:.2f}+cap={wi.acu_cap:.0f}>"
+                        reason=f"consumed={budget.consumed:.2f}+outstanding="
+                        f"{budget.outstanding:.2f}+cap={wi.acu_cap:.0f}>"
                         f"budget={self.settings.global_acu_budget:.0f}",
                     )
                     continue
                 outcome = self._dispatch_one(db, wi)
                 if outcome == "created":
                     created += 1
-                    active += 1
-                    spent += wi.acu_cap
                 elif outcome == "adopted":
                     adopted += 1
+                if outcome in ("created", "adopted"):
                     active += 1
+                    budget = self._acu_budget_position(db)
         return created, adopted, issues
+
+    def _recover_dispatching(self, db: DbSession) -> int:
+        """Resume work items a crashed dispatch left in `dispatching` (the DB lock is committed
+        before any Devin call, so a crash anywhere after it strands the item). `dispatch()` is the
+        only writer of that state and ticks are serial, so anything in it at tick start is stale.
+        Adopt the `wi-<id>`-tagged session if Devin holds one, otherwise release the lock through
+        the normal dispatch-failure path (retryable, bounded by `max_dispatch_failures`)."""
+        adopted = 0
+        stuck = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.dispatching)).all()
+        for wi in stuck:
+            assert wi.id is not None
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=wi.id,
+                event="dispatch_recovery",
+                from_state=wi.state.value,
+                to_state=wi.state.value,
+                reason="found in dispatching at tick start",
+            )
+            outcome = self._adopt_tagged_session(db, wi)
+            if outcome is None:
+                outcome = self._dispatch_failed(db, wi, "dispatching_recovered:no_session_at_devin")
+            if outcome == "adopted":
+                adopted += 1
+        return adopted
 
     def open_issues(self) -> int:
         n = 0
@@ -505,17 +543,11 @@ class Orchestrator:
         self._wi(db, wi, WorkItemEvent.dispatch_started, "capacity available")
         db.flush()
         db.commit()
+        # 2. Reconcile: a session already tagged wi-<id> means a previous crash mid-dispatch.
+        outcome = self._adopt_tagged_session(db, wi)
+        if outcome is not None:
+            return outcome
         tag = f"wi-{wi.id}"
-        # 2. Reconcile: an existing active session with our tag means a previous crash mid-dispatch.
-        try:
-            existing = [s for s in self.devin.list_sessions(tags=[tag]) if s.is_active]
-        except Exception as exc:
-            return self._dispatch_failed(db, wi, f"list_sessions:{exc}")
-        if existing:
-            snap = existing[0]
-            self._record_session(db, wi, snap, adopted=True)
-            self._wi(db, wi, WorkItemEvent.session_adopted, snap.session_id)
-            return "adopted"
         # 3. Create.
         members = db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all()
         try:
@@ -547,6 +579,29 @@ class Orchestrator:
             f"Devin session started: {snap.url or snap.session_id} (cap {wi.acu_cap:.0f} ACU)",
         )
         return "created"
+
+    def _adopt_tagged_session(self, db: DbSession, wi: WorkItem) -> str | None:
+        """Bind `wi` to the session Devin already holds for tag `wi-<id>`, if any. A session we
+        never recorded (crash between `create_session` and the row insert) is adopted whatever
+        its state so its output is still evaluated instead of duplicated; a recorded session is
+        only re-adopted while it can still produce work (a finished one means a human retry, which
+        gets a fresh session). Returns "adopted", "failed" (lookup error) or None (nothing to
+        adopt)."""
+        assert wi.id is not None
+        known = {
+            s.devin_id for s in db.exec(select(Session).where(Session.work_item_id == wi.id)).all()
+        }
+        try:
+            remote = self.devin.list_sessions(tags=[f"wi-{wi.id}"])
+        except Exception as exc:
+            return self._dispatch_failed(db, wi, f"list_sessions:{exc}")
+        adoptable = [s for s in remote if s.is_active or s.session_id not in known]
+        if not adoptable:
+            return None
+        snap = max(adoptable, key=lambda s: (s.is_active, s.created_at))
+        self._record_session(db, wi, snap, adopted=True)
+        self._wi(db, wi, WorkItemEvent.session_adopted, snap.session_id)
+        return "adopted"
 
     def _dispatch_failed(self, db: DbSession, wi: WorkItem, reason: str) -> str:
         wi.dispatch_failures += 1
@@ -1481,8 +1536,28 @@ class Orchestrator:
             ).all()
         )
 
-    def _acu_spent(self, db: DbSession) -> float:
-        return float(sum(s.acus_consumed for s in db.exec(select(Session)).all()))
+    def _acu_budget_position(self, db: DbSession) -> AcuBudgetPosition:
+        """ACUs already consumed by every session ever created, plus the unconsumed remainder of
+        the cap of each session bound to an active work item (Devin may still spend up to its
+        `max_acu_limit`, and a same-session retry re-opens a finished one). Consumed ACUs are
+        counted exactly once."""
+        sessions = db.exec(select(Session)).all()
+        reserved_ids = {
+            w.active_session_id
+            for w in db.exec(
+                select(WorkItem).where(col(WorkItem.state).in_(list(ACTIVE_WORK_ITEM_STATES)))
+            ).all()
+            if w.active_session_id is not None
+        }
+        consumed = float(sum(s.acus_consumed for s in sessions))
+        outstanding = float(
+            sum(
+                max(0.0, s.max_acu_limit - s.acus_consumed)
+                for s in sessions
+                if s.devin_id in reserved_ids
+            )
+        )
+        return AcuBudgetPosition(consumed=consumed, outstanding=outstanding)
 
     def reconcile_sessions(self) -> list[str]:
         """Compare Devin's `hl`-tagged sessions with ours; report strangers, never adopt blindly."""

@@ -267,7 +267,11 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
         db.add(
             Evidence(
                 scan_run_id=run_id,
-                kind="sbom" if name.startswith("sbom") else "scanner_output",
+                kind="sbom"
+                if name.startswith("sbom")
+                else "vex"
+                if name.startswith("vex/")
+                else "scanner_output",
                 path=str(job.path / name),
                 sha256=digest,
             )

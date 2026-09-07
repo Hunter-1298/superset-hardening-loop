@@ -29,6 +29,7 @@ from hardening_loop.domain.enums import (
     Scanner,
     ScanRunStatus,
 )
+from hardening_loop.ingest.vex import VexEvidenceError, approval_of, validate_openvex
 from hardening_loop.models.tables import Finding, ScanJob, ScanRun, Sighting
 
 PINNED_VERSIONS: dict[Scanner, str] = {Scanner.trivy: TRIVY_VERSION, Scanner.grype: GRYPE_VERSION}
@@ -178,12 +179,20 @@ def sightings_for(
     return SightingView(raw_present=raw, policy_present=pol)
 
 
-def _vex_approved_for_issue(run: ScanRun, issue_url: str | None) -> bool:
+def _vex_approved_for_issue(run: ScanRun, issue_url: str | None, vuln_id: str) -> bool:
+    """True if the policy run applied an approved OpenVEX document whose `x-approval` names this
+    issue and whose statements cover `vuln_id`; an approval for another issue never counts."""
     if issue_url is None:
         return False
     for doc in run.vex_documents:
-        approval = doc.get("x-approval") if isinstance(doc, dict) else None
-        if isinstance(approval, dict) and approval.get("issue_url") == issue_url:
+        approval = approval_of(doc)
+        if approval is None or approval.issue_url != issue_url:
+            continue
+        try:
+            statements = validate_openvex(doc, where=doc.get("@id", "vex"))
+        except VexEvidenceError:
+            continue
+        if any(s.vulnerability == vuln_id for s in statements):
             return True
     return False
 
@@ -218,7 +227,11 @@ def decide_outcome(
     present_detectors = {d for d in detectors if view.raw_present.get(d, False)}
     policy_seen = all(d in view.policy_present for d in present_detectors)
     policy_absent_all = all(not view.policy_present.get(d, False) for d in present_detectors)
-    if policy_seen and policy_absent_all and _vex_approved_for_issue(run, issue_url):
+    if (
+        policy_seen
+        and policy_absent_all
+        and _vex_approved_for_issue(run, issue_url, finding.vuln_id)
+    ):
         return ClosingOutcome.approved_disposition
 
     if len(present_detectors) == 1 and disagreement_resolved_by_human:

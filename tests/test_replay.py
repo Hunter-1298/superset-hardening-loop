@@ -15,7 +15,7 @@ from hardening_loop.replay.runner import run_all, run_scenario
 from hardening_loop.replay.scenarios import SCENARIOS
 
 EXPECTED = [
-    *(f"R{i}" for i in range(15)),
+    *(f"R{i}" for i in range(17)),
     *(f"N{i}" for i in range(1, 6)),
     "DEMO",
 ]

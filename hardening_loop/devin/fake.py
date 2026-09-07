@@ -19,6 +19,11 @@ class FakeDevinError(RuntimeError):
     pass
 
 
+class ControllerCrash(BaseException):
+    """Simulated process death. Deliberately not an `Exception` so the orchestrator's error
+    handling cannot catch it: whatever was committed stays, everything else is lost."""
+
+
 @dataclass
 class _Session:
     session_id: str
@@ -41,6 +46,9 @@ class FakeDevin:
         self.calls: list[tuple[str, str]] = []
         self._n = 0
         self.fail_next: dict[str, Exception] = {}
+        # Methods that kill the controller before running / after taking effect (once each).
+        self.crash_before: set[str] = set()
+        self.crash_after: set[str] = set()
         self.clock_seconds = 1_800_000_000
 
     # ------------------------------------------------------------- scripting API
@@ -106,9 +114,17 @@ class FakeDevin:
 
     def _touch(self, method: str, target: str) -> None:
         self.calls.append((method, target))
+        if method in self.crash_before:
+            self.crash_before.discard(method)
+            raise ControllerCrash(f"before {method}")
         exc = self.fail_next.pop(method, None)
         if exc is not None:
             raise exc
+
+    def _crash_after(self, method: str) -> None:
+        if method in self.crash_after:
+            self.crash_after.discard(method)
+            raise ControllerCrash(f"after {method}")
 
     def _snap(self, s: _Session) -> SessionSnapshot:
         return SessionSnapshot(
@@ -139,6 +155,7 @@ class FakeDevin:
             created_at=self.clock_seconds,
             updated_at=self.clock_seconds,
         )
+        self._crash_after("create_session")
         return self._snap(self.sessions[sid])
 
     def get_session(self, session_id: str) -> SessionSnapshot:

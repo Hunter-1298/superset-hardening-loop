@@ -53,7 +53,9 @@ check_no_ignore_files() {
 }
 check_no_ignore_files
 
-# VEX handling: only files under security/vex/approved/ and only in policy mode.
+# VEX handling: only files under security/vex/approved/ and only in policy mode. Each document fed
+# to the scanners is copied verbatim into $OUT/vex/ and checksummed with the rest of the evidence,
+# so closure can later re-validate exactly which approval suppressed a finding.
 VEX_ARGS_TRIVY=()
 VEX_ARGS_GRYPE=()
 VEX_LIST=()
@@ -62,6 +64,8 @@ if [[ "$MODE" == "policy" && -d "$SRC/security/vex/approved" ]]; then
     VEX_LIST+=("$f")
     VEX_ARGS_TRIVY+=(--vex "$f")
     VEX_ARGS_GRYPE+=(--vex "$f")
+    mkdir -p "$OUT/vex"
+    cp "$f" "$OUT/vex/$(basename "$f")"
   done < <(find "$SRC/security/vex/approved" -maxdepth 1 -name '*.json' -print0 | sort -z)
 fi
 if [[ "$MODE" == "policy" && ${#VEX_LIST[@]} -eq 0 ]]; then
@@ -150,9 +154,9 @@ fi
 # 5. Tool + DB metadata
 TRIVY_DB_JSON="$(trivy version --format json)"
 GRYPE_DB_JSON="$(grype db status -o json)"
-python3 - "$OUT" "$MODE" "$IMAGE_REF" "$IMAGE_TARGET" "$PLATFORM" "$START" "$TRIVY_DB_JSON" "$GRYPE_DB_JSON" "${VEX_LIST[@]+"${VEX_LIST[@]}"}" <<'PY'
+python3 - "$OUT" "$MODE" "$IMAGE_REF" "$IMAGE_TARGET" "$PLATFORM" "$START" "$TRIVY_DB_JSON" "$GRYPE_DB_JSON" "$SRC" "${VEX_LIST[@]+"${VEX_LIST[@]}"}" <<'PY'
 import hashlib, json, os, sys, datetime
-out, mode, image_ref, image_target, platform, start, trivy_json, grype_json, *vex = sys.argv[1:]
+out, mode, image_ref, image_target, platform, start, trivy_json, grype_json, src, *vex = sys.argv[1:]
 syft = json.load(open(os.path.join(out, ".syft-version.json")))
 grype = json.load(open(os.path.join(out, ".grype-version.json")))
 trivy = json.loads(trivy_json)
@@ -176,11 +180,33 @@ def sha(p):
 files = ["sbom.cdx.json", "trivy-vuln.json", "grype-vuln.json", "trivy-image-config.json", "trivy-config.json"]
 json.dump(tools, open(os.path.join(out, "tools.json"), "w"), indent=2, sort_keys=True)
 files.append("tools.json")
+vex_docs = []
+for v in vex:
+    doc = json.load(open(v))
+    approval = doc.get("x-approval") if isinstance(doc, dict) else None
+    if not isinstance(approval, dict) or not approval.get("issue_url") or not approval.get("approved_by"):
+        sys.exit(f"{v}: approved OpenVEX must carry x-approval.issue_url and x-approval.approved_by")
+    evidence_file = "vex/" + os.path.basename(v)
+    if sha(v) != sha(os.path.join(out, evidence_file)):
+        sys.exit(f"{v}: evidence copy differs from source")
+    files.append(evidence_file)
+    vex_docs.append({
+        "path": os.path.relpath(v, start=src),
+        "evidence_file": evidence_file,
+        "sha256": sha(v),
+        "x-approval": {"issue_url": approval["issue_url"], "approved_by": approval["approved_by"]},
+        "vulnerabilities": sorted(
+            {
+                (s.get("vulnerability") or {}).get("name")
+                for s in doc.get("statements") or []
+                if isinstance(s, dict) and (s.get("vulnerability") or {}).get("name")
+            }
+        ),
+    })
 sums = {f: sha(os.path.join(out, f)) for f in files}
 with open(os.path.join(out, "SHA256SUMS"), "w") as fh:
     for f in files:
         fh.write(f"{sums[f]}  {f}\n")
-vex_docs = [{"path": os.path.relpath(v, start=os.getcwd()), "sha256": sha(v)} for v in vex]
 job = {
     "schema": "hardening-loop/scan-job/v1",
     "mode": mode,

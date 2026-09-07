@@ -1,4 +1,4 @@
-"""Replay scenarios R0-R14 and N1-N5. Every scenario drives the real orchestrator against the
+"""Replay scenarios R0-R16 and N1-N5. Every scenario drives the real orchestrator against the
 in-memory doubles and records checks; the runner asserts zero outbound network for all of them."""
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from typing import Any
 
 from hardening_loop.classify.rules import parse_upper_bounds
 from hardening_loop.devin.enums import DevinStatus, DevinStatusDetail
+from hardening_loop.devin.fake import ControllerCrash
 from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
@@ -783,6 +784,137 @@ def r14(w: World, r: ScenarioResult) -> None:
     st = sorted(f.state.value for f in w2.findings(wi2.id))
     r.eq("members: fixed + human_blocked", st, ["fixed", "human_blocked"])
     r.expect("verification level stays L5", wi2.verification_level == VerificationLevel.merged)
+
+
+# ----------------------------------------------------------------------------- R15
+
+
+def _crash_tick(w: World, r: ScenarioResult, label: str) -> None:
+    try:
+        w.tick()
+    except ControllerCrash:
+        return
+    r.expect(f"{label}: simulated crash reached the controller", False)
+
+
+@scenario("R15", "Crash mid-dispatch: `dispatching` lock is recovered on restart, never duplicated")
+def r15(w: World, r: ScenarioResult) -> None:
+    # (a) Crash after the DB lock is committed but before any Devin call: no session exists.
+    w.baseline("cryptography")
+    w.devin.crash_before.add("list_sessions")
+    _crash_tick(w, r, "a")
+    wi = w.only_wi()
+    r.eq("a: lock survived the crash", wi.state, WorkItemState.dispatching)
+    r.eq("a: no session at Devin", len(w.devin.created_requests()), 0)
+    rep = w.tick()  # restart
+    wi = w.wi(wi.id or 0)
+    r.eq("a: recovered -> released -> re-dispatched", wi.state, WorkItemState.session_active)
+    r.eq("a: exactly one session created", (rep.sessions_created, rep.sessions_adopted), (1, 0))
+    r.eq("a: release counted as a dispatch failure", wi.dispatch_failures, 1)
+    names = w.event_names(wi.id or 0)
+    r.expect(
+        "a: recovery -> dispatch_failed -> dispatch_started -> session_created recorded",
+        [n for n in names if n not in ("created", "issue_created")]
+        == [
+            "dispatch_started",
+            "dispatch_recovery",
+            "dispatch_failed",
+            "dispatch_started",
+            "session_created",
+        ],
+        names,
+    )
+    r.eq("a: nothing left to recover", w.tick().sessions_adopted, 0)
+
+    # (b) Crash after create_session succeeded at Devin but before the row was recorded.
+    w2 = World(w.db_path.with_name("r15b.sqlite3"))
+    w2.baseline("pillow")
+    w2.devin.crash_after.add("create_session")
+    _crash_tick(w2, r, "b")
+    wi2 = w2.only_wi()
+    r.eq("b: lock survived the crash", wi2.state, WorkItemState.dispatching)
+    r.eq("b: Devin holds the orphan session", len(w2.devin.created_requests()), 1)
+    r.eq("b: no session row recorded", len(w2.sessions()), 0)
+    orphan = next(iter(w2.devin.sessions))
+    rep = w2.tick()  # restart
+    wi2 = w2.wi(wi2.id or 0)
+    r.eq("b: orphan adopted, none created", (rep.sessions_created, rep.sessions_adopted), (0, 1))
+    r.eq("b: bound to the orphan", wi2.active_session_id, orphan)
+    r.eq("b: session_active", wi2.state, WorkItemState.session_active)
+    r.eq("b: still one session at Devin", len(w2.devin.created_requests()), 1)
+    r.eq("b: not a dispatch failure", wi2.dispatch_failures, 0)
+
+    # (c) Same crash, but the orphan already finished before the controller came back: it is still
+    # adopted (its output must be evaluated), not redone by a duplicate session.
+    w3 = World(w.db_path.with_name("r15c.sqlite3"))
+    w3.baseline("libexpat1")
+    w3.devin.crash_after.add("create_session")
+    _crash_tick(w3, r, "c")
+    orphan3 = next(iter(w3.devin.sessions))
+    w3.devin.set_state(orphan3, DevinStatus.exit, DevinStatusDetail.finished, acus=1.1)
+    rep = w3.tick()
+    wi3 = w3.only_wi()
+    r.eq("c: finished orphan adopted", (rep.sessions_created, rep.sessions_adopted), (0, 1))
+    r.eq("c: still one session at Devin", len(w3.devin.created_requests()), 1)
+    r.eq("c: orphan's consumption recorded", [s.acus_consumed for s in w3.sessions()], [1.1])
+    r.expect(
+        "c: finished orphan without output escalates instead of being re-run",
+        wi3.state is WorkItemState.needs_human,
+        wi3.state,
+    )
+
+
+# ----------------------------------------------------------------------------- R16
+
+
+@scenario("R16", "Global ACU budget reserves the unconsumed cap of every active session")
+def r16(w: World, r: ScenarioResult) -> None:
+    w.settings.max_concurrent_sessions = 3
+    # Caps: pillow 5 (CRITICAL, first), cryptography 5, paramiko 8.
+    w.settings.global_acu_budget = 8.0
+    w.baseline("cryptography", "pillow", "paramiko")
+    rep = w.tick()
+    r.eq("only the first item fits the budget", rep.sessions_created, 1)
+    items = {i.group_key.split(":")[-1]: i for i in w.work_items()}
+    pillow, crypto, paramiko = items["pillow"], items["cryptography"], items["paramiko"]
+    r.eq("CRITICAL pillow dispatched first", pillow.state, WorkItemState.session_active)
+    r.eq(
+        "others deferred with issues open",
+        (crypto.state, paramiko.state),
+        (WorkItemState.issue_open, WorkItemState.issue_open),
+    )
+    # The running session has barely spent anything; its remaining cap stays committed. (Dispatch
+    # precedes polling within a tick, so the 0.2 ACU shows up in the next tick's arithmetic.)
+    w.session_state(pillow, DevinStatus.running, DevinStatusDetail.working, acus=0.2)
+    w.tick()
+    rep = w.tick()
+    r.eq("low consumption does not free the budget", rep.sessions_created, 0)
+    r.eq("cryptography still waiting", w.state_of(crypto.id or 0), WorkItemState.issue_open)
+    deferrals = [e for e in w.events("work_item", crypto.id) if e.event == "budget_deferred"]
+    r.expect(
+        "deferral reason shows consumed + outstanding + cap > budget",
+        len(deferrals) >= 3
+        and "consumed=0.20+outstanding=4.80+cap=5>budget=8" in (deferrals[-1].reason or ""),
+        [e.reason for e in deferrals],
+    )
+    r.eq("exactly one session at Devin", len(w.devin.created_requests()), 1)
+    # The session ends (1.5 ACU consumed, no PR -> needs_human). Its reservation is released and
+    # only what it consumed stays counted, so cryptography fits (1.5 + 5 <= 8) while paramiko
+    # (cap 8) does not: consumed ACUs are counted once, not once per active session.
+    w.session_state(pillow, DevinStatus.exit, DevinStatusDetail.finished, acus=1.5)
+    w.tick()
+    r.eq("first session escalated", w.state_of(pillow.id or 0), WorkItemState.needs_human)
+    rep = w.tick()
+    r.eq("budget freed -> exactly one more dispatched", rep.sessions_created, 1)
+    r.eq("cryptography active", w.state_of(crypto.id or 0), WorkItemState.session_active)
+    r.eq("paramiko still waiting", w.state_of(paramiko.id or 0), WorkItemState.issue_open)
+    last = [e for e in w.events("work_item", paramiko.id) if e.event == "budget_deferred"][-1]
+    r.expect(
+        "paramiko deferral reason counts consumed once plus the new outstanding cap",
+        "consumed=1.50+outstanding=5.00+cap=8>budget=8" in (last.reason or ""),
+        last.reason,
+    )
+    r.eq("two sessions at Devin in total", len(w.devin.created_requests()), 2)
 
 
 # ----------------------------------------------------------------------------- N1-N5

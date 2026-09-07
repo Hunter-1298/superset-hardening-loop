@@ -19,6 +19,7 @@ from hardening_loop.ingest.grype import grype_db_built_at, parse_grype_vulns
 from hardening_loop.ingest.records import RawConfigFinding, RawVuln, SbomComponent
 from hardening_loop.ingest.sbom import parse_cyclonedx
 from hardening_loop.ingest.trivy import parse_trivy_misconfigs, parse_trivy_vulns
+from hardening_loop.ingest.vex import ApprovedVexDocument, load_vex_documents
 
 JOB_SCHEMA = "hardening-loop/scan-job/v1"
 MANIFEST_SCHEMA = "hardening-loop/baseline-manifest/v1"
@@ -60,7 +61,10 @@ class ScanJobEvidence(BaseModel):
     started_at: datetime
     finished_at: datetime
     files: dict[str, str]
+    # Full OpenVEX documents applied in policy mode (validated `x-approval` included), each with an
+    # `x-evidence` block naming the approved source path and checksummed copy. Always [] in raw.
     vex_documents: list[dict[str, Any]]
+    vex_evidence: list[ApprovedVexDocument] = Field(default_factory=list)
     tools: ToolVersions
     sbom: list[SbomComponent]
     trivy_vulns: list[RawVuln]
@@ -141,9 +145,17 @@ def load_scan_job(path: Path) -> ScanJobEvidence:
     trivy_image_config = _load_json(path / "trivy-image-config.json")
     trivy_config = _load_json(path / "trivy-config.json")
 
+    mode = ScanMode(job["mode"])
+    vex_entries = list(job.get("vex_documents") or [])
+    if mode is ScanMode.raw and vex_entries:
+        raise EvidenceError(
+            f"{path}: raw scan lists VEX documents; raw evidence is never suppressed"
+        )
+    vex_evidence = load_vex_documents(path, vex_entries, files)
+
     return ScanJobEvidence(
         path=path,
-        mode=ScanMode(job["mode"]),
+        mode=mode,
         image_ref=job["image_ref"],
         image_target=ImageTarget(job["image_target"]),
         platform=job["platform"],
@@ -151,7 +163,18 @@ def load_scan_job(path: Path) -> ScanJobEvidence:
         started_at=_parse_ts(job["started_at"]),
         finished_at=_parse_ts(job["finished_at"]),
         files=files,
-        vex_documents=list(job.get("vex_documents") or []),
+        vex_documents=[
+            {
+                **d.document,
+                "x-evidence": {
+                    "source_path": d.source_path,
+                    "evidence_file": d.evidence_file,
+                    "sha256": d.sha256,
+                },
+            }
+            for d in vex_evidence
+        ],
+        vex_evidence=vex_evidence,
         tools=versions,
         sbom=parse_cyclonedx(sbom_doc),
         trivy_vulns=parse_trivy_vulns(trivy_vuln),
