@@ -27,9 +27,13 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 case "$MODE" in raw|policy) ;; *) echo "mode must be raw|policy" >&2; exit 2;; esac
 mkdir -p "$OUT"
 
-# Trivy's image scanner cannot parse a bare local image ID ("docker:sha256:..."). For local IDs a
-# tag must be supplied via IMAGE_NAME and is verified to resolve to exactly that ID before use.
-# Registry digests ("repo@sha256:...") are accepted by every tool unchanged.
+# Only immutable references are accepted: a local image ID ("docker:sha256:...") or a registry
+# digest ("repo@sha256:..."). A tag alone could change between SBOM, scan and smoke test.
+#
+# Trivy's image scanner cannot parse a bare local image ID. For local IDs a tag must be supplied via
+# IMAGE_NAME and is verified to resolve to exactly that ID before use. Registry digests are accepted
+# by every tool unchanged; the digest must already be pulled into the local daemon so that all tools
+# read the same bytes without re-resolving anything remotely.
 TRIVY_IMAGE_REF="$IMAGE_REF"
 if [[ "$IMAGE_REF" == docker:sha256:* ]]; then
   : "${IMAGE_NAME:?IMAGE_NAME (a local tag) is required when scanning a bare image ID}"
@@ -39,6 +43,16 @@ if [[ "$IMAGE_REF" == docker:sha256:* ]]; then
     exit 5
   fi
   TRIVY_IMAGE_REF="$IMAGE_NAME"
+  EXPECTED_DIGEST="${IMAGE_REF#docker:}"
+elif [[ "$IMAGE_REF" == *@sha256:* ]]; then
+  EXPECTED_DIGEST="${IMAGE_REF##*@}"
+  if ! docker image inspect --format '{{join .RepoDigests "\n"}}' "$IMAGE_REF" 2>/dev/null | grep -qx -- "$IMAGE_REF"; then
+    echo "$IMAGE_REF is not present in the local docker daemon under that digest (docker pull it first)" >&2
+    exit 5
+  fi
+else
+  echo "refusing mutable image reference $IMAGE_REF: use docker:sha256:<id> or repo@sha256:<digest>" >&2
+  exit 5
 fi
 START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
@@ -104,12 +118,12 @@ trivy image --skip-version-check --scanners misconfig --image-config-scanners mi
 
 # Every Trivy image report must describe the same image bytes Syft SBOM'd.
 check_image_identity() {
-  python3 - "$1" "${IMAGE_REF#docker:}" <<'PY'
+  python3 - "$1" "$EXPECTED_DIGEST" <<'PY'
 import json, sys
 report, expected = json.load(open(sys.argv[1])), sys.argv[2]
 meta = report.get("Metadata") or {}
 seen = {meta.get("ImageID"), *(meta.get("RepoDigests") or [])}
-if expected.startswith("sha256:") and meta.get("ImageID") != expected and not any(
+if meta.get("ImageID") != expected and not any(
     d.endswith("@" + expected) for d in (meta.get("RepoDigests") or [])
 ):
     sys.exit(f"{sys.argv[1]} scanned {seen}, expected {expected}")
@@ -117,14 +131,16 @@ PY
 }
 check_image_identity "$OUT/trivy-vuln.json"
 check_image_identity "$OUT/trivy-image-config.json"
-python3 - "$OUT/sbom.cdx.json" "${IMAGE_REF#docker:}" <<'PY'
+python3 - "$OUT/sbom.cdx.json" "$EXPECTED_DIGEST" <<'PY'
 import json, sys
 doc, expected = json.load(open(sys.argv[1])), sys.argv[2]
 comp = (doc.get("metadata") or {}).get("component") or {}
-# Syft names the root component after the image ID when scanning a bare ID: name=sha256 version=<hex>
 props = {p.get("name"): p.get("value") for p in comp.get("properties") or []}
-candidates = {props.get("syft:image:id"), f"{comp.get('name')}:{comp.get('version')}"}
-if expected.startswith("sha256:") and expected not in candidates:
+# Syft names the root component after the image ID when scanning a bare ID: name=sha256 version=<hex>;
+# for a registry digest ref the root component is name=<repo> version=sha256:<digest>.
+candidates = {props.get("syft:image:id"), props.get("syft:image:manifestDigest"), f"{comp.get('name')}:{comp.get('version')}", comp.get("version")}
+candidates |= {v.rsplit("@", 1)[-1] for k, v in props.items() if k and k.startswith("syft:image:repoDigests:") and v}
+if expected not in candidates:
     sys.exit(f"sbom describes {candidates - {None}}, expected {expected}")
 PY
 

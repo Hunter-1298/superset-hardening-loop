@@ -315,19 +315,36 @@ def ingest_synthetic(engine: Engine, run: SyntheticRun, external_run_id: str) ->
         return ingest_run(db, run.meta(external_run_id), run.jobs(), upper_bounds={}, now=run.at)
 
 
-def approved_vex(*, issue_url: str, vuln_id: str, purl: str, approver: str) -> dict[str, Any]:
-    """Minimal OpenVEX document as it would appear under security/vex/approved/."""
+def approved_vex(
+    *,
+    issue_url: str,
+    vuln_id: str,
+    purl: str,
+    approver: str,
+    approved_at: str = "2026-09-01T12:00:00Z",
+) -> dict[str, Any]:
+    """OpenVEX document as it would appear under security/vex/approved/ (passes `vex-lint`)."""
     return {
         "@context": "https://openvex.dev/ns/v0.2.0",
         "@id": f"https://github.com/{FORK_REPO}/security/vex/approved/{vuln_id.lower()}.json",
         "author": approver,
+        "timestamp": approved_at,
+        "version": 1,
         "statements": [
             {
                 "vulnerability": {"name": vuln_id},
                 "products": [{"@id": purl}],
                 "status": "not_affected",
                 "justification": "vulnerable_code_not_in_execute_path",
+                "impact_statement": (
+                    f"{vuln_id}: the vulnerable code path is not reachable from Superset's "
+                    "runtime; see the reachability analysis attached to the approval issue."
+                ),
             }
         ],
-        "x-approval": {"issue_url": issue_url, "approved_by": approver},
+        "x-approval": {
+            "issue_url": issue_url,
+            "approved_by": approver,
+            "approved_at": approved_at,
+        },
     }
