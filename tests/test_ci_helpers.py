@@ -134,6 +134,8 @@ def test_vex_lint_accepts_complete_document(tmp_path: Path) -> None:
     [
         (lambda d: d.pop("x-approval"), "missing or malformed x-approval"),
         (lambda d: d["x-approval"].pop("approved_at"), "approved_at"),
+        (lambda d: d["x-approval"].update(approved_at="2026-09-01"), "approved_at"),
+        (lambda d: d["x-approval"].update(approved_at="2026-09-01T10:00:00"), "approved_at"),
         (lambda d: d["x-approval"].update(approved_by="stranger"), "not an allowed approver"),
         (
             lambda d: d["x-approval"].update(
@@ -300,6 +302,16 @@ def test_workflow_run_runtime_verified_requires_every_runtime_job_green() -> Non
         gate_mode=GateMode.report,
     )
     assert none_recorded.runtime_verified is False
+    partial = WorkflowRun(
+        run_id=1,
+        run_attempt=1,
+        event="push",
+        workflow_sha="a" * 40,
+        ref="r",
+        gate_mode=GateMode.report,
+        job_results={"lean-smoke": "success"},
+    )
+    assert partial.runtime_verified is False, "app-runs missing must not count as verified"
 
 
 def _images() -> dict[ImageTarget, RegistryImage]:
@@ -362,6 +374,71 @@ def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) ->
     assert loaded.run["run_id"] == 42 and loaded.gates["lean-policy"]["passed"] is True
     assert loaded.run["runtime_verified"] is True
     assert loaded.run["job_results"] == {"app-runs": "success", "lean-smoke": "success"}
+
+
+def _stale_gate(tmp_path: Path, **override: object) -> Path:
+    _stage_jobs(tmp_path)
+    gate = tmp_path / "gates" / "lean-policy.json"
+    gate.parent.mkdir()
+    assert (
+        main(
+            [
+                "gate",
+                "--job",
+                str(tmp_path / "lean" / "policy"),
+                "--mode",
+                "report",
+                "--out",
+                str(gate),
+            ]
+        )
+        == 0
+    )
+    doc = json.loads(gate.read_text())
+    doc.update(override)
+    gate.write_text(json.dumps(doc))
+    return gate
+
+
+@pytest.mark.parametrize(
+    ("override", "needle"),
+    [
+        ({"image_ref": "ghcr.io/hunter-1298/superset@sha256:" + "f" * 64}, "job scanned"),
+        ({"image_target": "ci"}, "image_target"),
+        ({"mode": "enforce"}, "evaluated in 'enforce'"),
+    ],
+)
+def test_write_scan_manifest_refuses_gate_for_other_evidence(
+    tmp_path: Path, override: dict[str, str], needle: str
+) -> None:
+    gate = _stale_gate(tmp_path, **override)
+    with pytest.raises(EvidenceError, match=needle):
+        write_scan_manifest(
+            tmp_path,
+            source_repo=FORK_REPO,
+            source_branch="main",
+            source_sha=BASELINE_SHA,
+            platform="linux/amd64",
+            images=_images(),
+            run=_run(),
+            gate_files={"lean-policy": gate},
+        )
+    assert not (tmp_path / "manifest.json").exists()
+
+
+def test_write_scan_manifest_refuses_gate_without_matching_job(tmp_path: Path) -> None:
+    gate = _stale_gate(tmp_path)
+    with pytest.raises(EvidenceError, match="no scan job of that name"):
+        write_scan_manifest(
+            tmp_path,
+            source_repo=FORK_REPO,
+            source_branch="main",
+            source_sha=BASELINE_SHA,
+            platform="linux/amd64",
+            images=_images(),
+            run=_run(),
+            gate_files={"ci-policy": gate},
+        )
 
 
 def test_write_scan_manifest_refuses_incomplete_run(tmp_path: Path) -> None:

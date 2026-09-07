@@ -173,10 +173,14 @@ def _lint_document(
 
 
 def _parse_iso(value: str) -> datetime | None:
+    """An unambiguous instant: date and time with an explicit UTC offset (`Z` or `±hh:mm`)."""
+    if "T" not in value and " " not in value:
+        return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    return parsed if parsed.tzinfo is not None else None
 
 
 def lint_approved_vex(
@@ -290,6 +294,10 @@ def layer_delta(lean: RegistryImage, ci: RegistryImage) -> dict[str, Any]:
     }
 
 
+REQUIRED_RUNTIME_JOBS: tuple[str, ...] = ("lean-smoke", "app-runs")
+DEFAULT_EXPECTED_JOBS: tuple[str, ...] = ("lean-raw", "lean-policy", "ci-raw")
+
+
 @dataclass(frozen=True)
 class WorkflowRun:
     run_id: int
@@ -308,8 +316,10 @@ class WorkflowRun:
 
     @property
     def runtime_verified(self) -> bool:
-        """True only when every recorded runtime job (lean-smoke, app-runs, ...) succeeded."""
-        return bool(self.job_results) and all(r == "success" for r in self.job_results.values())
+        """True only when every required runtime job is recorded and all recorded ones succeeded."""
+        return all(j in self.job_results for j in REQUIRED_RUNTIME_JOBS) and all(
+            r == "success" for r in self.job_results.values()
+        )
 
     def url(self, repo: str) -> str:
         return f"{self.server_url}/{repo}/actions/runs/{self.run_id}/attempts/{self.run_attempt}"
@@ -337,7 +347,7 @@ def write_scan_manifest(
     platform: str,
     images: dict[ImageTarget, RegistryImage],
     run: WorkflowRun,
-    expected_jobs: tuple[str, ...] = ("lean-raw", "lean-policy", "ci-raw"),
+    expected_jobs: tuple[str, ...] = DEFAULT_EXPECTED_JOBS,
     gate_files: dict[str, Path] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -379,7 +389,24 @@ def write_scan_manifest(
             files[f"{target}/{mode}/{f}"] = sha256_file(job.path / f)
     gates: dict[str, Any] = {}
     for name, gate_path in (gate_files or {}).items():
-        gates[name] = json.loads(gate_path.read_text())
+        gated_job = jobs.get(name)
+        if gated_job is None:
+            raise EvidenceError(f"gate {name}: no scan job of that name in this run")
+        gate = json.loads(gate_path.read_text())
+        if not isinstance(gate, dict):
+            raise EvidenceError(f"gate {name}: {gate_path} is not a JSON object")
+        if gate.get("image_ref") != gated_job.image_ref:
+            raise EvidenceError(
+                f"gate {name}: verdict is for {gate.get('image_ref')}, "
+                f"job scanned {gated_job.image_ref}"
+            )
+        if gate.get("image_target") != gated_job.image_target.value:
+            raise EvidenceError(f"gate {name}: image_target {gate.get('image_target')!r} != {name}")
+        if gate.get("mode") != run.gate_mode.value:
+            raise EvidenceError(
+                f"gate {name}: evaluated in {gate.get('mode')!r}, run is {run.gate_mode.value}"
+            )
+        gates[name] = gate
         rel = gate_path.relative_to(out).as_posix()
         files[rel] = sha256_file(gate_path)
 

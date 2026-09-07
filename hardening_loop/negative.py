@@ -400,8 +400,10 @@ class NegativeRunner:
             )
         finally:
             report.finished_at = datetime.now(UTC).isoformat(timespec="seconds")
-            self.gh.close_pull_request(self.repo, pr.number)
-            self.gh.delete_branch(self.repo, branch)
+            try:
+                self.gh.close_pull_request(self.repo, pr.number)
+            finally:
+                self.gh.delete_branch(self.repo, branch)
         return report
 
     def _evidence_for(self, head_sha: str) -> Path | None:

@@ -184,9 +184,10 @@ class _FakeGitHub(httpx.BaseTransport):
     """Enough of the REST API for NegativeRunner: PR create/close/comment, branch delete, check runs
     that complete on the second poll."""
 
-    def __init__(self) -> None:
+    def __init__(self, close_fails: bool = False) -> None:
         self.calls: list[str] = []
         self.polls = 0
+        self.close_fails = close_fails
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -197,6 +198,8 @@ class _FakeGitHub(httpx.BaseTransport):
             return httpx.Response(201, json=_pr_json(77, body["head"]))
         if request.method == "PATCH" and path.endswith("/pulls/77"):
             assert json.loads(request.content) == {"state": "closed"}
+            if self.close_fails:
+                return httpx.Response(500, json={"message": "boom"})
             return httpx.Response(200, json=_pr_json(77, "x", state="closed"))
         if request.method == "POST" and path.endswith("/issues/77/comments"):
             return httpx.Response(201, json={})
@@ -254,6 +257,22 @@ def test_runner_opens_draft_waits_evaluates_and_cleans_up(tmp_path: Path) -> Non
     payload = report.to_dict()
     assert payload["schema"] == "hardening-loop/ci-negative-report/v1"
     assert payload["check_results"]["forbid-ignore-files"] == "failure"
+
+
+def test_runner_deletes_branch_even_when_pr_close_fails(tmp_path: Path) -> None:
+    fake = _FakeGitHub(close_fails=True)
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh, repo="Hunter-1298/superset", work_dir=tmp_path, poll_seconds=1.0, sleep=lambda s: None
+    )
+    with pytest.raises(GitHubError):
+        runner.run(
+            "ignore-file", branch="ci-negative/ignore-file-2", head_sha="f" * 40, run_url="u"
+        )
+    assert (
+        fake.calls[-1]
+        == "DELETE /repos/Hunter-1298/superset/git/refs/heads/ci-negative/ignore-file-2"
+    )
 
 
 def test_runner_never_touches_upstream(tmp_path: Path) -> None:

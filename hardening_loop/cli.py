@@ -16,6 +16,7 @@ from pathlib import Path
 import uvicorn
 
 from hardening_loop.ci import (
+    DEFAULT_EXPECTED_JOBS,
     WorkflowRun,
     find_ignore_files,
     gate_job,
@@ -194,7 +195,7 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
             platform=args.platform,
             images=images,
             run=run,
-            expected_jobs=tuple(args.expect_job),
+            expected_jobs=tuple(args.expect_job or DEFAULT_EXPECTED_JOBS),
             gate_files=gate_files,
         )
     except EvidenceError as exc:
@@ -346,9 +347,11 @@ def build_parser() -> argparse.ArgumentParser:
     sm.add_argument(
         "--expect-job",
         action="append",
-        default=[],
         metavar="TARGET-MODE",
-        help="job dir that must be present, e.g. lean-raw (repeatable)",
+        help=(
+            "job dir that must be present, e.g. lean-raw (repeatable; "
+            f"default: {' '.join(DEFAULT_EXPECTED_JOBS)})"
+        ),
     )
     sm.add_argument("--gate", action="append", metavar="JOB=gate.json", help="gate verdicts")
     sm.add_argument("--head-sha", help="PR head SHA when --source-sha is the merge commit")
