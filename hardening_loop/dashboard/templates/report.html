@@ -7,6 +7,7 @@
 {% set disposition_total = report.outcomes.get("approved_disposition", 0) %}
 {% set regression_total = report.outcomes.get("regression", 0) %}
 {% set blocked_total = report.outcomes.get("human_blocked", 0) %}
+{% set needs_person_total = report.work_items_by_state.get("needs_human", 0) + report.work_items_by_state.get("ready_for_human", 0) + report.work_items_by_state.get("failed", 0) %}
 {% call ui.page_header("Run report", "Baseline versus the latest " ~ branch ~ " scan, every finding outcome, and each dependency upgrade compared with the " ~ comparison_branch ~ " pins; the same report is available as Markdown and JSON.", eyebrow=("Generated " ~ report.generated_at|dt)) %}
   <a class="btn" href="/report.md">Markdown</a>
   <a class="btn" href="/api/report">JSON</a>
@@ -71,10 +72,11 @@
 {% endif %}
 
 <section class="grid grid-kpi" aria-label="Remediation outcomes">
-  {{ ui.kpi("Fixed", fixed_total, sub="absent from a later complete scan", tone="success" if fixed_total else None) }}
-  {{ ui.kpi("Approved dispositions", disposition_total, sub="human-approved OpenVEX") }}
-  {{ ui.kpi("Regressions", regression_total, sub="reappeared after closure", tone="danger" if regression_total else None) }}
-  {{ ui.kpi("Blocked on a person", blocked_total, sub="needs a decision in GitHub", tone="warning" if blocked_total else None) }}
+  {{ ui.kpi("Findings fixed", fixed_total, sub="absent from a later complete scan", tone="success" if fixed_total else None) }}
+  {{ ui.kpi("Approved dispositions", disposition_total, sub="findings covered by human-approved OpenVEX") }}
+  {{ ui.kpi("Findings in regression", regression_total, sub="reappeared after closure, not yet regrouped", tone="danger" if regression_total else None) }}
+  {{ ui.kpi("Findings closed as blocked", blocked_total, sub="human-blocked finding outcome", tone="warning" if blocked_total else None) }}
+  {{ ui.kpi("Work items needing a person", needs_person_total, sub="needs attention, ready for review or failed", tone="warning" if needs_person_total else None) }}
   {{ ui.kpi("ACU used", report.acu_total|num, sub=report.verified_items ~ " verified · " ~ report.retries_total ~ " retries") }}
   {{ ui.kpi("Estimated cost", report.estimated_cost_total_usd|money, sub=("$" ~ report.acu_cost_usd ~ " per ACU") if report.acu_cost_usd else "ACU price not configured") }}
 </section>
@@ -108,7 +110,7 @@
       <td>{{ ui.level_badge(d.verification_level) }}</td>
       <td class="num">{{ d.acus|num }}</td>
       <td class="num">{{ d.retries_used }}</td>
-      <td>{% if d.pr_url %}{{ ui.external_link(d.pr_url, "Pull request") }}{% else %}<span class="muted">—</span>{% endif %}{% if d.blocked_reason %}<span class="secondary">{{ d.blocked_reason }}</span>{% endif %}</td>
+      <td>{% if d.pr_url %}{{ ui.external_link(d.pr_url, "Pull request") }}{% else %}<span class="muted">—</span>{% endif %}{% if d.blocked_reason %}<span class="secondary">{{ d.blocked_reason|blocked_reason }}</span>{% endif %}</td>
     </tr>
     {% endfor %}
     </tbody>
@@ -182,7 +184,7 @@
       <tbody>
       {% for w in report.work_items %}
       <tr>
-        <td class="w-title"><a class="primary" href="/issues/{{ w.work_item_id }}">{{ w.title }}</a><span class="secondary mono">#{{ w.work_item_id }}</span>{% if w.blocked_reason %}<span class="secondary">{{ w.blocked_reason }}</span>{% endif %}</td>
+        <td class="w-title"><a class="primary" href="/issues/{{ w.work_item_id }}">{{ w.title }}</a><span class="secondary mono">#{{ w.work_item_id }}</span>{% if w.blocked_reason %}<span class="secondary">{{ w.blocked_reason|blocked_reason }}</span>{% endif %}</td>
         <td>{{ ui.kind_badge(w.kind) }}</td>
         <td>{{ ui.state_badge(w.state) }}</td>
         <td>{{ ui.level_badge(w.verification_level) }}</td>

@@ -353,16 +353,39 @@ def actor(value: object) -> str:
     return ACTOR_LABELS.get(text, _fallback(text).text)
 
 
+BLOCKED_REASON_PREFIXES: dict[str, str] = {
+    "blocked_reason": "Devin reported a blocker",
+    "invalid_transition": "The controller refused a state transition",
+    "acu_cap_exceeded": "ACU cap exceeded",
+    "retries_exhausted": "Retries exhausted",
+}
+
+
+def blocked_reason_text(value: str | None) -> str:
+    """Readable form of a stored `code:detail` blocked reason. Known codes become a short
+    lead-in, unknown codes become words; the raw string stays available in the technical
+    sections."""
+    text = (value or "").strip()
+    if not text:
+        return ""
+    code, sep, detail = text.partition(":")
+    if sep and code.replace("_", "").isalnum() and code == code.lower():
+        lead = BLOCKED_REASON_PREFIXES.get(code, _fallback(code).text)
+        return f"{lead}: {detail.strip()}" if detail.strip() else lead
+    return _fallback(text).text if "_" in text and " " not in text else text
+
+
 def next_human_action(state: object, blocked_reason: str | None, pr_url: str | None) -> str | None:
     """The single sentence shown at the top of a work item when a person must act."""
     try:
         s = WorkItemState(str(state))
     except ValueError:
         return None
+    reason = blocked_reason_text(blocked_reason)
     if s is WorkItemState.needs_human:
-        return blocked_reason or "Resolve the blocker in GitHub, then add the `retry` label."
+        return reason or "Resolve the blocker in GitHub, then add the `retry` label."
     if s is WorkItemState.failed:
-        return blocked_reason or "Remediation failed; review the session and decide on a retry."
+        return reason or "Remediation failed; review the session and decide on a retry."
     if s is WorkItemState.ready_for_human:
         if pr_url is None:
             return "Approve the disposition on the GitHub issue so the loop can continue."

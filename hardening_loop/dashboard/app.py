@@ -208,6 +208,7 @@ def _templates() -> Jinja2Templates:
     env.filters["actor_label"] = labels.actor
     env.filters["plain_label"] = labels.plain
     env.filters["relation_label"] = labels.relation
+    env.filters["blocked_reason"] = labels.blocked_reason_text
     env.globals["gate_label"] = labels.gate
     env.globals["nav_items"] = NAV
     env.globals["nav_current"] = nav_current

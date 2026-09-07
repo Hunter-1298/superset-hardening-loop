@@ -34,7 +34,7 @@
           <div>
             <a class="title" href="/issues/{{ w.id }}">#{{ w.id }} {{ w.title }}</a>
             <div class="meta">{{ ui.kind_badge(w.kind) }}{% if w.blocked_reason %}<span>Blocked</span>{% endif %}{% if w.issue_url %}<a href="{{ w.issue_url }}">Issue #{{ w.issue_number }}</a>{% endif %}{% if w.pr_url %}<a href="{{ w.pr_url }}">PR #{{ w.pr_number }}</a>{% endif %}</div>
-            {% if w.blocked_reason %}<p class="reason">{{ w.blocked_reason }}</p>{% endif %}
+            {% if w.blocked_reason %}<p class="reason">{{ w.blocked_reason|blocked_reason }}</p>{% endif %}
           </div>
           <div class="badges">{{ ui.severity_badge(w.severity) }}{{ ui.state_badge(w.state) }}</div>
         </li>

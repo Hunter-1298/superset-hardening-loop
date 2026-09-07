@@ -16,6 +16,7 @@ from sqlmodel import col, select
 
 from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
+from hardening_loop.dashboard.labels import blocked_reason_text
 from hardening_loop.db import open_database, session_scope
 from hardening_loop.domain.enums import Kind, Severity, VerificationLevel, WorkItemState
 from hardening_loop.metrics import Metrics, compute_metrics
@@ -399,6 +400,57 @@ def test_readable_labels_replace_raw_enums(client: TestClient) -> None:
         r'<span class="badge badge-[a-z]+"[^>]*>\s*(.*?)\s*</span>', issues, re.S
     ):
         assert badge.strip(), "empty badge"
+
+
+def test_blocked_reasons_render_without_machine_prefix(client: TestClient, engine: Engine) -> None:
+    assert (
+        blocked_reason_text("blocked_reason:needs a VEX") == "Devin reported a blocker: needs a VEX"
+    )
+    assert blocked_reason_text("invalid_transition:queued:pr_opened") == (
+        "The controller refused a state transition: queued:pr_opened"
+    )
+    assert blocked_reason_text("no_change_needed_requires_human_verification") == (
+        "No change needed requires human verification"
+    )
+    assert blocked_reason_text("Plain sentence: with colon") == "Plain sentence: with colon"
+    assert blocked_reason_text(None) == ""
+
+    with session_scope(engine) as db:
+        blocked = db.exec(
+            select(WorkItem).where(col(WorkItem.state) == WorkItemState.needs_human.value)
+        ).first()
+        assert blocked is not None and blocked.blocked_reason
+        blocked_id, reason = blocked.id, blocked.blocked_reason
+    assert reason.startswith("blocked_reason:")
+    detail_text = reason.split(":", 1)[1][:40]
+    for html in (client.get("/").text, client.get(f"/issues/{blocked_id}").text):
+        assert detail_text in html
+        assert "Devin reported a blocker:" in html
+        prose = re.sub(r"<[^>]*class=\"[^\"]*mono[^\"]*\"[^>]*>[^<]*</[^>]+>", "", html)
+        assert not re.search(r">\s*blocked_reason:", prose)
+
+
+def test_report_outcome_cards_name_what_they_count(client: TestClient, engine: Engine) -> None:
+    html = client.get("/report").text
+    with session_scope(engine) as db:
+        states = [w.state for w in db.exec(select(WorkItem)).all()]
+    needing_person = sum(
+        1
+        for s in states
+        if s in (WorkItemState.needs_human, WorkItemState.ready_for_human, WorkItemState.failed)
+    )
+    assert needing_person >= 1
+    assert "Findings fixed" in html and "Findings in regression" in html
+    assert "Findings closed as blocked" in html
+    labels = re.findall(r'<div class="label">([^<]*)</div>', html)
+    assert "Blocked on a person" not in labels and "Regressions" not in labels
+    card = re.search(
+        r"Work items needing a person.*?<div class=\"value[^\"]*\">\s*(\d+)",
+        html,
+        re.S,
+    )
+    assert card is not None, "work-item card missing"
+    assert int(card.group(1)) == needing_person
 
 
 def test_work_item_filters_are_server_side(client: TestClient, engine: Engine) -> None:
