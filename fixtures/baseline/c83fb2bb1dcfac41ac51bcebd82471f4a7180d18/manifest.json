@@ -1,0 +1,185 @@
+{
+  "built_at": "2026-09-07T00:51:37Z",
+  "captured_at": "2026-09-07T00:52:22Z",
+  "ci_layer_delta": {
+    "ci_extra_bytes": 532979658,
+    "ci_only_layers": [
+      "sha256:b5d6f2a9df7745a823c4472b44d20fcf6c245e385275a414812b6c304b5cc8ca"
+    ],
+    "ci_size_bytes": 1459181674,
+    "lean_only_layers": [],
+    "lean_size_bytes": 926202016,
+    "note": "ci = lean + Postgres/DuckDB extras; used only for app-runs integration coverage",
+    "shared_layer_count": 29
+  },
+  "files": {
+    "build-ci.log": "cd41cc4cdc3eb2a484198c578b966e1f9b378573d0e83765d9c5f5a69b6cadfc",
+    "build-lean.log": "326579cd362d76590406cd8f8a8f28889d3f4195c24c64ecb831a945b4a70fbf",
+    "lean/policy/SHA256SUMS": "495db235c1a6589c6282cdbf14b6ed8eeb1f2d7c1f5383f02ead020fa380024b",
+    "lean/policy/grype-vuln.json": "32dd6bfa29d5d5d2285518998aa4147eb1c4c42aee55fe94ad6bb40220a780ca",
+    "lean/policy/job.json": "af7b91e6200932d0dc9a6cb441d6ba6785c7859c81d32caa85b50c868c8ab60d",
+    "lean/policy/sbom.cdx.json": "db542adf524770db5a6383271e348d8afd53d1effb518b2f7efd5b2c313ec4fb",
+    "lean/policy/tools.json": "4a0f83c3ea5ade99d26f72d4f9a21f31de4132e287c2b575a5933143d1d3618f",
+    "lean/policy/trivy-config.json": "5d3c45b936001f77461ba5aff41841dc29b27fc2e524757a16c4cec820c4ac08",
+    "lean/policy/trivy-image-config.json": "ccba821f59dfd9d1cde583006b215cde177d618577fed5b980d243cc13ccf483",
+    "lean/policy/trivy-vuln.json": "23e39f909f7d7bf68694c8d83734e869be9ba41f50fcedafdb4e137dd183ab4d",
+    "lean/raw/SHA256SUMS": "64f6f45848157b2dcd793dbbe2e27fceaec7f1128a9cf7635edcbadfbe47377c",
+    "lean/raw/grype-vuln.json": "92e0eb6197d61141c046ea89e195fb2b03dab58db6d6bd779b1c8114b445c69f",
+    "lean/raw/job.json": "7e5b34556216815ca3596a076c2a0e607df39a648083eafd7248de59294d365d",
+    "lean/raw/sbom.cdx.json": "cf73a8b6609c57e826c936d10587cfeeeb666b95b10a2129e19210cf37f96cff",
+    "lean/raw/tools.json": "4a0f83c3ea5ade99d26f72d4f9a21f31de4132e287c2b575a5933143d1d3618f",
+    "lean/raw/trivy-config.json": "b27f121dd4b9e18a9ea39d4c5da816bcdbe044f010f865c593d583bbddd2f5d2",
+    "lean/raw/trivy-image-config.json": "1d6eaabd8e1aaeb36e72c6144c82477c65dd0beef9ffee802bd1336f9cb9c94f",
+    "lean/raw/trivy-vuln.json": "b9ac5e4c0c4e788ce8f68443eecdcefe1bca3e4359cafc290ccabc7b9898a299"
+  },
+  "images": {
+    "ci": {
+      "config_user": "superset",
+      "created": "2026-09-07T00:34:29.684923858Z",
+      "digest_kind": "image_id",
+      "image_id": "sha256:d275b3e60184637bd75dd24853403aaae8296b23d14355bb341531e5c190cd8f",
+      "size_bytes": 1459181674,
+      "tag": "hardening-baseline:ci-c83fb2bb1dcf"
+    },
+    "lean": {
+      "config_user": "superset",
+      "created": "2026-09-07T00:34:16.893623875Z",
+      "digest_kind": "image_id",
+      "image_id": "sha256:e3a88c342786852cf0916ea99bc973f4a1feff46e44dfe6ceae4ad8b546df29c",
+      "labels": {
+        "io.hardening-loop.image-target": "lean",
+        "io.hardening-loop.platform": "linux/amd64",
+        "org.opencontainers.image.revision": "c83fb2bb1dcfac41ac51bcebd82471f4a7180d18",
+        "org.opencontainers.image.source": "https://github.com/Hunter-1298/superset"
+      },
+      "size_bytes": 926202016,
+      "tag": "hardening-baseline:lean-c83fb2bb1dcf"
+    }
+  },
+  "jobs": {
+    "lean-policy": {
+      "files": {
+        "grype-vuln.json": "32dd6bfa29d5d5d2285518998aa4147eb1c4c42aee55fe94ad6bb40220a780ca",
+        "sbom.cdx.json": "db542adf524770db5a6383271e348d8afd53d1effb518b2f7efd5b2c313ec4fb",
+        "tools.json": "4a0f83c3ea5ade99d26f72d4f9a21f31de4132e287c2b575a5933143d1d3618f",
+        "trivy-config.json": "5d3c45b936001f77461ba5aff41841dc29b27fc2e524757a16c4cec820c4ac08",
+        "trivy-image-config.json": "ccba821f59dfd9d1cde583006b215cde177d618577fed5b980d243cc13ccf483",
+        "trivy-vuln.json": "23e39f909f7d7bf68694c8d83734e869be9ba41f50fcedafdb4e137dd183ab4d"
+      },
+      "finished_at": "2026-09-07T00:52:22Z",
+      "image_ref": "docker:sha256:e3a88c342786852cf0916ea99bc973f4a1feff46e44dfe6ceae4ad8b546df29c",
+      "image_target": "lean",
+      "inputs": {
+        "grype": "sbom.cdx.json",
+        "syft": "image",
+        "trivy": "image",
+        "trivy-config": "source-tree"
+      },
+      "layer_scope": "image",
+      "mode": "policy",
+      "platform": "linux/amd64",
+      "schema": "hardening-loop/scan-job/v1",
+      "started_at": "2026-09-07T00:52:01Z",
+      "tools": {
+        "grype": {
+          "db": {
+            "built": "2026-09-06T06:27:35Z",
+            "from": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.9_2026-09-06T00:36:16Z_1788676055.tar.zst?checksum=sha256%3A3c93034d0475d25fc82addd47b2300f99564ea4f35fd9e0b957b701049a15020",
+            "path": "/home/ubuntu/.cache/grype/db/6/vulnerability.db",
+            "schemaVersion": "v6.1.9",
+            "valid": true
+          },
+          "version": "0.114.0"
+        },
+        "syft": {
+          "version": "1.45.1"
+        },
+        "trivy": {
+          "checks_bundle": {
+            "Digest": "sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c",
+            "DownloadedAt": "2026-09-07T00:35:10.919039047Z"
+          },
+          "java_db": {
+            "DownloadedAt": "2026-09-07T00:34:50.452910242Z",
+            "NextUpdate": "2026-09-09T01:37:59.115791356Z",
+            "UpdatedAt": "2026-09-06T01:37:59.11579188Z",
+            "Version": 1
+          },
+          "version": "0.71.2",
+          "vuln_db": {
+            "DownloadedAt": "2026-09-06T22:09:08.79802635Z",
+            "NextUpdate": "2026-09-07T19:02:10.600246692Z",
+            "UpdatedAt": "2026-09-06T19:02:10.600247113Z",
+            "Version": 2
+          }
+        }
+      },
+      "vex_documents": []
+    },
+    "lean-raw": {
+      "files": {
+        "grype-vuln.json": "92e0eb6197d61141c046ea89e195fb2b03dab58db6d6bd779b1c8114b445c69f",
+        "sbom.cdx.json": "cf73a8b6609c57e826c936d10587cfeeeb666b95b10a2129e19210cf37f96cff",
+        "tools.json": "4a0f83c3ea5ade99d26f72d4f9a21f31de4132e287c2b575a5933143d1d3618f",
+        "trivy-config.json": "b27f121dd4b9e18a9ea39d4c5da816bcdbe044f010f865c593d583bbddd2f5d2",
+        "trivy-image-config.json": "1d6eaabd8e1aaeb36e72c6144c82477c65dd0beef9ffee802bd1336f9cb9c94f",
+        "trivy-vuln.json": "b9ac5e4c0c4e788ce8f68443eecdcefe1bca3e4359cafc290ccabc7b9898a299"
+      },
+      "finished_at": "2026-09-07T00:52:01Z",
+      "image_ref": "docker:sha256:e3a88c342786852cf0916ea99bc973f4a1feff46e44dfe6ceae4ad8b546df29c",
+      "image_target": "lean",
+      "inputs": {
+        "grype": "sbom.cdx.json",
+        "syft": "image",
+        "trivy": "image",
+        "trivy-config": "source-tree"
+      },
+      "layer_scope": "image",
+      "mode": "raw",
+      "platform": "linux/amd64",
+      "schema": "hardening-loop/scan-job/v1",
+      "started_at": "2026-09-07T00:51:38Z",
+      "tools": {
+        "grype": {
+          "db": {
+            "built": "2026-09-06T06:27:35Z",
+            "from": "https://grype.anchore.io/databases/v6/vulnerability-db_v6.1.9_2026-09-06T00:36:16Z_1788676055.tar.zst?checksum=sha256%3A3c93034d0475d25fc82addd47b2300f99564ea4f35fd9e0b957b701049a15020",
+            "path": "/home/ubuntu/.cache/grype/db/6/vulnerability.db",
+            "schemaVersion": "v6.1.9",
+            "valid": true
+          },
+          "version": "0.114.0"
+        },
+        "syft": {
+          "version": "1.45.1"
+        },
+        "trivy": {
+          "checks_bundle": {
+            "Digest": "sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c",
+            "DownloadedAt": "2026-09-07T00:35:10.919039047Z"
+          },
+          "java_db": {
+            "DownloadedAt": "2026-09-07T00:34:50.452910242Z",
+            "NextUpdate": "2026-09-09T01:37:59.115791356Z",
+            "UpdatedAt": "2026-09-06T01:37:59.11579188Z",
+            "Version": 1
+          },
+          "version": "0.71.2",
+          "vuln_db": {
+            "DownloadedAt": "2026-09-06T22:09:08.79802635Z",
+            "NextUpdate": "2026-09-07T19:02:10.600246692Z",
+            "UpdatedAt": "2026-09-06T19:02:10.600247113Z",
+            "Version": 2
+          }
+        }
+      },
+      "vex_documents": []
+    }
+  },
+  "platform": "linux/amd64",
+  "schema": "hardening-loop/baseline-manifest/v1",
+  "source_branch": "main",
+  "source_repo": "Hunter-1298/superset",
+  "source_sha": "c83fb2bb1dcfac41ac51bcebd82471f4a7180d18",
+  "trigger": "fixture"
+}

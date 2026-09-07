@@ -1,0 +1,202 @@
+#!/usr/bin/env bash
+# Scan ONE immutable image reference with the pinned tools and write a self-describing evidence dir.
+#
+#   scripts/scan_image.sh <image-ref> <superset-src-dir> <out-dir> <mode: raw|policy> [image-target]
+#
+# raw    : no suppression of any kind.
+# policy : identical, plus every approved OpenVEX document from <src>/security/vex/approved/*.json.
+#          No .trivyignore / .grype.yaml / ignore rules are ever used; the script refuses to run if
+#          any such file exists in the source tree (see check_no_ignore_files).
+#
+# Outputs (all JSON, plus SHA256SUMS and job.json):
+#   sbom.cdx.json            Syft CycloneDX SBOM of the image
+#   trivy-vuln.json          trivy image --scanners vuln --list-all-pkgs (native image analysis)
+#   grype-vuln.json          grype sbom: (vulnerabilities from the Syft SBOM of the SAME image)
+#   trivy-image-config.json  trivy image --scanners misconfig --image-config-scanners misconfig
+#   trivy-config.json        trivy config on Dockerfile, docker-compose*.yml, docker/, helm/superset
+#   tools.json               tool versions + vulnerability DB timestamps
+set -euo pipefail
+
+IMAGE_REF="${1:?image ref}"
+SRC="${2:?superset source dir}"
+OUT="${3:?output dir}"
+MODE="${4:?raw|policy}"
+IMAGE_TARGET="${5:-lean}"
+PLATFORM="${PLATFORM:-linux/amd64}"
+
+case "$MODE" in raw|policy) ;; *) echo "mode must be raw|policy" >&2; exit 2;; esac
+mkdir -p "$OUT"
+
+# Trivy's image scanner cannot parse a bare local image ID ("docker:sha256:..."). For local IDs a
+# tag must be supplied via IMAGE_NAME and is verified to resolve to exactly that ID before use.
+# Registry digests ("repo@sha256:...") are accepted by every tool unchanged.
+TRIVY_IMAGE_REF="$IMAGE_REF"
+if [[ "$IMAGE_REF" == docker:sha256:* ]]; then
+  : "${IMAGE_NAME:?IMAGE_NAME (a local tag) is required when scanning a bare image ID}"
+  RESOLVED_ID="$(docker image inspect --format '{{.Id}}' "$IMAGE_NAME")"
+  if [[ "docker:$RESOLVED_ID" != "$IMAGE_REF" ]]; then
+    echo "IMAGE_NAME=$IMAGE_NAME resolves to $RESOLVED_ID, not ${IMAGE_REF#docker:}" >&2
+    exit 5
+  fi
+  TRIVY_IMAGE_REF="$IMAGE_NAME"
+fi
+START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+check_no_ignore_files() {
+  local found
+  found="$(cd "$SRC" && find . -path ./node_modules -prune -o \( -name '.trivyignore' -o -name '.trivyignore.yaml' -o -name '.trivyignore.yml' -o -name '.grype.yaml' -o -name '.grype.yml' -o -name '.grype' \) -print | head -n 20)"
+  if [[ -n "$found" ]]; then
+    echo "::error::scanner ignore files are forbidden; found:" >&2
+    echo "$found" >&2
+    exit 3
+  fi
+}
+check_no_ignore_files
+
+# VEX handling: only files under security/vex/approved/ and only in policy mode.
+VEX_ARGS_TRIVY=()
+VEX_ARGS_GRYPE=()
+VEX_LIST=()
+if [[ "$MODE" == "policy" && -d "$SRC/security/vex/approved" ]]; then
+  while IFS= read -r -d '' f; do
+    VEX_LIST+=("$f")
+    VEX_ARGS_TRIVY+=(--vex "$f")
+    VEX_ARGS_GRYPE+=(--vex "$f")
+  done < <(find "$SRC/security/vex/approved" -maxdepth 1 -name '*.json' -print0 | sort -z)
+fi
+if [[ "$MODE" == "policy" && ${#VEX_LIST[@]} -eq 0 ]]; then
+  echo "policy mode with no approved VEX documents: results will equal raw"
+fi
+
+# Tool identity (fail if not the pinned versions).
+: "${SYFT_VERSION:=1.45.1}" "${TRIVY_VERSION:=0.71.2}" "${GRYPE_VERSION:=0.114.0}"
+syft version -o json > "$OUT/.syft-version.json"
+grep -q "\"version\": *\"$SYFT_VERSION\"" "$OUT/.syft-version.json" || { echo "syft is not $SYFT_VERSION" >&2; exit 4; }
+trivy --version | grep -q "Version: $TRIVY_VERSION" || { echo "trivy is not $TRIVY_VERSION" >&2; exit 4; }
+grype version -o json > "$OUT/.grype-version.json"
+grep -q "\"version\": *\"$GRYPE_VERSION\"" "$OUT/.grype-version.json" || { echo "grype is not $GRYPE_VERSION" >&2; exit 4; }
+
+# Warm DBs up-front so timestamps in tools.json describe exactly what scanned.
+trivy image --download-db-only --quiet
+trivy image --download-java-db-only --quiet || true
+grype db update -q
+
+# 1. SBOM
+syft scan "$IMAGE_REF" --platform "$PLATFORM" -o "cyclonedx-json=$OUT/sbom.cdx.json" -q
+
+# 2. Vulnerabilities, both scanners, same immutable image. Exit code always 0: gating is separate.
+#    Grype consumes the Syft SBOM (same tool family; identical to scanning the image). Trivy scans
+#    the image natively: fed a third-party SBOM it loses Debian source-package data and under-reports
+#    OS vulnerabilities by an order of magnitude, which would fabricate "scanner disagreements".
+trivy image --skip-version-check --scanners vuln --list-all-pkgs --format json --exit-code 0 \
+  --platform "$PLATFORM" "${VEX_ARGS_TRIVY[@]+"${VEX_ARGS_TRIVY[@]}"}" \
+  --output "$OUT/trivy-vuln.json" "$TRIVY_IMAGE_REF"
+grype "sbom:$OUT/sbom.cdx.json" -o json --file "$OUT/grype-vuln.json" -q \
+  "${VEX_ARGS_GRYPE[@]+"${VEX_ARGS_GRYPE[@]}"}"
+
+# 3. Image configuration (runtime hardening: USER, HEALTHCHECK, exposed ports, ...)
+trivy image --skip-version-check --scanners misconfig --image-config-scanners misconfig --format json --exit-code 0 \
+  --platform "$PLATFORM" --output "$OUT/trivy-image-config.json" "$TRIVY_IMAGE_REF"
+
+# Every Trivy image report must describe the same image bytes Syft SBOM'd.
+check_image_identity() {
+  python3 - "$1" "${IMAGE_REF#docker:}" <<'PY'
+import json, sys
+report, expected = json.load(open(sys.argv[1])), sys.argv[2]
+meta = report.get("Metadata") or {}
+seen = {meta.get("ImageID"), *(meta.get("RepoDigests") or [])}
+if expected.startswith("sha256:") and meta.get("ImageID") != expected and not any(
+    d.endswith("@" + expected) for d in (meta.get("RepoDigests") or [])
+):
+    sys.exit(f"{sys.argv[1]} scanned {seen}, expected {expected}")
+PY
+}
+check_image_identity "$OUT/trivy-vuln.json"
+check_image_identity "$OUT/trivy-image-config.json"
+python3 - "$OUT/sbom.cdx.json" "${IMAGE_REF#docker:}" <<'PY'
+import json, sys
+doc, expected = json.load(open(sys.argv[1])), sys.argv[2]
+comp = (doc.get("metadata") or {}).get("component") or {}
+# Syft names the root component after the image ID when scanning a bare ID: name=sha256 version=<hex>
+props = {p.get("name"): p.get("value") for p in comp.get("properties") or []}
+candidates = {props.get("syft:image:id"), f"{comp.get('name')}:{comp.get('version')}"}
+if expected.startswith("sha256:") and expected not in candidates:
+    sys.exit(f"sbom describes {candidates - {None}}, expected {expected}")
+PY
+
+# 4. IaC / deployment configuration from the source tree
+CONFIG_TARGETS=()
+for p in Dockerfile docker docker-compose.yml docker-compose-non-dev.yml docker-compose-image-tag.yml helm/superset; do
+  [[ -e "$SRC/$p" ]] && CONFIG_TARGETS+=("$p")
+done
+# trivy config accepts a single target, so stage the in-scope paths (keeping their repo-relative
+# names) into a temp dir and scan that once.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+(cd "$SRC" && cp -a --parents "${CONFIG_TARGETS[@]}" "$STAGE/")
+# Trivy's helm scanner refuses charts whose subchart dependencies are not vendored under charts/.
+# The bitnami postgresql/redis subcharts are third-party and out of scope: strip the `dependencies:`
+# block from the STAGED copy only, so Superset's own templates are rendered and scanned.
+if [[ -f "$STAGE/helm/superset/Chart.yaml" ]]; then
+  python3 - "$STAGE/helm/superset/Chart.yaml" <<'PY'
+import re, sys
+p = sys.argv[1]
+text = open(p).read()
+open(p, "w").write(re.sub(r"(?ms)^dependencies:\n(?:[ \t].*\n?|\n)*", "", text))
+PY
+fi
+(cd "$STAGE" && trivy config --skip-version-check --format json --exit-code 0 --output "$OUT/trivy-config.json" .)
+
+# 5. Tool + DB metadata
+TRIVY_DB_JSON="$(trivy version --format json)"
+GRYPE_DB_JSON="$(grype db status -o json)"
+python3 - "$OUT" "$MODE" "$IMAGE_REF" "$IMAGE_TARGET" "$PLATFORM" "$START" "$TRIVY_DB_JSON" "$GRYPE_DB_JSON" "${VEX_LIST[@]+"${VEX_LIST[@]}"}" <<'PY'
+import hashlib, json, os, sys, datetime
+out, mode, image_ref, image_target, platform, start, trivy_json, grype_json, *vex = sys.argv[1:]
+syft = json.load(open(os.path.join(out, ".syft-version.json")))
+grype = json.load(open(os.path.join(out, ".grype-version.json")))
+trivy = json.loads(trivy_json)
+grype_db = json.loads(grype_json)
+tools = {
+    "syft": {"version": syft["version"]},
+    "trivy": {
+        "version": trivy["Version"],
+        "vuln_db": trivy.get("VulnerabilityDB"),
+        "java_db": trivy.get("JavaDB"),
+        "checks_bundle": trivy.get("CheckBundle"),
+    },
+    "grype": {"version": grype["version"], "db": grype_db},
+}
+def sha(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+files = ["sbom.cdx.json", "trivy-vuln.json", "grype-vuln.json", "trivy-image-config.json", "trivy-config.json"]
+json.dump(tools, open(os.path.join(out, "tools.json"), "w"), indent=2, sort_keys=True)
+files.append("tools.json")
+sums = {f: sha(os.path.join(out, f)) for f in files}
+with open(os.path.join(out, "SHA256SUMS"), "w") as fh:
+    for f in files:
+        fh.write(f"{sums[f]}  {f}\n")
+vex_docs = [{"path": os.path.relpath(v, start=os.getcwd()), "sha256": sha(v)} for v in vex]
+job = {
+    "schema": "hardening-loop/scan-job/v1",
+    "mode": mode,
+    "image_ref": image_ref,
+    "image_target": image_target,
+    "platform": platform,
+    "layer_scope": "image",
+    "inputs": {"syft": "image", "trivy": "image", "grype": "sbom.cdx.json", "trivy-config": "source-tree"},
+    "started_at": start,
+    "finished_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "files": sums,
+    "vex_documents": vex_docs,
+    "tools": tools,
+}
+json.dump(job, open(os.path.join(out, "job.json"), "w"), indent=2, sort_keys=True)
+for f in (".syft-version.json", ".grype-version.json"):
+    os.remove(os.path.join(out, f))
+print(json.dumps({k: job[k] for k in ("mode", "image_ref", "image_target", "platform")}))
+PY
