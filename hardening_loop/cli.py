@@ -1,8 +1,9 @@
 """`hardening-loop` command line: replay, report, serve, plus the CI helpers the fork's
 `security-scan` workflow runs (gate, vex-lint, forbid-ignore-files, scan-manifest).
 
-Live orchestration (`run`) is intentionally absent until the real GitHub/Devin clients land;
-nothing here can spend ACUs."""
+Only `serve --operator` (without `--doubles`) can spend ACUs: it runs the poll loop with live
+clients and lets an operator launch a Devin session from the dashboard. Every other command,
+including plain `serve`, is read-only and never talks to GitHub or Devin."""
 
 from __future__ import annotations
 
@@ -32,6 +33,13 @@ from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
 from hardening_loop.logging_utils import configure_logging
 from hardening_loop.negative import CASES, MutationError, NegativeRunner, mutate
+from hardening_loop.operator import (
+    OperatorConfigError,
+    OperatorContext,
+    OperatorRuntime,
+    build_doubles_orchestrator,
+    build_live_orchestrator,
+)
 from hardening_loop.replay.runner import run_all
 from hardening_loop.replay.scenarios import SCENARIOS
 from hardening_loop.report.run_report import persist_report, render_markdown
@@ -94,10 +102,44 @@ def cmd_serve(args: argparse.Namespace) -> int:
     settings = _settings_for(Path(args.db) if args.db else None)
     if args.replay:
         settings = settings.model_copy(update={"replay_mode": True})
-    app = create_app(settings)
-    uvicorn.run(
-        app, host=args.host or settings.dashboard_host, port=args.port or settings.dashboard_port
+    host, port = args.host or settings.dashboard_host, args.port or settings.dashboard_port
+    if not args.operator:
+        if args.doubles or args.operator_login:
+            print("error: --doubles and --operator-login require --operator", file=sys.stderr)
+            return 2
+        uvicorn.run(create_app(settings), host=host, port=port)
+        return 0
+
+    update: dict[str, object] = {"operator_mode": True}
+    if args.operator_login:
+        update["operator_login"] = args.operator_login
+    settings = settings.model_copy(update=update)
+    try:
+        if args.doubles:
+            orch = build_doubles_orchestrator(settings)
+            assert settings.operator_login is not None
+            ctx = OperatorContext.for_doubles(orch, login=settings.operator_login)
+        else:
+            orch = build_live_orchestrator(settings)
+            assert settings.operator_login is not None
+            ctx = OperatorContext(
+                orch, settings.operator_login, auto_dispatch=settings.auto_dispatch
+            )
+        app = create_app(settings, operator=ctx)
+    except (OperatorConfigError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    runtime = OperatorRuntime(ctx, poll_interval_seconds=settings.poll_interval_seconds)
+    print(
+        f"operator mode as {ctx.login} ({'local doubles, no spend' if not ctx.live else 'LIVE'}); "
+        f"auto-dispatch {'on' if ctx.auto_dispatch else 'off'}; polling every {runtime.interval}s",
+        file=sys.stderr,
     )
+    runtime.start()
+    try:
+        uvicorn.run(app, host=host, port=port)
+    finally:
+        runtime.stop()
     return 0
 
 
@@ -300,11 +342,23 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--out", help="write Markdown here instead of stdout")
     rep.set_defaults(fn=cmd_report)
 
-    s = sub.add_parser("serve", help="read-only dashboard")
+    s = sub.add_parser("serve", help="dashboard (read-only unless --operator)")
     s.add_argument("--db")
     s.add_argument("--host")
     s.add_argument("--port", type=int)
     s.add_argument("--replay", action="store_true", help="label the UI as replay (no spend)")
+    s.add_argument(
+        "--operator",
+        action="store_true",
+        help="writable: run the poll loop and allow 'Launch Devin' (needs HL_GITHUB_TOKEN, "
+        "HL_DEVIN_API_KEY, HL_OPERATOR_LOGIN)",
+    )
+    s.add_argument(
+        "--doubles",
+        action="store_true",
+        help="with --operator: use the in-memory GitHub/Devin doubles (no credentials, no spend)",
+    )
+    s.add_argument("--operator-login", help="overrides HL_OPERATOR_LOGIN")
     s.set_defaults(fn=cmd_serve)
 
     g = sub.add_parser("gate", help="apply SCAN_GATE_MODE to one policy scan job directory")

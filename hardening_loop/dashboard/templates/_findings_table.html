@@ -17,7 +17,7 @@
   {% for f in findings %}
   <tr>
     <td>{{ ui.severity_badge(f.severity) }}{% if f.severity_disagreement %}<span class="secondary" title="{{ f.severity_by_scanner|tojson }}">scanners disagree</span>{% endif %}</td>
-    <td class="w-title"><span class="primary mono">{{ f.vuln_id }}</span>{% if f.title %}<span class="secondary">{{ f.title }}</span>{% endif %}</td>
+    <td class="w-title"><a class="primary mono" href="/findings/{{ f.id }}">{{ f.vuln_id }}</a>{% if f.title %}<span class="secondary">{{ f.title }}</span>{% endif %}</td>
     <td class="mono">{{ f.pkg_name or f.resource or "—" }}{% if f.pkg_version %}<span class="secondary">{{ f.pkg_version }}</span>{% endif %}{% if f.bound_blocked %}<span class="secondary">upper bound blocks the upgrade</span>{% endif %}</td>
     <td>{{ ui.kind_badge(f.kind) }}{% if f.unclassified_reason %}<span class="secondary">{{ f.unclassified_reason }}</span>{% endif %}</td>
     <td>{{ f.layer|layer_label }}</td>

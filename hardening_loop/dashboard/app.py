@@ -1,15 +1,22 @@
-"""Read-only FastAPI dashboard over the controller database.
+"""FastAPI dashboard over the controller database.
 
-Every page and API endpoint is a pure read of SQLite; the app rejects any non-safe HTTP method
-so it can never approve, merge, dispatch, or mutate state. Approvals stay in GitHub."""
+By default every page and API endpoint is a pure read of SQLite and the app rejects any non-safe
+HTTP method, so it can never approve, merge, dispatch, or mutate state. Approvals stay in GitHub.
+
+With an `OperatorContext` (`serve --operator`) exactly one write exists: `POST /operator/launch/
+{work_item_id}`, which hands a work item to the orchestrator's guarded dispatch path after an
+explicit confirmation step and a CSRF check. Merges and dispositions still happen in GitHub."""
 
 from __future__ import annotations
 
+import hmac
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -19,10 +26,12 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import ColumnElement
 from sqlmodel import and_, col, or_, select
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from hardening_loop.config import COMPARISON_BRANCH, Settings
 from hardening_loop.dashboard import labels
+from hardening_loop.dashboard.vuln import vuln_detail
 from hardening_loop.db import open_database_readonly, session_scope
 from hardening_loop.domain.enums import (
     FindingState,
@@ -43,8 +52,11 @@ from hardening_loop.models.tables import (
     ScanRun,
     Session,
     SessionPoll,
+    Sighting,
     WorkItem,
 )
+from hardening_loop.operator import OperatorContext
+from hardening_loop.orchestrator.launch import LaunchBlock
 from hardening_loop.report.run_report import (
     ReportBody,
     build_report,
@@ -54,6 +66,8 @@ from hardening_loop.report.run_report import (
 )
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+LAUNCH_PATH = re.compile(r"^/operator/launch/\d+$")
+CONFIRM_VALUE = "launch"
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_ROWS = 2000
@@ -76,12 +90,29 @@ class NavItem:
 
 NAV: tuple[NavItem, ...] = (
     NavItem("Overview", "/", ("/",)),
+    NavItem("CVEs", "/findings", ("/findings",)),
     NavItem("Work items", "/issues", ("/issues",)),
     NavItem("Scans", "/runs", ("/runs",)),
-    NavItem("Findings", "/findings", ("/findings",), secondary=True),
     NavItem("Pull requests", "/prs", ("/prs",)),
     NavItem("Report", "/report", ("/report",)),
 )
+
+LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
+    LaunchBlock.dispatch_in_progress: "A dispatch for this item is already in progress.",
+    LaunchBlock.session_in_flight: "A Devin session is already working on this item.",
+    LaunchBlock.awaiting_human_merge: "The pull request is waiting for a human review and merge.",
+    LaunchBlock.awaiting_rescan: "Merged; waiting for a source-matching rescan of the branch.",
+    LaunchBlock.closed: "This item is closed.",
+    LaunchBlock.at_capacity: "Every concurrent session slot is in use.",
+    LaunchBlock.over_budget: "This item's ACU cap would exceed the global ACU budget.",
+}
+
+
+def _launch_block(reason: str) -> LaunchBlock | None:
+    try:
+        return LaunchBlock(reason)
+    except ValueError:
+        return None
 
 
 def nav_current(path: str) -> str | None:
@@ -284,12 +315,25 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in request.headers.get("accept", "")
 
 
-def create_app(settings: Settings | None = None, *, engine: Engine | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    engine: Engine | None = None,
+    operator: OperatorContext | None = None,
+) -> FastAPI:
+    """Read-only by default. Passing `operator` switches the app to operator mode: it reads through
+    the orchestrator's writable engine and accepts `POST /operator/launch/{id}` and nothing else.
+    Replay databases are never served in operator mode."""
     settings = settings or Settings()
+    if operator is not None and settings.replay_mode:
+        raise ValueError("replay mode is read-only; operator launches are disabled")
+    if operator is not None:
+        engine = operator.engine
     engine = engine or open_database_readonly(settings.database_path)
     app = FastAPI(title="Superset hardening loop", docs_url="/api/docs", redoc_url=None)
     app.state.settings = settings
     app.state.engine = engine
+    app.state.operator = operator
     templates = _templates()
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -297,13 +341,19 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     async def read_only(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.method not in SAFE_METHODS:
-            return JSONResponse(
-                {"detail": "dashboard is read-only; approvals and merges happen in GitHub"},
-                status_code=405,
-                headers={"Allow": "GET, HEAD, OPTIONS"},
-            )
-        return await call_next(request)
+        if request.method in SAFE_METHODS:
+            return await call_next(request)
+        if (
+            operator is not None
+            and request.method == "POST"
+            and LAUNCH_PATH.match(request.url.path)
+        ):
+            return await call_next(request)
+        return JSONResponse(
+            {"detail": "dashboard is read-only; approvals and merges happen in GitHub"},
+            status_code=405,
+            headers={"Allow": "GET, HEAD, OPTIONS"},
+        )
 
     def metrics() -> Metrics:
         return compute_metrics(engine, acu_cost_usd=settings.acu_cost_usd, now=datetime.now(UTC))
@@ -317,12 +367,19 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
             "comparison_branch": COMPARISON_BRANCH,
             "gate_mode": settings.scan_gate_mode.value,
             "replay_mode": settings.replay_mode,
+            "operator": operator,
             "database": str(settings.database_path),
             "current_path": request.url.path,
             "latest_run": header.latest_run,
             "last_updated": header.last_updated,
         }
         return templates.TemplateResponse(request, name, {**base, **ctx}, status_code=status_code)
+
+    def launch_offer(wi: WorkItem | None) -> Any:
+        """Preview for the "Launch Devin" affordance, or None outside operator mode."""
+        if operator is None or wi is None or wi.id is None:
+            return None
+        return operator.preview(wi.id)
 
     @app.exception_handler(StarletteHTTPException)
     async def html_or_json_error(request: Request, exc: StarletteHTTPException) -> Response:
@@ -469,6 +526,89 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                     "layer": layer,
                     "run": run,
                 },
+            )
+
+    @app.get("/findings/{finding_id}", response_class=HTMLResponse)
+    def finding_page(request: Request, finding_id: int) -> HTMLResponse:
+        with session_scope(engine) as db:
+            f = db.get(Finding, finding_id)
+            if f is None:
+                raise HTTPException(404, f"finding {finding_id} not found")
+            sightings = db.exec(
+                select(Sighting)
+                .where(Sighting.finding_id == finding_id)
+                .order_by(col(Sighting.scan_run_id), col(Sighting.scanner), col(Sighting.mode))
+            ).all()
+            run_ids = sorted({s.scan_run_id for s in sightings})
+            runs = {
+                r.id: r
+                for r in db.exec(select(ScanRun).where(col(ScanRun.id).in_(run_ids))).all()
+                if r.id is not None
+            }
+            records: dict[str, dict[str, Any] | None] = {}
+            for s in sorted(sightings, key=lambda s: s.scan_run_id):
+                if s.present and s.record is not None:
+                    records[s.scanner.value] = s.record
+            detail = vuln_detail(records)
+            wi = db.get(WorkItem, f.work_item_id) if f.work_item_id is not None else None
+            sessions = (
+                db.exec(
+                    select(Session).where(Session.work_item_id == wi.id).order_by(col(Session.id))
+                ).all()
+                if wi is not None
+                else []
+            )
+            prs = (
+                db.exec(
+                    select(PullRequest)
+                    .where(PullRequest.work_item_id == wi.id)
+                    .order_by(col(PullRequest.id))
+                ).all()
+                if wi is not None
+                else []
+            )
+            events = db.exec(
+                select(Event)
+                .where(
+                    or_(
+                        and_(
+                            col(Event.entity_type) == "finding", col(Event.entity_id) == finding_id
+                        ),
+                        and_(
+                            col(Event.entity_type) == "work_item",
+                            col(Event.entity_id) == (wi.id if wi is not None else -1),
+                        ),
+                    )
+                )
+                .order_by(col(Event.ts), col(Event.id))
+            ).all()
+            same_vuln = db.exec(
+                select(Finding)
+                .where(Finding.vuln_id == f.vuln_id, Finding.id != finding_id)
+                .order_by(col(Finding.id))
+                .limit(50)
+            ).all()
+            history = [
+                (runs.get(rid), [s for s in sightings if s.scan_run_id == rid]) for rid in run_ids
+            ]
+            return render(
+                request,
+                "finding.html",
+                f=f,
+                detail=detail,
+                history=history[::-1],
+                wi=wi,
+                sessions=sessions,
+                prs=prs,
+                events=events,
+                same_vuln=same_vuln,
+                launch=launch_offer(wi),
+                launch_block_text=LAUNCH_BLOCK_TEXT,
+                next_action=(
+                    labels.next_human_action(wi.state, wi.blocked_reason, wi.pr_url)
+                    if wi is not None
+                    else None
+                ),
             )
 
     @app.get("/issues", response_class=HTMLResponse)
@@ -619,7 +759,73 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
                 acus=acus,
                 cost=acus * settings.acu_cost_usd if settings.acu_cost_usd is not None else None,
                 next_action=labels.next_human_action(wi.state, wi.blocked_reason, wi.pr_url),
+                launch=launch_offer(wi),
+                launch_block_text=LAUNCH_BLOCK_TEXT,
             )
+
+    # --------------------------------------------------------------------------- operator
+
+    if operator is not None:
+        ctx = operator
+
+        def _launch_context(db: Any, wi_id: int) -> dict[str, Any]:
+            wi = db.get(WorkItem, wi_id)
+            if wi is None:
+                raise HTTPException(404, f"work item {wi_id} not found")
+            members = db.exec(
+                select(Finding).where(Finding.work_item_id == wi_id).order_by(col(Finding.vuln_id))
+            ).all()
+            return {
+                "wi": wi,
+                "members": members,
+                "preview": ctx.preview(wi_id),
+                "launch_block_text": LAUNCH_BLOCK_TEXT,
+                "csrf_token": ctx.csrf_token,
+                "confirm_value": CONFIRM_VALUE,
+                "operator_login": ctx.login,
+                "live": ctx.live,
+            }
+
+        @app.get("/operator/launch/{wi_id}", response_class=HTMLResponse)
+        def launch_confirm(request: Request, wi_id: int) -> HTMLResponse:
+            with session_scope(engine) as db:
+                return render(request, "launch.html", **_launch_context(db, wi_id))
+
+        @app.post("/operator/launch/{wi_id}", response_class=HTMLResponse)
+        async def launch_submit(request: Request, wi_id: int) -> HTMLResponse:
+            fetch_site = request.headers.get("sec-fetch-site")
+            if fetch_site not in (None, "same-origin", "none"):
+                raise HTTPException(403, "cross-site launch request refused")
+            if not request.headers.get("content-type", "").startswith(
+                "application/x-www-form-urlencoded"
+            ):
+                raise HTTPException(415, "launch form must be application/x-www-form-urlencoded")
+            form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+            token = form.get("csrf", [""])[0]
+            if not hmac.compare_digest(token, ctx.csrf_token):
+                raise HTTPException(403, "invalid or missing CSRF token")
+            if form.get("confirm", [""])[0] != CONFIRM_VALUE:
+                raise HTTPException(400, "launch not confirmed")
+            try:
+                result = await run_in_threadpool(ctx.launch, wi_id)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            status = 200 if result.ok else (409 if result.outcome == "rejected" else 502)
+            with session_scope(engine) as db:
+                wi = db.get(WorkItem, wi_id)
+                sessions = db.exec(
+                    select(Session).where(Session.work_item_id == wi_id).order_by(col(Session.id))
+                ).all()
+                return render(
+                    request,
+                    "launch_result.html",
+                    status_code=status,
+                    wi=wi,
+                    result=result,
+                    sessions=sessions,
+                    launch_block_text=LAUNCH_BLOCK_TEXT,
+                    block=_launch_block(result.reason),
+                )
 
     @app.get("/prs", response_class=HTMLResponse)
     def prs_page(request: Request) -> HTMLResponse:
@@ -660,7 +866,13 @@ def create_app(settings: Settings | None = None, *, engine: Engine | None = None
     def healthz() -> dict[str, Any]:
         with session_scope(engine) as db:
             runs = len(db.exec(select(ScanRun.id)).all())
-        return {"ok": True, "runs": runs, "replay_mode": settings.replay_mode, "read_only": True}
+        return {
+            "ok": True,
+            "runs": runs,
+            "replay_mode": settings.replay_mode,
+            "read_only": operator is None,
+            "operator_mode": operator is not None,
+        }
 
     @app.get("/api/metrics", response_model=Metrics)
     def api_metrics() -> Metrics:

@@ -20,10 +20,12 @@
   {% if wi.risk.value != "normal" %}{{ ui.stat("Risk", (wi.risk|risk_label).text) }}{% endif %}
 </section>
 
+{% include "_launch_panel.html" %}
+
 {% if next_action %}
 <div class="notice notice-{{ human_tone }}" role="status">
   <p><strong>Next human action.</strong> {{ next_action }}</p>
-  {% if wi.issue_url or wi.pr_url %}<p>Act in GitHub on {% if wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} or {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}; this dashboard is read-only.</p>{% endif %}
+  {% if wi.issue_url or wi.pr_url %}<p>Act in GitHub on {% if wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} or {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}{% if launch and launch.eligible %}, or relaunch Devin above{% else %}; this dashboard does not approve or merge{% endif %}.</p>{% endif %}
 </div>
 {% endif %}
 
