@@ -345,7 +345,7 @@ class Orchestrator:
     def create_work_items(self, run_id: int | None = None) -> list[int]:
         """Group open/regressed classified findings of the latest main run into WorkItems."""
         created: list[int] = []
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             run = self._latest_main_run(db, run_id)
             if run is None:
                 return created
@@ -1019,7 +1019,7 @@ class Orchestrator:
         """Poll the Devin session of every active work item, or of just the work items in `only`,
         and apply what each snapshot says about the item."""
         polled = 0
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             stmt = select(WorkItem).where(
                 WorkItem.state == WorkItemState.session_active,
                 col(WorkItem.active_session_id).is_not(None),
@@ -1213,7 +1213,7 @@ class Orchestrator:
 
     def poll_pull_requests(self) -> int:
         n = 0
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             items = db.exec(
                 select(WorkItem).where(
                     col(WorkItem.state).in_(list(self._PR_STATES)),
@@ -1626,7 +1626,7 @@ class Orchestrator:
 
     def poll_human_labels(self) -> int:
         n = 0
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             items = db.exec(
                 select(WorkItem).where(
                     col(WorkItem.state).in_(
@@ -1756,9 +1756,14 @@ class Orchestrator:
 
     def apply_scan_run(self, run_id: int) -> dict[str, int]:
         """Evaluate one ingested run as a closing run for every finding it could close. A run
-        already applied is not evaluated again: the transitions it caused are recorded once."""
+        already applied is not evaluated again: the transitions it caused are recorded once.
+
+        Issues are labelled, commented on, closed and reopened on GitHub before the evaluation's
+        rows are flushed, so it holds the write lock from its first read: a concurrent `ingest`
+        cannot commit underneath it and turn a later flush into a failed snapshot upgrade that
+        would roll back the rows while the GitHub effects stand."""
         counts: dict[str, int] = defaultdict(int)
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             run = db.get(ScanRun, run_id)
             if run is None:
                 raise ValueError(f"scan run {run_id} not found")

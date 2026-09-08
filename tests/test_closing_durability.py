@@ -18,6 +18,7 @@ from hardening_loop.metrics import metrics_history
 from hardening_loop.models.tables import WorkItem
 from hardening_loop.operator import OperatorContext
 from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.orchestrator.state import WorkItemEvent
 from hardening_loop.replay.synth import ingest_synthetic
 from hardening_loop.replay.world import APPROVER, World, sha
 
@@ -364,3 +365,103 @@ def test_a_github_failure_during_closure_leaves_the_run_pending_without_losing_t
     assert f.state is FindingState.fixed and f.closed_by_run_id == rid
     assert w.state_of(wi.id or 0) is WorkItemState.verified
     assert w.issue_state(wi) == "closed"
+
+
+def test_a_scan_ingested_while_a_closure_is_closing_its_issue_waits_for_the_closure(
+    w: World,
+) -> None:
+    """Applying a closing run reads the run, closes the GitHub issue, and only then writes
+    `closure_applied_at`. A CLI `ingest` (another process, its own connections) landing between
+    the read and that write must not commit ahead of it: otherwise the late write fails against
+    a stale snapshot, every row rolls back, the issue stays closed on GitHub, and the run is
+    evaluated again on the next tick, repeating the GitHub effects."""
+    wi = _merged_item_awaiting_its_closing_scan(w)
+    w.clock.advance(minutes=20)
+    rid = w.ingest(w.closing_run(MERGE_SHA))
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+
+    cli_engine = open_database(w.db_path)
+    w.clock.advance(minutes=30)
+    later = w.closing_run(MERGE_SHA)
+    later.at = w.clock.now()
+    cli = threading.Thread(target=ingest_synthetic, args=(cli_engine, later, "cli-race"))
+
+    def intake_arrives_mid_closure() -> None:
+        cli.start()
+        cli.join(timeout=1.0)
+        assert cli.is_alive(), "the CLI ingest must wait for the closure's write transaction"
+
+    w.gh.before_next["close_issue"] = intake_arrives_mid_closure
+    report = ctx.tick()
+    cli.join(timeout=30)
+    assert not cli.is_alive(), "the CLI ingest completes once the closure has committed"
+
+    assert report.scan_apply_error is None and report.scans_applied == 1, report
+    runs = w.scan_runs()
+    assert [r.external_run_id for r in runs][-1] == "cli-race"
+    assert _applied(w) == [True, True, False], "the raced-in run is still owed its evaluation"
+    f = w.finding_by_vuln(CVE)
+    assert f.state is FindingState.fixed and f.closed_by_run_id == rid
+    assert w.state_of(wi.id or 0) is WorkItemState.verified
+    assert w.issue_state(wi) == "closed"
+    verified = WorkItemEvent.rescan_verified.value
+    assert w.event_names(wi.id or 0).count(verified) == 1, "the closure was recorded once"
+    assert [m for m, _ in w.gh.calls if m == "close_issue"] == ["close_issue"]
+
+    report = ctx.tick()  # the later run is spent as a confirmation, not a second closure
+    assert report.scan_apply_error is None and report.scans_applied == 1
+    assert _applied(w) == [True, True, True]
+    assert w.issue_state(wi) == "closed"
+    assert w.event_names(wi.id or 0).count(verified) == 1
+    assert [m for m, _ in w.gh.calls if m == "close_issue"] == ["close_issue"]
+
+
+def test_a_scan_ingested_while_a_rescan_flags_the_issue_cannot_make_the_flagging_repeat(
+    w: World,
+) -> None:
+    """A rescan that still sees the vulnerability sends the item to `needs_human`, and that
+    transition labels and comments on the GitHub issue before any row of the evaluation has been
+    flushed. A CLI `ingest` committing in that window would, under a deferred transaction, make
+    the first flush fail against the stale snapshot: the label and comment would stand, every row
+    would roll back, and the next tick would evaluate the run again and comment again."""
+    wi = _merged_item_awaiting_its_closing_scan(w)
+    w.clock.advance(minutes=20)
+    rid = w.ingest(w.closing_run(MERGE_SHA, "cryptography"))  # still present after the merge
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+
+    cli_engine = open_database(w.db_path)
+    w.clock.advance(minutes=30)
+    later = w.closing_run(MERGE_SHA, "cryptography")
+    later.at = w.clock.now()
+    cli = threading.Thread(target=ingest_synthetic, args=(cli_engine, later, "cli-race"))
+
+    def intake_arrives_mid_evaluation() -> None:
+        cli.start()
+        cli.join(timeout=1.0)
+        assert cli.is_alive(), "the CLI ingest must wait for the evaluation's write transaction"
+
+    w.gh.before_next["add_labels"] = intake_arrives_mid_evaluation
+    report = ctx.tick()
+    cli.join(timeout=30)
+    assert not cli.is_alive(), "the CLI ingest completes once the evaluation has committed"
+
+    assert report.scan_apply_error is None and report.scans_applied == 1, report
+    assert [r.external_run_id for r in w.scan_runs()][-1] == "cli-race"
+    assert _applied(w) == [True, True, False]
+    assert w.state_of(wi.id or 0) is WorkItemState.needs_human
+    assert w.finding_by_vuln(CVE).state is FindingState.human_blocked
+    assert w.finding_by_vuln(CVE).closed_by_run_id is None and rid is not None
+    assert w.issue_state(wi) == "open" and "needs-human" in w.issue_labels(wi)
+    flagged = WorkItemEvent.rescan_shows_present.value
+    assert w.event_names(wi.id or 0).count(flagged) == 1, "flagged once, by one run"
+    assert [t for m, t in w.gh.calls if m == "add_labels"].count(str(wi.issue_number)) == 1
+
+    # The raced-in run is spent on the next tick as its own, later evidence; the first run is not
+    # evaluated a second time.
+    report = ctx.tick()
+    assert report.scan_apply_error is None and report.scans_applied == 1
+    assert _applied(w) == [True, True, True]
+    assert not any(
+        e.event == flagged and "replay-002" in (e.reason or "")
+        for e in w.events("work_item", wi.id or 0)[-2:]
+    )
