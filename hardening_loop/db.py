@@ -26,9 +26,18 @@ from hardening_loop.models.tables import utcnow
 
 SCHEMA_VERSION = 6
 
-# A write transaction may span a few GitHub or Devin calls (dispatch, operator launch, closure), so
-# a concurrent `ingest` waits this long for the lock before it fails with "database is locked".
-WRITER_BUSY_TIMEOUT_MS = 30_000
+# How long a writer waits for the single write lock before failing with "database is locked".
+# The polls fetch their Devin and GitHub evidence with no lock held and take a write transaction per
+# work item (or finding group) for the writes and the effects that must be recorded with them, so a
+# lock is held across at most three remote calls in a poll unit (a finished session's PR lookup,
+# its file list and the issue comment; a pending question and its answer; a retry message and its
+# issue comment; a review poll and its trigger); an operator launch holds it across five GitHub
+# calls; a closing scan evaluation across two or three per issue it closes or reopens. A call is at
+# most four attempts of the client timeout plus 7 s of backoff (Devin 4x60+7 = 247 s, GitHub
+# 4x30+7 = 127 s), so ten minutes outlasts any poll unit or operator launch whose every attempt
+# timed out; only a closing evaluation of several issues under that same total outage could still
+# run longer, and the `ingest` CLI then reports the lock and exits 2 instead of failing halfway.
+WRITER_BUSY_TIMEOUT_MS = 10 * 60 * 1000
 
 _WRITE_OPTION = "hl_write"
 
@@ -190,9 +199,11 @@ def session_scope(engine: Engine) -> Iterator[Session]:
 @contextmanager
 def write_scope(engine: Engine) -> Iterator[Session]:
     """A session whose every transaction (including those after an explicit `commit()`) starts
-    with `BEGIN IMMEDIATE`, for work that mutates GitHub or Devin before its first row write."""
+    with `BEGIN IMMEDIATE`, for work that mutates GitHub or Devin before its first row write.
+    Loaded rows are not expired by a commit: a unit that commits its reservation, then calls Devin
+    with the lock released, keeps using the row it reserved without a refresh re-taking the lock."""
     with engine.connect().execution_options(**{_WRITE_OPTION: True}) as conn:
-        session = Session(bind=conn)
+        session = Session(bind=conn, expire_on_commit=False)
         try:
             yield session
             session.commit()

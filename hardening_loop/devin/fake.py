@@ -76,6 +76,9 @@ class FakeDevin:
         # Methods that kill the controller before running / after taking effect (once each).
         self.crash_before: set[str] = set()
         self.crash_after: set[str] = set()
+        # method -> callback run once, before that method's next call (scenarios use it to make
+        # something happen "while" the controller is talking to Devin).
+        self.before_next: dict[str, Callable[[], None]] = {}
         self.clock_seconds = 1_800_000_000
 
     # ------------------------------------------------------------- scripting API
@@ -158,6 +161,9 @@ class FakeDevin:
 
     def _touch(self, method: str, target: str) -> None:
         self.calls.append((method, target))
+        hook = self.before_next.pop(method, None)
+        if hook is not None:
+            hook()
         if method in self.crash_before:
             self.crash_before.discard(method)
             raise ControllerCrash(f"before {method}")

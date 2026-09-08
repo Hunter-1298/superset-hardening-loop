@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
+from sqlalchemy.exc import OperationalError
 
 from hardening_loop.ci import (
     DEFAULT_EXPECTED_JOBS,
@@ -306,6 +307,16 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             outcomes = svc.poll(limit=args.limit)
     except GitHubError as exc:
         print(f"error: GitHub: {exc}", file=sys.stderr)
+        return 2
+    except OperationalError as exc:
+        if "locked" not in str(exc.orig).lower():
+            raise
+        print(
+            "error: the database stayed locked by the controller for the whole busy timeout; "
+            "the run being recorded was rolled back, rerun `ingest` (or let the controller's own "
+            "poll pick it up)",
+            file=sys.stderr,
+        )
         return 2
     finally:
         gh.close()

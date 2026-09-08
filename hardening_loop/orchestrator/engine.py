@@ -193,8 +193,7 @@ class Orchestrator:
         else:
             if self.settings.auto_open_issues and not recover_only:
                 issues = self.open_issues()
-            with write_scope(self.engine) as db:
-                adopted = self._recover_dispatching(db)
+            adopted = self._recover_dispatching()
         report.sessions_created, report.sessions_adopted, report.issues_created = (
             created,
             len(adopted),
@@ -343,23 +342,27 @@ class Orchestrator:
     # ------------------------------------------------------------------ work items
 
     def create_work_items(self, run_id: int | None = None) -> list[int]:
-        """Group open/regressed classified findings of the latest main run into WorkItems."""
+        """Group open/regressed classified findings of the latest main run into WorkItems. One
+        write transaction per group: a group joining a dispatched item comments on its issue and
+        messages its session, and the lock spans only that group's calls."""
         created: list[int] = []
-        with write_scope(self.engine) as db:
+        groupable = [FindingState.open, FindingState.regression]
+        with session_scope(self.engine) as db:
             run = self._latest_main_run(db, run_id)
             if run is None:
                 return created
             assert run.id is not None
+            run_id = run.id
             findings = db.exec(
                 select(Finding).where(
-                    Finding.last_seen_run_id == run.id,
+                    Finding.last_seen_run_id == run_id,
                     col(Finding.kind).is_not(None),
-                    col(Finding.state).in_([FindingState.open, FindingState.regression]),
+                    col(Finding.state).in_(groupable),
                 )
             ).all()
-            buckets: dict[tuple[Kind, str], list[Finding]] = defaultdict(list)
+            buckets: dict[tuple[Kind, str], list[int]] = defaultdict(list)
             for f in findings:
-                assert f.kind is not None
+                assert f.kind is not None and f.id is not None
                 buckets[
                     (
                         f.kind,
@@ -371,9 +374,17 @@ class Orchestrator:
                             dedupe_key=f.dedupe_key,
                         ),
                     )
-                ].append(f)
+                ].append(f.id)
 
-            for (kind, key), members in sorted(buckets.items(), key=lambda kv: kv[0]):
+        for (kind, key), member_ids in sorted(buckets.items(), key=lambda kv: kv[0]):
+            with write_scope(self.engine) as db:
+                members = [
+                    f
+                    for f in (db.get(Finding, fid) for fid in member_ids)
+                    if f is not None and f.last_seen_run_id == run_id and f.state in groupable
+                ]
+                if not members:
+                    continue
                 wi, is_new = self._work_item_for_group(db, kind, key, members)
                 assert wi.id is not None
                 joining = [f for f in members if f.work_item_id != wi.id]
@@ -500,25 +511,40 @@ class Orchestrator:
         adopted, and the number of issues opened."""
         issues = self.open_issues()
         created = 0
-        with write_scope(self.engine) as db:
-            adopted = self._recover_dispatching(db)
-            active = self._active_session_count(db)
-            budget = self._acu_budget_position(db)
+        adopted = self._recover_dispatching()
+        with session_scope(self.engine) as db:
             candidates = db.exec(
-                select(WorkItem)
-                .where(WorkItem.state == WorkItemState.issue_open)
-                .order_by(col(WorkItem.severity).desc(), col(WorkItem.id))
+                select(WorkItem).where(
+                    WorkItem.state == WorkItemState.issue_open,
+                    col(WorkItem.issue_number).is_not(None),
+                )
             ).all()
             # Order by severity rank (CRITICAL first), then age.
-            candidates = sorted(candidates, key=lambda w: (-w.severity.rank, w.id or 0))
-            for wi in candidates:
-                if active >= self.settings.max_concurrent_sessions:
+            targets = [
+                (w.id or 0, w.issue_number or 0, w.severity)
+                for w in sorted(candidates, key=lambda w: (-w.severity.rank, w.id or 0))
+            ]
+        # The issue's labels are read with no lock held; each candidate then gets a write
+        # transaction of its own in which capacity, budget and its state are re-checked before it
+        # is reserved. `_dispatch_one` releases the lock again around its Devin calls.
+        for wid, issue_number, severity in targets:
+            with session_scope(self.engine) as db:
+                if self._active_session_count(db) >= self.settings.max_concurrent_sessions:
                     break
-                if wi.issue_number is None:
+            labels = self.gh.get_issue(self.repo, issue_number).labels
+            if not dispatch_allowed(severity, labels):
+                continue
+            with write_scope(self.engine) as db:
+                if self._active_session_count(db) >= self.settings.max_concurrent_sessions:
+                    break
+                wi = db.get(WorkItem, wid)
+                if (
+                    wi is None
+                    or wi.state is not WorkItemState.issue_open
+                    or wi.issue_number != issue_number
+                ):
                     continue
-                labels = self.gh.get_issue(self.repo, wi.issue_number).labels
-                if not dispatch_allowed(wi.severity, labels):
-                    continue
+                budget = self._acu_budget_position(db)
                 if budget.committed + wi.acu_cap > self.settings.global_acu_budget:
                     self._event(
                         db,
@@ -537,46 +563,64 @@ class Orchestrator:
                     created += 1
                 elif outcome == "adopted":
                     adopted.append(wi.id or 0)
-                if outcome in ("created", "adopted"):
-                    active += 1
-                    budget = self._acu_budget_position(db)
         return created, adopted, issues
 
-    def _recover_dispatching(self, db: DbSession) -> list[int]:
+    def _recover_dispatching(self) -> list[int]:
         """Resume work items a crashed dispatch left in `dispatching` (the DB lock is committed
         before any Devin call, so a crash anywhere after it strands the item). `dispatch()` is the
         only writer of that state and ticks are serial, so anything in it at tick start is stale.
         Adopt the `wi-<id>`-tagged session if Devin holds one, otherwise release the lock through
-        the normal dispatch-failure path (retryable, bounded by `max_dispatch_failures`). Returns
-        the ids of the work items whose session was adopted."""
+        the normal dispatch-failure path (retryable, bounded by `max_dispatch_failures`). One write
+        transaction per item. Returns the ids of the work items whose session was adopted."""
         adopted: list[int] = []
-        stuck = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.dispatching)).all()
-        for wi in stuck:
-            assert wi.id is not None
-            self._event(
-                db,
-                entity_type="work_item",
-                entity_id=wi.id,
-                event="dispatch_recovery",
-                from_state=wi.state.value,
-                to_state=wi.state.value,
-                reason="found in dispatching at tick start",
-            )
-            outcome = self._adopt_tagged_session(db, wi)
-            if outcome is None:
-                outcome = self._dispatch_failed(db, wi, "dispatching_recovered:no_session_at_devin")
-            if outcome == "adopted":
-                adopted.append(wi.id)
+        with session_scope(self.engine) as db:
+            stuck = [
+                i
+                for i in db.exec(
+                    select(WorkItem.id).where(WorkItem.state == WorkItemState.dispatching)
+                ).all()
+                if i is not None
+            ]
+        for wid in stuck:
+            with write_scope(self.engine) as db:
+                wi = db.get(WorkItem, wid)
+                if wi is None or wi.state is not WorkItemState.dispatching:
+                    continue
+                self._event(
+                    db,
+                    entity_type="work_item",
+                    entity_id=wid,
+                    event="dispatch_recovery",
+                    from_state=wi.state.value,
+                    to_state=wi.state.value,
+                    reason="found in dispatching at tick start",
+                )
+                outcome = self._adopt_tagged_session(db, wi)
+                if outcome is None:
+                    outcome = self._dispatch_failed(
+                        db, wi, "dispatching_recovered:no_session_at_devin"
+                    )
+                if outcome == "adopted":
+                    adopted.append(wid)
         return adopted
 
     def open_issues(self) -> int:
+        """File an issue for every queued work item, one write transaction per item. The open
+        controller issues are listed once, outside any lock; whether a listed issue is still
+        unbound is re-checked under the lock that binds it."""
         n = 0
-        with write_scope(self.engine) as db:
-            queued = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.queued)).all()
+        with session_scope(self.engine) as db:
+            queued = list(
+                db.exec(select(WorkItem.id).where(WorkItem.state == WorkItemState.queued)).all()
+            )
             if not queued:
                 return 0
             existing = self._open_controller_issues(db)
-            for wi in queued:
+        for wid in queued:
+            with write_scope(self.engine) as db:
+                wi = db.get(WorkItem, wid)
+                if wi is None or wi.state is not WorkItemState.queued:
+                    continue
                 if self._open_issue(db, wi, existing=existing):
                     n += 1
         return n
@@ -607,6 +651,12 @@ class Orchestrator:
                 by_title.setdefault(issue.title, issue)
         return by_title
 
+    @staticmethod
+    def _issue_bound(db: DbSession, number: int) -> bool:
+        return (
+            db.exec(select(WorkItem.id).where(WorkItem.issue_number == number)).first() is not None
+        )
+
     def _open_issue(
         self, db: DbSession, wi: WorkItem, *, existing: dict[str, Issue] | None = None
     ) -> bool:
@@ -615,6 +665,8 @@ class Orchestrator:
         if existing is None:
             existing = self._open_controller_issues(db)
         found = existing.get(title) if existing else None
+        if found is not None and self._issue_bound(db, found.number):
+            found = None
         if found is not None:
             wi.issue_number = found.number
             wi.issue_url = found.url
@@ -842,7 +894,9 @@ class Orchestrator:
 
     def _dispatch_one(self, db: DbSession, wi: WorkItem) -> str:
         assert wi.id is not None and wi.issue_number is not None
-        # 1. Take the DB lock: dispatching + flush before any network call.
+        # 1. Reserve: `dispatching` is committed before any network call, so a crash anywhere after
+        #    this point is recovered by tag and the write lock need not be held while Devin is
+        #    called (`write_scope` keeps the reserved item's attributes across its commits).
         self._wi(db, wi, WorkItemEvent.dispatch_started, "capacity available")
         db.flush()
         db.commit()
@@ -851,12 +905,12 @@ class Orchestrator:
         if outcome is not None:
             return outcome
         tag = f"wi-{wi.id}"
-        # 3. Create.
+        # 3. Create, with the lock released between the reads and the Devin calls.
         members = db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all()
+        payload = self._findings_attachment(wi, members)
+        db.commit()
         try:
-            attachment = self.devin.upload_attachment(
-                f"findings-wi-{wi.id}.json", self._findings_attachment(wi, members)
-            )
+            attachment = self.devin.upload_attachment(f"findings-wi-{wi.id}.json", payload)
             snap = self.devin.create_session(
                 CreateSessionRequest(
                     prompt=self._prompt(wi, members, attachment),
@@ -905,6 +959,7 @@ class Orchestrator:
         known = {
             s.devin_id for s in db.exec(select(Session).where(Session.work_item_id == wi.id)).all()
         }
+        db.commit()  # the item is reserved; the lock is not held across the Devin call
         try:
             remote = self.devin.list_sessions(tags=[f"wi-{wi.id}"])
         except Exception as exc:
@@ -1017,28 +1072,35 @@ class Orchestrator:
 
     def poll_sessions(self, *, only: Sequence[int] | None = None) -> int:
         """Poll the Devin session of every active work item, or of just the work items in `only`,
-        and apply what each snapshot says about the item."""
+        and apply what each snapshot says about the item. The snapshot is fetched with no lock
+        held; each item is then applied in its own write transaction, which re-checks that the
+        item still owns that session and spans only the calls the snapshot's outcome requires."""
         polled = 0
-        with write_scope(self.engine) as db:
-            stmt = select(WorkItem).where(
+        with session_scope(self.engine) as db:
+            stmt = select(WorkItem.id, WorkItem.active_session_id).where(
                 WorkItem.state == WorkItemState.session_active,
                 col(WorkItem.active_session_id).is_not(None),
             )
             if only is not None:
                 stmt = stmt.where(col(WorkItem.id).in_(list(only)))
-            items = db.exec(stmt).all()
-            for wi in items:
-                assert wi.active_session_id is not None
-                row = db.exec(
-                    select(Session).where(Session.devin_id == wi.active_session_id)
-                ).first()
+            targets = [(wid, sid) for wid, sid in db.exec(stmt).all() if sid is not None]
+        for wid, sid in targets:
+            try:
+                snap = self.devin.get_session(sid)
+            except Exception as exc:
+                log.warning("poll %s failed: %s", sid, exc)
+                continue
+            with write_scope(self.engine) as db:
+                wi = db.get(WorkItem, wid)
+                if (
+                    wi is None
+                    or wi.state is not WorkItemState.session_active
+                    or wi.active_session_id != sid
+                ):
+                    continue
+                row = db.exec(select(Session).where(Session.devin_id == sid)).first()
                 if row is None:
                     self._wi(db, wi, WorkItemEvent.blocked, "session_row_missing")
-                    continue
-                try:
-                    snap = self.devin.get_session(wi.active_session_id)
-                except Exception as exc:
-                    log.warning("poll %s failed: %s", wi.active_session_id, exc)
                     continue
                 polled += 1
                 self._apply_snapshot(db, wi, row, snap)
@@ -1212,33 +1274,63 @@ class Orchestrator:
     )
 
     def poll_pull_requests(self) -> int:
+        """Refresh every tracked PR from GitHub: the PR and its head's check runs are fetched with
+        no lock held, then applied to the work item in a write transaction of its own that
+        re-checks the item still tracks that PR."""
         n = 0
-        with write_scope(self.engine) as db:
-            items = db.exec(
-                select(WorkItem).where(
-                    col(WorkItem.state).in_(list(self._PR_STATES)),
-                    col(WorkItem.pr_number).is_not(None),
+        with session_scope(self.engine) as db:
+            targets = [
+                (wid, number, state)
+                for wid, number, state in db.exec(
+                    select(WorkItem.id, WorkItem.pr_number, WorkItem.state).where(
+                        col(WorkItem.state).in_(list(self._PR_STATES)),
+                        col(WorkItem.pr_number).is_not(None),
+                    )
+                ).all()
+                if number is not None
+            ]
+        for wid, number, state in targets:
+            try:
+                pr = self.gh.get_pull_request(self.repo, number)
+                checks = (
+                    self.gh.list_check_runs(self.repo, pr.head_sha)
+                    if self._checks_wanted(WorkItemState(state), pr)
+                    else []
                 )
-            ).all()
-            for wi in items:
-                assert wi.pr_number is not None and wi.id is not None
+            except Exception as exc:
+                log.warning("poll PR #%s failed: %s", number, exc)
+                continue
+            with write_scope(self.engine) as db:
+                wi = db.get(WorkItem, wid)
+                if wi is None or wi.state not in self._PR_STATES or wi.pr_number != number:
+                    continue
                 pr_row = db.exec(
                     select(PullRequest).where(
-                        PullRequest.repo == self.repo, PullRequest.number == wi.pr_number
+                        PullRequest.repo == self.repo, PullRequest.number == number
                     )
                 ).first()
                 if pr_row is None:
                     continue
-                try:
-                    pr = self.gh.get_pull_request(self.repo, wi.pr_number)
-                except Exception as exc:
-                    log.warning("poll PR #%s failed: %s", wi.pr_number, exc)
-                    continue
                 n += 1
-                self._apply_pr(db, wi, pr_row, pr)
+                self._apply_pr(db, wi, pr_row, pr, checks)
         return n
 
-    def _apply_pr(self, db: DbSession, wi: WorkItem, row: PullRequest, pr: PullRequestInfo) -> None:
+    @staticmethod
+    def _checks_wanted(state: WorkItemState, pr: PullRequestInfo) -> bool:
+        """Whether `_apply_pr` will evaluate the head's check runs: not for a merged or closed PR,
+        and not for an item a human owns."""
+        return not pr.merged and pr.state != "closed" and state is not WorkItemState.needs_human
+
+    def _apply_pr(
+        self,
+        db: DbSession,
+        wi: WorkItem,
+        row: PullRequest,
+        pr: PullRequestInfo,
+        checks: list[CheckRun],
+    ) -> None:
+        """`checks` are the head's check runs, fetched by the caller before the lock was taken;
+        they are only consulted where `_checks_wanted` says they will be."""
         assert wi.id is not None and row.id is not None
         now = self.clock.now()
         row.updated_at = now
@@ -1286,7 +1378,6 @@ class Orchestrator:
         if wi.state is WorkItemState.needs_human:
             return  # a human owns it; we only track merge/close above
 
-        checks = self.gh.list_check_runs(self.repo, pr.head_sha)
         self._record_checks(db, row, pr.head_sha, checks)
         self._record_depth(db, wi, row, pr.head_sha, checks)
         verdict = self._checks_verdict(checks)
@@ -1624,28 +1715,42 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ human labels
 
+    _HUMAN_LABEL_STATES = (
+        WorkItemState.needs_human,
+        WorkItemState.failed,
+        WorkItemState.issue_open,
+        WorkItemState.ready_for_human,
+    )
+
     def poll_human_labels(self) -> int:
+        """Read the human's labels and closures off each open issue: the issue is fetched with no
+        lock held, then acted on in a write transaction of its own that re-checks the item still
+        awaits a human on that issue."""
         n = 0
-        with write_scope(self.engine) as db:
-            items = db.exec(
-                select(WorkItem).where(
-                    col(WorkItem.state).in_(
-                        [
-                            WorkItemState.needs_human,
-                            WorkItemState.failed,
-                            WorkItemState.issue_open,
-                            WorkItemState.ready_for_human,
-                        ]
-                    ),
-                    col(WorkItem.issue_number).is_not(None),
-                )
-            ).all()
-            for wi in items:
-                assert wi.issue_number is not None and wi.id is not None
-                try:
-                    issue = self.gh.get_issue(self.repo, wi.issue_number)
-                except Exception as exc:
-                    log.warning("issue #%s fetch failed: %s", wi.issue_number, exc)
+        with session_scope(self.engine) as db:
+            targets = [
+                (wid, number)
+                for wid, number in db.exec(
+                    select(WorkItem.id, WorkItem.issue_number).where(
+                        col(WorkItem.state).in_(list(self._HUMAN_LABEL_STATES)),
+                        col(WorkItem.issue_number).is_not(None),
+                    )
+                ).all()
+                if number is not None
+            ]
+        for wid, number in targets:
+            try:
+                issue = self.gh.get_issue(self.repo, number)
+            except Exception as exc:
+                log.warning("issue #%s fetch failed: %s", number, exc)
+                continue
+            with write_scope(self.engine) as db:
+                wi = db.get(WorkItem, wid)
+                if (
+                    wi is None
+                    or wi.state not in self._HUMAN_LABEL_STATES
+                    or wi.issue_number != number
+                ):
                     continue
                 labels = set(issue.labels)
                 if issue.state == "closed" and wi.state is not WorkItemState.verified:
