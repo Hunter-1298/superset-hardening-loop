@@ -219,7 +219,7 @@ class SyntheticRun:
     platform: str = PLATFORM
     at: datetime = T0
     tool_versions: tuple[str, str, str] = (SYFT_VERSION, TRIVY_VERSION, GRYPE_VERSION)
-    db_age: timedelta = timedelta(hours=1)
+    db_age: timedelta | None = timedelta(hours=1)  # None: run publishes no db timestamp
     gate_mode: GateMode = GateMode.report
     is_baseline: bool = False
     run_attempt: int = 1
@@ -252,7 +252,7 @@ class SyntheticRun:
             [_config(c) for c in configs if c.kind == "image_config"] if success["config"] else []
         )
         image_id = f"sha256:{'0' * 24}{self.source_sha[:40]}"
-        db_at = self.at - self.db_age
+        db_at = None if self.db_age is None else self.at - self.db_age
         return ScanJobEvidence(
             path=Path(f"replay://{self.source_sha[:12]}/{mode.value}"),
             mode=mode,

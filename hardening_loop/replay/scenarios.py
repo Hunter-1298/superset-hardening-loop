@@ -1,10 +1,11 @@
-"""Replay scenarios R0-R16 and N1-N5. Every scenario drives the real orchestrator against the
+"""Replay scenarios R0-R20 and N1-N5. Every scenario drives the real orchestrator against the
 in-memory doubles and records checks; the runner asserts zero outbound network for all of them."""
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from hardening_loop.classify.rules import parse_upper_bounds
@@ -15,6 +16,8 @@ from hardening_loop.domain.enums import (
     GateMode,
     HumanLabel,
     Kind,
+    Scanner,
+    Severity,
     Trigger,
     VerificationLevel,
     WorkItemState,
@@ -29,7 +32,7 @@ from hardening_loop.replay.synth import (
     SEEDS,
     approved_vex,
 )
-from hardening_loop.replay.world import ScenarioResult, World, sha
+from hardening_loop.replay.world import APPROVER, ScenarioResult, World, sha
 
 Scenario = Callable[[World, ScenarioResult], None]
 SCENARIOS: dict[str, tuple[str, Scenario]] = {}
@@ -915,6 +918,177 @@ def r16(w: World, r: ScenarioResult) -> None:
         last.reason,
     )
     r.eq("two sessions at Devin in total", len(w.devin.created_requests()), 2)
+
+
+# ----------------------------------------------------------------------------- R17
+
+
+@scenario("R17", "A later scan's findings join the open work item for their group")
+def r17(w: World, r: ScenarioResult) -> None:
+    wi = _dispatch(w, r, "cryptography")
+    r.eq("one member at dispatch", len(w.findings(wi.id)), 1)
+    grown = replace(
+        SEEDS["cryptography"],
+        vulns=(*SEEDS["cryptography"].vulns, ("CVE-2024-99999", Severity.high, ("42.0.4",))),
+    )
+    run = w.closing_run(BASELINE_SHA)
+    run.seeds = [grown]
+    w.apply_run(w.ingest(run))
+    r.eq("no second work item for the same group", len(w.work_items()), 1)
+    members = {f.vuln_id: f for f in w.findings(wi.id)}
+    r.eq("late finding joined the open item", sorted(members), ["CVE-2024-26130", "CVE-2024-99999"])
+    r.expect("join recorded on the work item", "members_added" in w.event_names(wi.id or 0))
+    assert wi.issue_number is not None
+    r.expect(
+        "issue says the new finding must be fixed here too",
+        any("CVE-2024-99999" in c for c in w.gh.issues[wi.issue_number].comments),
+        w.gh.issues[wi.issue_number].comments,
+    )
+    r.eq("running session was told about it", w.sessions()[0].messages_sent, 1)
+    # Closure now needs both members: the fix that only covers the original one cannot verify.
+    wi, _ = _to_ready_for_human(
+        w, r, w.wi(wi.id or 0), _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.0
+    )
+    wi, merge = _merge(w, r, wi)
+    left = replace(grown, vulns=(("CVE-2024-99999", Severity.high, ("42.0.4",)),))
+    closing = w.closing_run(merge)
+    closing.seeds = [left]
+    counts = w.apply_run(w.ingest(closing))
+    r.eq("late member still present blocks closure", counts.get("still_present"), 1)
+    r.eq("work item not verified", w.state_of(wi.id or 0), WorkItemState.needs_human)
+
+
+# ----------------------------------------------------------------------------- R18
+
+
+@scenario("R18", "Opening detector provenance is immutable: closure keeps asking both scanners")
+def r18(w: World, r: ScenarioResult) -> None:
+    from sqlmodel import select
+
+    from hardening_loop.db import session_scope
+    from hardening_loop.models.tables import Finding, ScanJob, ScanRun
+    from hardening_loop.orchestrator.closer import original_detectors, validate_closing_run
+
+    w.baseline("cryptography")
+    f = w.finding_by_vuln("CVE-2024-26130")
+    r.eq("opened by both scanners", (f.opened_by_trivy, f.opened_by_grype), (True, True))
+    # A later run where grype's database no longer carries the advisory: the current detector set
+    # shrinks, the opening one must not.
+    trivy_only = replace(SEEDS["cryptography"], reported_by=frozenset({Scanner.trivy}))
+    drifted = w.closing_run(BASELINE_SHA)
+    drifted.seeds = [trivy_only]
+    w.apply_run(w.ingest(drifted))
+    f = w.finding_by_vuln("CVE-2024-26130")
+    r.eq(
+        "current detectors shrank to trivy",
+        (f.reported_by_trivy, f.reported_by_grype),
+        (True, False),
+    )
+    r.eq("opening detectors unchanged", original_detectors(f), {Scanner.trivy, Scanner.grype})
+    # Absence proven by trivy alone, with grype's job failed, is not proof for this finding.
+    half = w.closing_run(BASELINE_SHA)
+    half.job_success = {"trivy": True, "grype": False, "config": True}
+    rid = w.ingest(half)
+    counts = w.apply_run(rid)
+    r.eq("no drift closure on half the evidence", counts.get("fixed_by_drift"), None)
+    r.eq("finding not closed", w.finding_by_vuln("CVE-2024-26130").state, FindingState.grouped)
+    with session_scope(w.engine) as db:
+        run = db.get(ScanRun, rid)
+        jobs = list(db.exec(select(ScanJob).where(ScanJob.scan_run_id == rid)).all())
+        row = db.get(Finding, f.id)
+        assert run is not None and row is not None
+        validity = validate_closing_run(
+            run, jobs, row, merge_sha=None, is_ancestor=lambda _a, _b: True, require_policy=False
+        )
+    r.expect(
+        "grype is still required even though it stopped reporting",
+        any("grype-raw job missing or failed" in x for x in validity.reasons),
+        validity.reasons,
+    )
+    # Both scanners running and neither reporting it: drift closes the finding.
+    counts = w.apply_run(w.ingest(w.closing_run(BASELINE_SHA)))
+    r.eq("closed once both scanners agree it is gone", counts.get("fixed_by_drift"), 1)
+    r.eq("finding fixed", w.finding_by_vuln("CVE-2024-26130").state, FindingState.fixed)
+
+
+# ----------------------------------------------------------------------------- R19
+
+
+@scenario("R19", "A new PR head re-earns every level: checks, Devin Review, then approval")
+def r19(w: World, r: ScenarioResult) -> None:
+    wi = _dispatch(w, r, "cryptography")
+    wi, _head1 = _to_ready_for_human(
+        w, r, wi, _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.0
+    )
+    pr_number = wi.pr_number
+    assert pr_number is not None
+    head2 = sha("r19-second-head")
+    w.gh.push(pr_number, head2)
+    w.tick()
+    wi = w.wi(wi.id or 0)
+    r.eq("push sends the item back to checks_running", wi.state, WorkItemState.checks_running)
+    r.eq("verification level back to L1", wi.verification_level, VerificationLevel.pr_opened)
+    row = w.pr_row(wi.id or 0)
+    r.eq("review status of the old head discarded", row.review_status if row else "?", None)
+    w.ci(head2)
+    w.tick()
+    r.eq(
+        "green checks alone do not restore review",
+        w.state_of(wi.id or 0),
+        WorkItemState.review_pending,
+    )
+    w.gh.approve(pr_number, APPROVER, at=w.clock.now())
+    w.tick()
+    r.eq(
+        "approval cannot skip the second review",
+        w.state_of(wi.id or 0),
+        WorkItemState.review_pending,
+    )
+    row = w.pr_row(wi.id or 0)
+    r.eq("no approval recorded yet", row.approved_by if row else "?", None)
+    w.review_done(head2)
+    w.tick()
+    r.eq("second review -> ready_for_human", w.state_of(wi.id or 0), WorkItemState.ready_for_human)
+    w.tick()
+    row = w.pr_row(wi.id or 0)
+    r.eq("approval of the reviewed head counts", row.approved_by if row else None, APPROVER)
+    r.eq(
+        "two review_completed events, one per head",
+        w.event_names(wi.id or 0).count("review_completed"),
+        2,
+    )
+
+
+# ----------------------------------------------------------------------------- R20
+
+
+@scenario("R20", "A closing run without scanner database timestamps proves nothing")
+def r20(w: World, r: ScenarioResult) -> None:
+    wi = _dispatch(w, r, "cryptography")
+    wi, _ = _to_ready_for_human(
+        w, r, wi, _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.0
+    )
+    wi, merge = _merge(w, r, wi)
+    undated = w.closing_run(merge)
+    undated.db_age = None
+    counts = w.apply_run(w.ingest(undated))
+    r.eq("outcome not applicable", counts.get("not_applicable"), 1)
+    r.eq("nothing fixed", counts.get("fixed"), None)
+    r.eq("item waits for a dated rescan", w.state_of(wi.id or 0), WorkItemState.awaiting_rescan)
+    r.eq(
+        "finding still awaiting a rescan",
+        w.finding_by_vuln("CVE-2024-26130").state,
+        FindingState.awaiting_rescan,
+    )
+    reason = [e for e in w.events("work_item", wi.id) if e.event == "rescan_started"][-1].reason
+    r.expect(
+        "reason names the missing freshness evidence",
+        "freshness unproven" in (reason or ""),
+        reason,
+    )
+    counts = w.apply_run(w.ingest(w.closing_run(merge)))
+    r.eq("a dated rescan closes it", counts.get("fixed"), 1)
+    r.eq("work item verified", w.state_of(wi.id or 0), WorkItemState.verified)
 
 
 # ----------------------------------------------------------------------------- N1-N5

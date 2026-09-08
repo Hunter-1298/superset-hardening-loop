@@ -211,6 +211,28 @@ def _ingest(engine: Engine, tmp_path: Path) -> int:
         ).scan_run_id
 
 
+def test_policy_job_of_another_image_is_not_paired(engine: Engine, tmp_path: Path) -> None:
+    raw = load_scan_job(FIXTURE / "lean" / "raw")
+    policy = load_scan_job(_write_policy_job(tmp_path, _doc()))
+    policy.image_target = ImageTarget.ci
+    policy.image_ref = "docker:other@sha256:dead"
+    meta = RunMeta(
+        external_run_id="gha:2",
+        trigger=Trigger.push,
+        source_repo=FORK_REPO,
+        source_branch="main",
+        source_sha=BASELINE_SHA,
+        platform="linux/amd64",
+        lean_digest=raw.image_ref.removeprefix("docker:"),
+        ci_digest=None,
+        ci_layer_delta=None,
+        started_at=datetime(2026, 9, 1, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
+    )
+    with session_scope(engine) as db, pytest.raises(ValueError, match="cannot speak for another"):
+        ingest_run(db, meta, {"lean-raw": raw, "ci-policy": policy}, upper_bounds={})
+
+
 def _finding(vuln_id: str = VULN) -> Finding:
     return Finding(
         dedupe_key=f"t:{vuln_id}",
@@ -225,6 +247,8 @@ def _finding(vuln_id: str = VULN) -> Finding:
         kind=Kind.no_fix_reachability,
         reported_by_trivy=True,
         reported_by_grype=True,
+        opened_by_trivy=True,
+        opened_by_grype=True,
     )
 
 
