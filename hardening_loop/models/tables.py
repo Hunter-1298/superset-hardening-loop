@@ -139,6 +139,10 @@ class Finding(SQLModel, table=True):
     )
     reported_by_trivy: bool = False
     reported_by_grype: bool = False
+    # Detectors of the run that opened the finding. Immutable: closure asks the scanners that
+    # reported it originally, not whichever ones happen to report it today.
+    opened_by_trivy: bool = False
+    opened_by_grype: bool = False
     kind: Kind | None = None
     risk: Risk = Risk.normal
     bound_blocked: bool = False

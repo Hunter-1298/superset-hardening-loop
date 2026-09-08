@@ -55,6 +55,7 @@ from hardening_loop.orchestrator.closer import (
     CLOSING_FINDING_STATES,
     ClosingOutcome,
     decide_outcome,
+    family_key,
     issue_may_close,
     sightings_for,
     validate_closing_run,
@@ -334,19 +335,55 @@ class Orchestrator:
                 ].append(f)
 
             for (kind, key), members in sorted(buckets.items(), key=lambda kv: kv[0]):
-                wi = self._work_item_for_group(db, kind, key, members)
-                if wi is None:
-                    continue
+                wi, is_new = self._work_item_for_group(db, kind, key, members)
                 assert wi.id is not None
-                created.append(wi.id)
-                for f in members:
+                joining = [f for f in members if f.work_item_id != wi.id]
+                if is_new:
+                    created.append(wi.id)
+                elif joining:
+                    self._members_joined(db, wi, joining)
+                for f in joining:
                     f.work_item_id = wi.id
-                    self._finding(db, f, FindingEvent.grouped, f"work_item={wi.id} {key}")
+                    self._finding(db, f, FindingEvent.grouped, f"work_item={wi.id} {wi.group_key}")
         return created
+
+    def _members_joined(self, db: DbSession, wi: WorkItem, joining: list[Finding]) -> None:
+        """Findings discovered after the group was opened join the existing work item; closure then
+        requires them too. A dispatched item is told about them so the fix can cover them."""
+        assert wi.id is not None
+        vulns = sorted({f.vuln_id for f in joining})
+        self._event(
+            db,
+            entity_type="work_item",
+            entity_id=wi.id,
+            event="members_added",
+            from_state=wi.state.value,
+            to_state=wi.state.value,
+            reason=f"{len(joining)} new finding(s): {', '.join(vulns[:8])}",
+            actor="scanner",
+        )
+        if wi.issue_number is None or wi.state is WorkItemState.queued:
+            return
+        body = (
+            f"A later scan added {len(joining)} finding(s) to this group: "
+            f"{', '.join(f'`{v}`' for v in vulns[:8])}. They must be remediated here too; "
+            "this issue cannot close until every member is resolved."
+        )
+        self.gh.comment_issue(self.repo, wi.issue_number, body)
+        if wi.active_session_id is not None and wi.state in ACTIVE_WORK_ITEM_STATES:
+            self.devin.send_message(
+                wi.active_session_id,
+                f"New findings joined this work item: {', '.join(vulns[:8])}. "
+                "Cover them in the same PR and list them in the structured output.",
+            )
+            sess = db.exec(select(Session).where(Session.devin_id == wi.active_session_id)).first()
+            if sess is not None:
+                sess.messages_sent += 1
+                db.add(sess)
 
     def _work_item_for_group(
         self, db: DbSession, kind: Kind, key: str, members: list[Finding]
-    ) -> WorkItem | None:
+    ) -> tuple[WorkItem, bool]:
         existing = db.exec(
             select(WorkItem).where(
                 WorkItem.kind == kind,
@@ -364,7 +401,7 @@ class Orchestrator:
                     n += 1
                 key = f"{key}#r{n}"
             else:
-                return None  # already tracked; members join it below via last_seen
+                return existing, False  # still being worked: new members join it
         severity = max((f.severity for f in members), key=lambda s: s.rank)
         risk = Risk.high if any(f.risk is Risk.high for f in members) else Risk.normal
         first = members[0]
@@ -398,7 +435,7 @@ class Orchestrator:
             reason=f"{len(members)} findings; severity={severity.value}; risk={risk.value}"
             + (f"; regression_of={regression_of}" if regression_of else ""),
         )
-        return wi
+        return wi, True
 
     def _latest_main_run(self, db: DbSession, run_id: int | None) -> ScanRun | None:
         if run_id is not None:
@@ -1100,6 +1137,9 @@ class Orchestrator:
             row.head_sha = pr.head_sha
             wi.pr_head_sha = pr.head_sha
             row.review_status = None
+            row.approved_by = None
+            if not pr.merged and pr.state != "closed":
+                self._reverify_new_head(db, wi, row, pr.head_sha)
         db.add(row)
 
         if pr.merged:
@@ -1158,6 +1198,15 @@ class Orchestrator:
             self._check_review(db, wi, row, pr, statuses)
         if wi.state is WorkItemState.ready_for_human:
             self._check_approval(db, wi, row, pr)
+
+    def _reverify_new_head(
+        self, db: DbSession, wi: WorkItem, row: PullRequest, head_sha: str
+    ) -> None:
+        """Checks, Devin Review and approval are all evidence about one commit. A push replaces the
+        commit, so the item goes back to `checks_running` and earns every level again."""
+        if wi.state in (WorkItemState.review_pending, WorkItemState.ready_for_human):
+            self._wi(db, wi, WorkItemEvent.new_head_pushed, f"new head {head_sha[:12]}")
+        self._reset_level(db, wi, row, VerificationLevel.pr_opened, f"new head {head_sha[:12]}")
 
     def _record_checks(
         self, db: DbSession, row: PullRequest, head_sha: str, checks: Iterable[CheckRun]
@@ -1301,6 +1350,25 @@ class Orchestrator:
         db.add(wi)
         db.add(row)
 
+    def _reset_level(
+        self, db: DbSession, wi: WorkItem, row: PullRequest, level: VerificationLevel, why: str
+    ) -> None:
+        assert wi.id is not None
+        if level < wi.verification_level:
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=wi.id,
+                event="verification_level",
+                from_state=wi.verification_level.name,
+                to_state=level.name,
+                reason=why,
+            )
+            wi.verification_level = level
+        row.verification_level = min(row.verification_level, level)
+        db.add(wi)
+        db.add(row)
+
     def _last_event_ts(self, db: DbSession, wi: WorkItem, event: WorkItemEvent) -> datetime | None:
         row = db.exec(
             select(Event)
@@ -1415,6 +1483,18 @@ class Orchestrator:
             self._regressions(db, run, jobs, sightings, counts)
             self._drift(db, run, jobs, sightings, counts)
         return dict(counts)
+
+    def _present_families(
+        self, db: DbSession, sightings: list[Sighting]
+    ) -> set[tuple[str, str, str | None, str]]:
+        """Presence is a property of the vulnerability family, not of a versioned finding id: an
+        upgrade to another still-vulnerable version reports under a new id, and neither closes the
+        old one nor hides a regression."""
+        ids = {s.finding_id for s in sightings if s.present}
+        if not ids:
+            return set()
+        rows = db.exec(select(Finding).where(col(Finding.id).in_(list(ids)))).all()
+        return {family_key(f) for f in rows}
 
     def _family_ids(self, db: DbSession, f: Finding) -> frozenset[int]:
         rows = db.exec(
@@ -1580,16 +1660,15 @@ class Orchestrator:
         counts: dict[str, int],
     ) -> None:
         assert run.id is not None
-        present_ids = {s.finding_id for s in sightings if s.present}
-        if not present_ids:
+        present = self._present_families(db, sightings)
+        if not present:
             return
         closed = db.exec(
-            select(Finding).where(
-                col(Finding.id).in_(list(present_ids)),
-                col(Finding.state).in_(list(CLOSING_FINDING_STATES)),
-            )
+            select(Finding).where(col(Finding.state).in_(list(CLOSING_FINDING_STATES)))
         ).all()
         for f in closed:
+            if family_key(f) not in present:
+                continue
             closing_run = db.get(ScanRun, f.closed_by_run_id) if f.closed_by_run_id else None
             validity = validate_closing_run(
                 run,
@@ -1636,7 +1715,7 @@ class Orchestrator:
     ) -> None:
         """Ungrouped findings absent from a valid complete main run close as fixed (db drift)."""
         assert run.id is not None
-        present_ids = {s.finding_id for s in sightings if s.present}
+        present = self._present_families(db, sightings)
         candidates = db.exec(
             select(Finding).where(
                 col(Finding.state).in_(
@@ -1647,7 +1726,7 @@ class Orchestrator:
         ).all()
         touched_wis: set[int] = set()
         for f in candidates:
-            if f.id in present_ids:
+            if family_key(f) in present:
                 continue
             if f.state is FindingState.grouped and f.work_item_id is not None:
                 wi = db.get(WorkItem, f.work_item_id)
