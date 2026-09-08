@@ -66,6 +66,10 @@ REGRESSION_PIN = "urllib3==1.26.4"  # CVE-2021-33503 + CVE-2023-43804 (HIGH), we
 _BASE_IN_LINE = "urllib3>=2.6.3,<3.0.0"
 
 
+class BaselineError(RuntimeError):
+    """The explicit dependency-regression baseline run is not usable."""
+
+
 class MutationError(RuntimeError):
     pass
 
@@ -419,18 +423,29 @@ class NegativeRunner:
         return None
 
     def _baseline_evidence(self) -> tuple[int | None, Path | None]:
-        """Evidence to compare the regressed scan against: an explicit successful run id when
-        given, else the latest successful `security-scan` run on the base branch."""
-        if self.compare_run_id is not None:
-            return self.compare_run_id, self._evidence_for_run(self.compare_run_id, "baseline")
+        """Evidence to compare the regressed scan against: an explicit run id when given, else
+        the latest successful `security-scan` run on the base branch. Either way the run must be
+        a successful `security-scan` run of the base branch; an explicit id that is not is
+        rejected rather than compared against."""
         for run in self.gh.list_workflow_runs(
             self.repo, SECURITY_SCAN_WORKFLOW, branch=self.base_branch
         ):
+            if self.compare_run_id is not None and run.id != self.compare_run_id:
+                continue
             if run.conclusion != "success":
+                if self.compare_run_id is not None:
+                    raise BaselineError(
+                        f"run {run.id} is not a successful security-scan run"
+                        f" (conclusion={run.conclusion})"
+                    )
                 continue
             root = self._evidence_for_run(run.id, "main")
-            if root is not None:
+            if root is not None or self.compare_run_id is not None:
                 return run.id, root
+        if self.compare_run_id is not None:
+            raise BaselineError(
+                f"run {self.compare_run_id} is not a security-scan run of {self.base_branch}"
+            )
         return None, None
 
     def _evidence_for_run(self, run_id: int, label: str) -> Path | None:
@@ -443,7 +458,10 @@ class NegativeRunner:
     def _compare_counts(self, head_sha: str) -> dict[str, Any]:
         failures: list[str] = []
         pr_root = self._evidence_for(head_sha)
-        baseline_run_id, main_root = self._baseline_evidence()
+        try:
+            baseline_run_id, main_root = self._baseline_evidence()
+        except BaselineError as exc:
+            return {"failures": [f"baseline rejected: {exc}"], "baseline_run_id": None}
         out: dict[str, Any] = {"failures": failures, "baseline_run_id": baseline_run_id}
         if pr_root is None:
             failures.append("no scan-evidence artifact for the PR head")

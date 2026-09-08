@@ -320,19 +320,24 @@ class GitHubRest:
 
     def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]:
         _assert_allowed(repo)
-        data = self._request(
-            "GET", f"/repos/{repo}/actions/runs/{run_id}/artifacts", params={"per_page": 100}
-        ).json()
-        return [
-            ArtifactInfo(
-                id=int(a["id"]),
-                name=str(a["name"]),
-                size_in_bytes=int(a.get("size_in_bytes") or 0),
-                expired=bool(a.get("expired", False)),
-                digest=str(a["digest"]) if a.get("digest") else None,
+        path = f"/repos/{repo}/actions/runs/{run_id}/artifacts"
+        out: list[ArtifactInfo] = []
+        for page in range(1, MAX_PAGES + 1):
+            data = self._request("GET", path, params={"per_page": PER_PAGE, "page": page}).json()
+            batch = data.get("artifacts", [])
+            out.extend(
+                ArtifactInfo(
+                    id=int(a["id"]),
+                    name=str(a["name"]),
+                    size_in_bytes=int(a.get("size_in_bytes") or 0),
+                    expired=bool(a.get("expired", False)),
+                    digest=str(a["digest"]) if a.get("digest") else None,
+                )
+                for a in batch
             )
-            for a in data.get("artifacts", [])
-        ]
+            if len(batch) < PER_PAGE:
+                return out
+        raise GitHubError(f"GET {path}: more than {MAX_PAGES} pages")
 
     def download_artifact(self, repo: str, artifact_id: int, dest: Path) -> Path:
         """Download and unzip one artifact into `dest`; returns `dest`. The zip itself is kept

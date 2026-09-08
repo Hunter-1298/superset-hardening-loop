@@ -5,6 +5,7 @@ its draft PR and deletes its branch (verified against a recorded httpx transport
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -317,19 +318,22 @@ class _ArtifactGitHub(httpx.BaseTransport):
                 zf.writestr("run.txt", str(artifact_id // 10))
             return httpx.Response(200, content=buf.getvalue())
         if path.endswith("/actions/workflows/security-scan.yml/runs"):
+            # the branch filter is server-side: only `main` runs come back for branch=main
+            branch = request.url.params.get("branch")
+            runs = [
+                {"id": 900, "conclusion": "failure", "head_branch": "main", "head_sha": "a" * 40},
+                {"id": 901, "conclusion": "success", "head_branch": "main", "head_sha": "b" * 40},
+                {"id": 555, "conclusion": "success", "head_branch": "main", "head_sha": "c" * 40},
+                {"id": 777, "conclusion": "success", "head_branch": "other", "head_sha": "d" * 40},
+            ]
             return httpx.Response(
                 200,
-                json={
-                    "workflow_runs": [
-                        {"id": 900, "conclusion": "failure", "head_sha": "a" * 40},
-                        {"id": 901, "conclusion": "success", "head_sha": "b" * 40},
-                    ]
-                },
+                json={"workflow_runs": [r for r in runs if branch in (None, r["head_branch"])]},
             )
         return httpx.Response(404, json={"message": f"unexpected {request.method} {path}"})
 
 
-def test_baseline_evidence_uses_explicit_run_id_without_listing_runs(tmp_path: Path) -> None:
+def test_baseline_evidence_uses_explicit_successful_base_run(tmp_path: Path) -> None:
     fake = _ArtifactGitHub()
     gh = GitHubRest(SecretStr("t"), transport=fake)
     runner = NegativeRunner(
@@ -338,7 +342,40 @@ def test_baseline_evidence_uses_explicit_run_id_without_listing_runs(tmp_path: P
     run_id, root = runner._baseline_evidence()
     assert run_id == 555 and root is not None
     assert (root / "run.txt").read_text() == "555"
-    assert not any("/workflows/" in c for c in fake.calls)
+    # the newer successful run 901 is skipped in favour of the explicit id, and the explicit id
+    # is resolved through the security-scan listing for the base branch, not trusted blindly
+    assert "GET /repos/Hunter-1298/superset/actions/runs/901/artifacts" not in fake.calls
+    assert any("/workflows/security-scan.yml/runs" in c for c in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("run_id", "reason"),
+    [
+        (900, "not a successful security-scan run (conclusion=failure)"),
+        (777, "not a security-scan run of main"),  # another branch
+        (123456, "not a security-scan run of main"),  # another workflow / unknown run
+    ],
+)
+def test_baseline_evidence_rejects_unusable_explicit_run(
+    tmp_path: Path, run_id: int, reason: str
+) -> None:
+    from hardening_loop.negative import BaselineError
+
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh,
+        repo="Hunter-1298/superset",
+        work_dir=tmp_path,
+        compare_run_id=run_id,
+        sleep=lambda s: None,
+    )
+    with pytest.raises(BaselineError, match=re.escape(reason)):
+        runner._baseline_evidence()
+    assert not any("/artifacts" in c for c in fake.calls)  # nothing downloaded
+    counts = runner._compare_counts("e" * 40)
+    assert counts["baseline_run_id"] is None
+    assert counts["failures"] == [f"baseline rejected: run {run_id} is {reason}"]
 
 
 def test_baseline_evidence_defaults_to_latest_successful_base_run(tmp_path: Path) -> None:

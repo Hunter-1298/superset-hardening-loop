@@ -806,3 +806,43 @@ def test_rest_list_workflow_runs_pages_until_short_page() -> None:
     rest = list(runs)
     assert [first.id, *(r.id for r in rest)] == list(range(total, 0, -1))
     assert pages_seen == [1, 2, 3]
+
+
+def test_rest_list_run_artifacts_pages_until_short_page() -> None:
+    """A run with more than one page of artifacts (matrix jobs each upload several) must still
+    surface the `scan-evidence-*` artifact when it lands beyond the first 100 entries."""
+    from pydantic import SecretStr
+
+    from hardening_loop.github.rest import PER_PAGE, GitHubRest
+
+    total = PER_PAGE + 3
+    pages_seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/repos/{FORK_REPO}/actions/runs/{RUN_ID}/artifacts"
+        assert request.url.params["per_page"] == str(PER_PAGE)
+        page = int(request.url.params["page"])
+        pages_seen.append(page)
+        start = (page - 1) * PER_PAGE
+        ids = range(start + 1, min(start + PER_PAGE, total) + 1)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": total,
+                "artifacts": [
+                    {
+                        "id": i,
+                        "name": "scan-evidence-x" if i == total else f"sbom-{i}",
+                        "size_in_bytes": 1,
+                        "expired": False,
+                    }
+                    for i in ids
+                ],
+            },
+        )
+
+    gh = GitHubRest(SecretStr("t"), transport=httpx.MockTransport(handler))
+    artifacts = gh.list_run_artifacts(FORK_REPO, RUN_ID)
+    assert len(artifacts) == total and pages_seen == [1, 2]
+    evidence = find_evidence_artifact(artifacts)
+    assert evidence is not None and evidence.id == total
