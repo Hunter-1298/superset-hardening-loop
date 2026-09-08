@@ -12,7 +12,8 @@
 {% macro finding_state_badge(state) -%}{{ badge(state|finding_state) }}{%- endmacro %}
 {% macro severity_badge(sev) -%}{{ badge(sev|severity_label) }}{%- endmacro %}
 {% macro kind_badge(kind) -%}{{ plain(kind|kind_label) }}{%- endmacro %}
-{% macro level_badge(level) -%}{{ plain(level|level_label, title=level|level) }}{%- endmacro %}
+{% macro level_badge(level) -%}{{ plain(level|lifecycle_label, title=level|level) }}{%- endmacro %}
+{% macro depth_badge(depth) -%}{{ plain(depth|depth_label, title=(depth|depth_label).text) }}{%- endmacro %}
 {% macro run_status_badge(status) -%}{{ badge(status|run_status) }}{%- endmacro %}
 {% macro pr_state_badge(state) -%}{{ badge(state|pr_state) }}{%- endmacro %}
 {% macro check_badge(conclusion) -%}{{ badge(conclusion|check_label) }}{%- endmacro %}

@@ -1,0 +1,240 @@
+{
+  "$id": "https://hardening-loop/schemas/pb-dependency-upgrade.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pr_opened"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "pr_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pr_url"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "blocked"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocked_reason": {
+            "minLength": 10,
+            "type": "string"
+          }
+        },
+        "required": [
+          "blocked_reason"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "no_change_needed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "minLength": 10,
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "evidence_urls"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pr_opened"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "packages": {
+            "minItems": 1
+          },
+          "regenerated_with": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "packages",
+          "regenerated_with"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "base_branch": {
+      "const": "main",
+      "type": "string"
+    },
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "bound_changes": {
+      "items": {
+        "properties": {
+          "justification": {
+            "type": "string"
+          },
+          "new_bound": {
+            "type": "string"
+          },
+          "old_bound": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "package",
+          "old_bound",
+          "new_bound",
+          "justification"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "evidence_urls": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "findings_addressed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "findings_not_addressed": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "outcome": {
+      "enum": [
+        "pr_opened",
+        "blocked",
+        "no_change_needed"
+      ],
+      "type": "string"
+    },
+    "packages": {
+      "items": {
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "pr_url": {
+      "pattern": "^https://github.com/[^/]+/[^/]+/pull/[0-9]+$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "regenerated_with": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tests_run": {
+      "items": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "log_attachment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "command",
+          "exit_code"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "outcome",
+    "base_branch",
+    "findings_addressed",
+    "findings_not_addressed"
+  ],
+  "title": "pb-dependency-upgrade structured output",
+  "type": "object"
+}

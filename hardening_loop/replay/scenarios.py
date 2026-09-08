@@ -1,11 +1,14 @@
-"""Replay scenarios R0-R20 and N1-N5. Every scenario drives the real orchestrator against the
+"""Replay scenarios R0-R21 and N1-N5. Every scenario drives the real orchestrator against the
 in-memory doubles and records checks; the runner asserts zero outbound network for all of them."""
 
 from __future__ import annotations
 
+import json
+import shutil
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from hardening_loop.classify.rules import parse_upper_bounds
@@ -15,11 +18,12 @@ from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
     HumanLabel,
+    IntakeStatus,
     Kind,
+    LifecycleLevel,
     Scanner,
     Severity,
     Trigger,
-    VerificationLevel,
     WorkItemState,
 )
 from hardening_loop.gate import gate_verdict
@@ -28,6 +32,7 @@ from hardening_loop.ingest.persist import ingest_baseline
 from hardening_loop.models.tables import NegativeRun, WorkItem
 from hardening_loop.orchestrator.engine import AWAITING_DISPATCH_LABEL
 from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.replay.bundle import stage_evidence_bundle
 from hardening_loop.replay.synth import (
     BASELINE_SHA,
     CONFIG_SEEDS,
@@ -75,18 +80,18 @@ def _to_ready_for_human(
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("PR verified -> checks_running", wi.state, WorkItemState.checks_running)
-    r.eq("verification level L1", wi.verification_level, VerificationLevel.pr_opened)
+    r.eq("verification level L1", wi.lifecycle_level, LifecycleLevel.pr_opened)
     head = w.gh.prs[number].head_sha
     w.ci(head)
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("CI green -> review_pending", wi.state, WorkItemState.review_pending)
-    r.eq("verification level L2", wi.verification_level, VerificationLevel.ci_green)
+    r.eq("verification level L2", wi.lifecycle_level, LifecycleLevel.ci_green)
     w.review_done(head)
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("Devin Review status observed -> ready_for_human", wi.state, WorkItemState.ready_for_human)
-    r.eq("verification level L3", wi.verification_level, VerificationLevel.review_completed)
+    r.eq("verification level L3", wi.lifecycle_level, LifecycleLevel.review_completed)
     return wi, head
 
 
@@ -94,7 +99,7 @@ def _merge(w: World, r: ScenarioResult, wi: WorkItem) -> tuple[WorkItem, str]:
     merge_sha = w.human_approves_and_merges(wi)
     wi = w.wi(wi.id or 0)
     r.eq("human merge -> merged", wi.state, WorkItemState.merged)
-    r.eq("verification level L5 after merge", wi.verification_level, VerificationLevel.merged)
+    r.eq("verification level L5 after merge", wi.lifecycle_level, LifecycleLevel.merged)
     r.expect("controller never approved or merged", w.gh.never_merged_or_approved())
     return wi, merge_sha
 
@@ -143,14 +148,14 @@ def r0(w: World, r: ScenarioResult) -> None:
 # ----------------------------------------------------------------------------- R1
 
 
-@scenario("R1", "Dependency upgrade: first-try success through L6 rescan_verified")
+@scenario("R1", "Dependency upgrade: first-try success through rescan_verified")
 def r1(w: World, r: ScenarioResult) -> None:
     wi = _dispatch(w, r, "cryptography")
     r.eq("kind is dependency_upgrade", wi.kind, Kind.dependency_upgrade)
     wi, _ = _to_ready_for_human(
         w, r, wi, _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.1
     )
-    r.eq("verification level L4 after approval", w.wi(wi.id or 0).verification_level >= 3, True)
+    r.eq("verification level L4 after approval", w.wi(wi.id or 0).lifecycle_level >= 3, True)
     wi, merge_sha = _merge(w, r, wi)
     # Closing run of main at the merge commit, without cryptography.
     rid = w.ingest(w.closing_run(merge_sha))
@@ -158,7 +163,7 @@ def r1(w: World, r: ScenarioResult) -> None:
     wi = w.wi(wi.id or 0)
     r.eq("rescan outcome fixed", counts.get("fixed"), 1)
     r.eq("work item verified", wi.state, WorkItemState.verified)
-    r.eq("verification level L6", wi.verification_level, VerificationLevel.rescan_verified)
+    r.eq("verification level L6", wi.lifecycle_level, LifecycleLevel.rescan_verified)
     r.eq("issue closed", w.issue_state(wi), "closed")
     r.eq("finding fixed", w.finding_by_vuln("CVE-2024-26130").state, FindingState.fixed)
     row = w.pr_row(wi.id or 0)
@@ -228,7 +233,7 @@ def r3(w: World, r: ScenarioResult) -> None:
     w.tick()
     for attempt in range(3):
         head = w.gh.prs[number].head_sha
-        w.ci(head, failing=["security-scan"])
+        w.ci(head, failing=["build-image"])
         w.tick()
         wi = w.wi(wi.id or 0)
         if attempt < 2:
@@ -788,7 +793,7 @@ def r14(w: World, r: ScenarioResult) -> None:
     r.eq("issue stays open", w2.issue_state(wi2), "open")
     st = sorted(f.state.value for f in w2.findings(wi2.id))
     r.eq("members: fixed + human_blocked", st, ["fixed", "human_blocked"])
-    r.expect("verification level stays L5", wi2.verification_level == VerificationLevel.merged)
+    r.expect("verification level stays L5", wi2.lifecycle_level == LifecycleLevel.merged)
 
 
 # ----------------------------------------------------------------------------- R15
@@ -888,17 +893,15 @@ def r16(w: World, r: ScenarioResult) -> None:
         (crypto.state, paramiko.state),
         (WorkItemState.issue_open, WorkItemState.issue_open),
     )
-    # The running session has barely spent anything; its remaining cap stays committed. (Dispatch
-    # precedes polling within a tick, so the 0.2 ACU shows up in the next tick's arithmetic.)
+    # The running session has barely spent anything; its remaining cap stays committed.
     w.session_state(pillow, DevinStatus.running, DevinStatusDetail.working, acus=0.2)
-    w.tick()
     rep = w.tick()
     r.eq("low consumption does not free the budget", rep.sessions_created, 0)
     r.eq("cryptography still waiting", w.state_of(crypto.id or 0), WorkItemState.issue_open)
     deferrals = [e for e in w.events("work_item", crypto.id) if e.event == "budget_deferred"]
     r.expect(
         "deferral reason shows consumed + outstanding + cap > budget",
-        len(deferrals) >= 3
+        len(deferrals) >= 2
         and "consumed=0.20+outstanding=4.80+cap=5>budget=8" in (deferrals[-1].reason or ""),
         [e.reason for e in deferrals],
     )
@@ -907,9 +910,8 @@ def r16(w: World, r: ScenarioResult) -> None:
     # only what it consumed stays counted, so cryptography fits (1.5 + 5 <= 8) while paramiko
     # (cap 8) does not: consumed ACUs are counted once, not once per active session.
     w.session_state(pillow, DevinStatus.exit, DevinStatusDetail.finished, acus=1.5)
-    w.tick()
+    rep = w.tick()  # the poll that releases the reservation precedes this tick's dispatch
     r.eq("first session escalated", w.state_of(pillow.id or 0), WorkItemState.needs_human)
-    rep = w.tick()
     r.eq("budget freed -> exactly one more dispatched", rep.sessions_created, 1)
     r.eq("cryptography active", w.state_of(crypto.id or 0), WorkItemState.session_active)
     r.eq("paramiko still waiting", w.state_of(paramiko.id or 0), WorkItemState.issue_open)
@@ -1029,7 +1031,7 @@ def r19(w: World, r: ScenarioResult) -> None:
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("push sends the item back to checks_running", wi.state, WorkItemState.checks_running)
-    r.eq("verification level back to L1", wi.verification_level, VerificationLevel.pr_opened)
+    r.eq("verification level back to L1", wi.lifecycle_level, LifecycleLevel.pr_opened)
     row = w.pr_row(wi.id or 0)
     r.eq("review status of the old head discarded", row.review_status if row else "?", None)
     w.ci(head2)
@@ -1093,6 +1095,81 @@ def r20(w: World, r: ScenarioResult) -> None:
     r.eq("work item verified", w.state_of(wi.id or 0), WorkItemState.verified)
 
 
+# ----------------------------------------------------------------------------- R21
+
+
+@scenario(
+    "R21",
+    "Scan intake from Actions artifacts: verified bundle ingested once, repeat poll is a no-op, "
+    "tampered and source-mismatched bundles are rejected but kept on record",
+)
+def r21(w: World, r: ScenarioResult) -> None:
+    root = w.settings.repo_root
+    if not (root / "fixtures" / "baseline" / BASELINE_SHA).exists():
+        r.expect("baseline fixture present", False, str(root))
+        return
+    w.gh.put_file("pyproject.toml", BASELINE_SHA, load_source_pyproject(root, BASELINE_SHA))
+    staging = w.db_path.parent / "r21-bundles"
+    good_id, tampered_id, foreign_id = 34_200_000_021, 34_200_000_022, 34_200_000_023
+    shutil.rmtree(staging, ignore_errors=True)
+    for run_id in (good_id, tampered_id, foreign_id):
+        shutil.rmtree(w.settings.evidence_dir / "runs" / str(run_id), ignore_errors=True)
+
+    good = stage_evidence_bundle(staging / "good", repo_root=root, run_id=good_id)
+    tampered = stage_evidence_bundle(staging / "tampered", repo_root=root, run_id=tampered_id)
+    vuln = tampered / "lean" / "raw" / "trivy-vuln.json"
+    doc = json.loads(vuln.read_text())
+    doc["Results"] = []
+    vuln.write_text(json.dumps(doc))
+    foreign = stage_evidence_bundle(
+        staging / "foreign", repo_root=root, run_id=foreign_id, source_repo="apache/superset"
+    )
+    for run_id, tree in ((good_id, good), (tampered_id, tampered), (foreign_id, foreign)):
+        info = w.gh.add_workflow_run(run_id=run_id, head_sha=BASELINE_SHA)
+        w.gh.add_artifact(info.id, f"scan-evidence-{BASELINE_SHA}", tree)
+
+    first = w.tick()
+    r.eq("one bundle ingested", first.scans_ingested, 1)
+    r.eq("two bundles rejected", first.scans_rejected, 2)
+    r.expect("ingested baseline seeds work items", first.work_items_created > 50, first)
+    runs = w.scan_runs()
+    r.eq("exactly one scan run persisted", len(runs), 1)
+    r.eq(
+        "scan run carries the Actions identity",
+        runs[0].external_run_id,
+        f"gha:{w.settings.fork_repo}:{good_id}:1",
+    )
+    intakes = w.scan_intakes()
+    r.eq("every polled run has an intake row", len(intakes), 3)
+    by_run = {i.workflow_run_id: i for i in intakes}
+    r.eq("good run ingested", by_run[good_id].status, IntakeStatus.ingested)
+    r.eq("tampered run rejected", by_run[tampered_id].status, IntakeStatus.rejected)
+    r.expect(
+        "tampered rejection names the checksum failure",
+        any("failed verification" in x for x in by_run[tampered_id].reasons),
+        by_run[tampered_id].reasons,
+    )
+    r.eq("foreign-repo run rejected", by_run[foreign_id].status, IntakeStatus.rejected)
+    r.expect(
+        "rejected bundles stay on disk for inspection",
+        all(Path(by_run[i].bundle_path or "").is_dir() for i in (tampered_id, foreign_id)),
+        [by_run[i].bundle_path for i in (tampered_id, foreign_id)],
+    )
+    evidence = w.settings.evidence_dir / "runs" / str(good_id) / "1"
+    r.expect("verified evidence kept at runs/<id>/<attempt>", evidence.is_dir(), evidence)
+    files_before = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*"))
+    items_before = len(w.work_items())
+
+    second = w.tick()
+    r.eq("repeat poll ingests nothing", second.scans_ingested, 0)
+    r.eq("repeat poll rejects nothing", second.scans_rejected, 0)
+    r.eq("no second scan run", len(w.scan_runs()), 1)
+    r.eq("no new intake rows", len(w.scan_intakes()), 3)
+    r.eq("no new work items", len(w.work_items()), items_before)
+    files_after = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*"))
+    r.eq("evidence directory untouched", files_after, files_before)
+
+
 # ----------------------------------------------------------------------------- N1-N5
 
 
@@ -1132,7 +1209,7 @@ def n1(w: World, r: ScenarioResult) -> None:
     _, number = w.devin_opens_pr(wi, out, files=["Dockerfile"], acus=1.0)
     w.tick()
     head = w.gh.prs[number].head_sha
-    w.ci(head, failing=["security-scan"], pending=["lean-smoke", "app-runs"])
+    w.ci(head, failing=["build-image"], pending=["lean-smoke", "app-runs"])
     w.tick()
     wi = w.wi(wi.id or 0)
     _record_negative(
@@ -1165,13 +1242,13 @@ def n2(w: World, r: ScenarioResult) -> None:
         expected={"lean_smoke": "failure", "advanced_past_checks": False},
         observed={
             "lean_smoke": "failure",
-            "advanced_past_checks": wi.verification_level > VerificationLevel.pr_opened,
+            "advanced_past_checks": wi.lifecycle_level > LifecycleLevel.pr_opened,
         },
         pr_url=wi.pr_url,
     )
     r.expect(
         "Devin's claimed lean_smoke_local=True did not override CI",
-        wi.verification_level == VerificationLevel.pr_opened,
+        wi.lifecycle_level == LifecycleLevel.pr_opened,
     )
 
 

@@ -1,20 +1,25 @@
-"""`hardening-loop` command line: replay, report, serve, plus the CI helpers the fork's
-`security-scan` workflow runs (gate, vex-lint, forbid-ignore-files, scan-manifest).
+"""`hardening-loop` command line: replay, report, serve, doctor, assets, schemas, plus the CI
+helpers the fork's `security-scan` workflow runs (gate, vex-lint, forbid-ignore-files,
+scan-manifest).
 
 Only `serve --operator` (without `--doubles`) can spend ACUs: it runs the poll loop with live
-clients and lets an operator launch a Devin session from the dashboard. Every other command,
-including plain `serve`, is read-only and never talks to GitHub or Devin."""
+clients and lets an operator launch a Devin session from the dashboard. `assets sync` and `ingest`
+make authenticated calls but create no sessions. Every other command, including plain `serve` and
+`doctor`, never talks to GitHub or Devin."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
 import uvicorn
+from sqlalchemy.exc import OperationalError
 
 from hardening_loop.ci import (
     DEFAULT_EXPECTED_JOBS,
@@ -25,13 +30,26 @@ from hardening_loop.ci import (
     load_registry_image,
     write_scan_manifest,
 )
-from hardening_loop.config import Settings
+from hardening_loop.config import BASELINE_SHA, FORK_REPO, REMEDIATION_BRANCH, Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
 from hardening_loop.db import open_database
-from hardening_loop.domain.enums import GateMode, ImageTarget
+from hardening_loop.devin.assets import AssetError, AssetSyncer, load_assets
+from hardening_loop.devin.fake import FakeDevin
+from hardening_loop.devin.rest import DevinError, DevinRest
+from hardening_loop.devin.schemas import export_schemas
+from hardening_loop.doctor import run_doctor
+from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus
+from hardening_loop.github.protocol import WorkflowRunInfo
 from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
+from hardening_loop.ingest.intake import (
+    IntakeExpectation,
+    IntakeOutcome,
+    ScanIntakeService,
+    validate_bundle,
+)
 from hardening_loop.logging_utils import configure_logging
+from hardening_loop.metrics import metrics_history, snapshot_metrics
 from hardening_loop.negative import CASES, MutationError, NegativeRunner, mutate
 from hardening_loop.operator import (
     OperatorConfigError,
@@ -145,6 +163,252 @@ def cmd_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    report = run_doctor(settings, live=args.live)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.render())
+    return 0 if report.ok else 1
+
+
+def cmd_metrics_snapshot(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    if args.acu_cost_usd is not None:
+        settings = settings.model_copy(update={"acu_cost_usd": args.acu_cost_usd})
+    engine = open_database(settings.database_path)
+    row = snapshot_metrics(
+        engine, trigger=args.trigger, acu_cost_usd=settings.acu_cost_usd, now=datetime.now(UTC)
+    )
+    print(
+        f"metrics_snapshots.id={row.id} open_high_critical={row.open_high_critical} "
+        f"needs_human={row.needs_human} active_sessions={row.active_sessions} "
+        f"verified_prs={row.verified_prs} acus_total={row.acus_total:g}"
+    )
+    return 0
+
+
+def cmd_metrics_history(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    engine = open_database(settings.database_path)
+    rows = metrics_history(engine, limit=args.limit)
+    if args.json:
+        print(json.dumps([r.model_dump(mode="json", exclude={"body"}) for r in rows], indent=2))
+        return 0
+    for r in rows:
+        print(
+            f"{r.id:>5}  {r.taken_at.isoformat(timespec='seconds')}  {r.trigger:<9} "
+            f"hc={r.open_high_critical:<4} human={r.needs_human:<3} active={r.active_sessions:<2} "
+            f"verified={r.verified_prs:<3} acu={r.acus_total:g}"
+        )
+    return 0
+
+
+def cmd_assets_sync(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    try:
+        bundle = load_assets(settings.repo_root)
+    except AssetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    fake_store: Path | None = None
+    if args.doubles:
+        fake = FakeDevin()
+        fake_store = settings.database_path.with_name("fake-devin-assets.json")
+        fake.load_assets(fake_store)
+        devin: DevinRest | FakeDevin = fake
+    else:
+        if settings.devin_api_key is None:
+            print("error: HL_DEVIN_API_KEY is required (or pass --doubles)", file=sys.stderr)
+            return 2
+        devin = DevinRest(
+            settings.devin_api_key, settings.devin_org_id, api_base=settings.devin_api_base
+        )
+    engine = open_database(settings.database_path)
+    try:
+        report = AssetSyncer(devin, engine, bundle).sync(dry_run=args.dry_run)
+    except (AssetError, DevinError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if isinstance(devin, FakeDevin) and fake_store is not None and not args.dry_run:
+            devin.save_assets(fake_store)
+    for a in report.actions:
+        print(f"{a.action:13} {a.asset_kind:9} {a.slug:28} {a.remote_id or '-'}")
+    print(
+        f"assets sync: {report.writes} write(s)"
+        + (" (dry run)" if report.dry_run else "")
+        + ("; no-op" if report.noop else "")
+    )
+    if args.expect_noop and not report.noop:
+        print("error: --expect-noop but the sync made changes", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_schemas_export(args: argparse.Namespace) -> int:
+    settings = _settings_for(None)
+    directory = Path(args.out) if args.out else settings.repo_root / "playbooks" / "schemas"
+    stale = export_schemas(directory, write=not args.check)
+    if args.check:
+        if stale:
+            print(f"stale exported schemas: {stale}; run `hardening-loop schemas export`")
+            return 1
+        print(f"exported schemas in {directory} match schemas.py")
+        return 0
+    print(f"wrote {len(stale)} schema file(s) to {directory}" if stale else "schemas unchanged")
+    return 0
+
+
+def _intake_line(o: IntakeOutcome) -> str:
+    verb = (
+        "seen before"
+        if o.seen_before
+        else ("ingested" if o.status is IntakeStatus.ingested else "REJECTED")
+    )
+    tail = f" scan_run={o.scan_run_id}" if o.scan_run_id is not None else ""
+    reasons = "".join(f"\n  - {r}" for r in o.reasons)
+    return f"{o.external_run_id}: {verb}{tail}{reasons}"
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Pull completed `security-scan` evidence from the fork's Actions into the database. Read-only
+    against GitHub (runs, artifacts, compare, one file); never touches Devin. Exit 1 when any
+    bundle was rejected, so a CI caller notices, 0 when everything was ingested or seen before."""
+    settings = _settings_for(Path(args.db) if args.db else None)
+    if settings.replay_mode:
+        print("error: replay databases never ingest live evidence", file=sys.stderr)
+        return 2
+    if settings.github_token is None:
+        print("error: HL_GITHUB_TOKEN is required to read the fork's Actions", file=sys.stderr)
+        return 2
+    gh = GitHubRest(settings.github_token, api_base=settings.github_api_base)
+    svc = ScanIntakeService(
+        open_database(settings.database_path),
+        gh,
+        repo_root=settings.repo_root,
+        evidence_dir=settings.evidence_dir,
+        expect=IntakeExpectation(
+            source_repo=settings.fork_repo, source_branch=settings.remediation_branch
+        ),
+    )
+    try:
+        if args.run_id is not None:
+            run = svc.find_run(args.run_id)
+            if run is None:
+                print(
+                    f"error: no completed security-scan run {args.run_id} in {settings.fork_repo}",
+                    file=sys.stderr,
+                )
+                return 2
+            outcomes = [svc.ingest_workflow_run(run)]
+        else:
+            outcomes = svc.poll(limit=args.limit)
+    except GitHubError as exc:
+        print(f"error: GitHub: {exc}", file=sys.stderr)
+        return 2
+    except OperationalError as exc:
+        if "locked" not in str(exc.orig).lower():
+            raise
+        print(
+            "error: the database stayed locked by the controller for the whole busy timeout; "
+            "the run being recorded was rolled back, rerun `ingest` (or let the controller's own "
+            "poll pick it up)",
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        gh.close()
+    if not outcomes:
+        print("nothing new: every completed run on the remediation branch is already recorded")
+    for o in outcomes:
+        print(_intake_line(o))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(
+            json.dumps(
+                [
+                    {
+                        "external_run_id": o.external_run_id,
+                        "status": o.status.value,
+                        "seen_before": o.seen_before,
+                        "created": o.created,
+                        "scan_run_id": o.scan_run_id,
+                        "reasons": o.reasons,
+                    }
+                    for o in outcomes
+                ],
+                indent=2,
+            )
+            + "\n"
+        )
+    fresh_rejects = [o for o in outcomes if o.status is IntakeStatus.rejected and not o.seen_before]
+    return 1 if fresh_rejects else 0
+
+
+def _git_is_ancestor(repo: Path) -> Callable[[str, str], bool]:
+    def is_ancestor(base: str, head: str) -> bool:
+        proc = subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", base, head],  # noqa: S607
+            check=False,
+            capture_output=True,
+        )
+        return proc.returncode == 0
+
+    return is_ancestor
+
+
+def cmd_evidence_verify(args: argparse.Namespace) -> int:
+    """Run intake's fail-closed bundle checks against an already-downloaded evidence tree, with no
+    GitHub access: checksums, manifest schema, source repo/branch/sha, run id/attempt, platform,
+    baseline ancestry (asked of the local git checkout), required scan jobs, scanner set, runtime
+    results. Exit 0 only when the bundle would be accepted; every rejection reason is printed.
+
+    `--head-sha`, `--source-branch` and `--event` stand in for what GitHub reports about the run;
+    without `--event` the manifest's own trigger is taken at face value."""
+    event = args.event
+    if event is None:
+        try:
+            event = json.loads(Path(args.bundle, "manifest.json").read_text())["run"]["event"]
+        except (OSError, ValueError, KeyError, TypeError):
+            event = ""
+    run = WorkflowRunInfo(
+        id=args.run_id,
+        run_attempt=args.run_attempt,
+        event=str(event),
+        status="completed",
+        conclusion="success",
+        head_branch=args.source_branch,
+        head_sha=args.head_sha,
+        url="",
+    )
+    expect = IntakeExpectation(
+        source_repo=args.source_repo,
+        source_branch=args.source_branch,
+        baseline_sha=args.baseline_sha,
+        platform=args.platform,
+    )
+    manifest, reasons = validate_bundle(
+        Path(args.bundle), run, expect, is_ancestor=_git_is_ancestor(Path(args.git))
+    )
+    verdict = {
+        "bundle": str(Path(args.bundle)),
+        "accepted": not reasons,
+        "reasons": reasons,
+        "source_sha": manifest.source_sha if manifest else None,
+        "source_repo": manifest.source_repo if manifest else None,
+        "jobs": sorted(manifest.jobs) if manifest else [],
+    }
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(verdict, indent=2) + "\n")
+    print(json.dumps(verdict, indent=2))
+    for reason in reasons:
+        print(f"::error::evidence rejected: {reason}")
+    return 0 if not reasons else 1
+
+
 def _step_summary(markdown: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
@@ -241,6 +505,8 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
             run=run,
             expected_jobs=tuple(args.expect_job or DEFAULT_EXPECTED_JOBS),
             gate_files=gate_files,
+            attach_dirs=tuple(args.attach or ()),
+            controller_sha=args.controller_sha or None,
         )
     except EvidenceError as exc:
         print(f"::error::scan-manifest: {exc}")
@@ -250,6 +516,10 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
         "### scan manifest\n\n"
         f"- source: `{args.source_repo}@{args.source_sha}` ({args.source_branch}, {args.event})\n"
         f"- jobs: `{', '.join(manifest['jobs'])}`\n"
+        + (f"- controller: `{manifest['controller_sha']}`\n" if manifest["controller_sha"] else "")
+        + "".join(
+            f"- attached {d}: {len(fs)} file(s)\n" for d, fs in manifest["attachments"].items()
+        )
         + "".join(
             f"- {t}: `{img['image_id']}` ({img['size_bytes']} bytes, user={img['config_user']})\n"
             for t, img in manifest["images"].items()
@@ -291,6 +561,7 @@ def cmd_negative_run(args: argparse.Namespace) -> int:
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_minutes * 60,
         work_dir=Path(args.work_dir),
+        compare_run_id=args.compare_run_id,
     )
     try:
         report = runner.run(
@@ -363,6 +634,77 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--operator-login", help="overrides HL_OPERATOR_LOGIN")
     s.set_defaults(fn=cmd_serve)
 
+    d = sub.add_parser("doctor", help="no-spend preflight: settings, database, assets, fixtures")
+    d.add_argument("--db")
+    d.add_argument("--live", action="store_true", help="require the bounded first-live-run profile")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(fn=cmd_doctor)
+
+    assets = sub.add_parser("assets", help="Devin org assets (playbooks, knowledge)")
+    assets_sub = assets.add_subparsers(dest="assets_command", required=True)
+    asy = assets_sub.add_parser(
+        "sync", help="create/update Devin playbooks and knowledge from the committed files"
+    )
+    asy.add_argument("--db")
+    asy.add_argument("--dry-run", action="store_true", help="list actions, write nothing")
+    asy.add_argument(
+        "--doubles", action="store_true", help="sync against the in-memory Devin double"
+    )
+    asy.add_argument(
+        "--expect-noop", action="store_true", help="exit 1 if anything was created or updated"
+    )
+    asy.set_defaults(fn=cmd_assets_sync)
+
+    met = sub.add_parser("metrics", help="persisted metrics snapshots")
+    met_sub = met.add_subparsers(dest="metrics_command", required=True)
+    ms = met_sub.add_parser("snapshot", help="compute the metrics and store one snapshot row")
+    ms.add_argument("--db")
+    ms.add_argument("--trigger", default="manual")
+    ms.add_argument("--acu-cost-usd", type=float)
+    ms.set_defaults(fn=cmd_metrics_snapshot)
+    mh = met_sub.add_parser("history", help="list persisted snapshots, newest first")
+    mh.add_argument("--db")
+    mh.add_argument("--limit", type=int, default=20)
+    mh.add_argument("--json", action="store_true")
+    mh.set_defaults(fn=cmd_metrics_history)
+
+    sch = sub.add_parser("schemas", help="structured-output schemas")
+    sch_sub = sch.add_subparsers(dest="schemas_command", required=True)
+    sx = sch_sub.add_parser("export", help="write playbooks/schemas/*.json from schemas.py")
+    sx.add_argument("--out")
+    sx.add_argument("--check", action="store_true", help="exit 1 if the export is stale")
+    sx.set_defaults(fn=cmd_schemas_export)
+
+    ing = sub.add_parser(
+        "ingest", help="fetch completed fork security-scan evidence into the database (idempotent)"
+    )
+    ing.add_argument("--db", default=None, help="controller SQLite path (default: settings)")
+    ing.add_argument("--run-id", type=int, default=None, help="one Actions run id (default: poll)")
+    ing.add_argument("--limit", type=int, default=10, help="max completed runs to consider")
+    ing.add_argument("--json", default=None, help="also write the outcomes to this path")
+    ing.set_defaults(fn=cmd_ingest)
+
+    ev = sub.add_parser(
+        "evidence-verify",
+        help="offline: apply intake's fail-closed checks to a downloaded scan-evidence bundle",
+    )
+    ev.add_argument("bundle", help="extracted scan-evidence-<sha> directory (holds manifest.json)")
+    ev.add_argument("--run-id", type=int, required=True, help="Actions run id the bundle came from")
+    ev.add_argument("--run-attempt", type=int, default=1)
+    ev.add_argument("--head-sha", required=True, help="head sha GitHub reports for that run")
+    ev.add_argument("--source-repo", default=FORK_REPO)
+    ev.add_argument("--source-branch", default=REMEDIATION_BRANCH)
+    ev.add_argument("--baseline-sha", default=BASELINE_SHA)
+    ev.add_argument("--platform", default="linux/amd64")
+    ev.add_argument(
+        "--event",
+        default=None,
+        help="github.event_name of the run; cross-checked against the manifest when given",
+    )
+    ev.add_argument("--git", default=".", help="fork checkout used to answer baseline ancestry")
+    ev.add_argument("--out", help="also write the verdict JSON here")
+    ev.set_defaults(fn=cmd_evidence_verify)
+
     g = sub.add_parser("gate", help="apply SCAN_GATE_MODE to one policy scan job directory")
     g.add_argument("--job", required=True, help="scan_image.sh output dir (mode=policy)")
     g.add_argument("--mode", required=True, choices=[m.value for m in GateMode])
@@ -417,6 +759,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="JOB=RESULT",
         help="GitHub `needs.<job>.result` of a runtime job to record (repeatable)",
     )
+    sm.add_argument(
+        "--attach",
+        action="append",
+        metavar="DIR",
+        help="directory under --out whose files join the checksummed bundle (repeatable)",
+    )
+    sm.add_argument("--controller-sha", help="controller commit whose CLI produced this run")
     sm.set_defaults(fn=cmd_scan_manifest)
 
     neg = sub.add_parser("ci-negative", help="operator-triggered negative suite against the fork")
@@ -437,6 +786,12 @@ def build_parser() -> argparse.ArgumentParser:
     nr.add_argument("--work-dir", default="data/ci-negative")
     nr.add_argument("--poll-seconds", type=float, default=30.0)
     nr.add_argument("--timeout-minutes", type=float, default=90.0)
+    nr.add_argument(
+        "--compare-run-id",
+        type=int,
+        help="dependency-regression baseline: a successful security-scan run id whose evidence "
+        "to compare against (default: latest successful run on --base)",
+    )
     nr.set_defaults(fn=cmd_negative_run)
     return p
 

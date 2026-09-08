@@ -9,13 +9,15 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from hardening_loop.domain.enums import (
+    CheckStatus,
     FindingState,
     Kind,
+    LifecycleLevel,
     Risk,
     ScanRunStatus,
     Severity,
     Trigger,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 
@@ -98,14 +100,32 @@ SEVERITY_LABELS: dict[Severity, Label] = {
     Severity.unknown: Label("Unknown", Tone.neutral),
 }
 
-VERIFICATION_LABELS: dict[VerificationLevel, Label] = {
-    VerificationLevel.none: Label("Not started", Tone.neutral),
-    VerificationLevel.pr_opened: Label("PR opened", Tone.neutral),
-    VerificationLevel.ci_green: Label("CI green", Tone.info),
-    VerificationLevel.review_completed: Label("Review completed", Tone.info),
-    VerificationLevel.human_approved: Label("Human approved", Tone.info),
-    VerificationLevel.merged: Label("Merged", Tone.info),
-    VerificationLevel.rescan_verified: Label("Rescan verified", Tone.success),
+LIFECYCLE_LABELS: dict[LifecycleLevel, Label] = {
+    LifecycleLevel.none: Label("Not started", Tone.neutral),
+    LifecycleLevel.pr_opened: Label("PR opened", Tone.neutral),
+    LifecycleLevel.ci_green: Label("CI green", Tone.info),
+    LifecycleLevel.review_completed: Label("Review completed", Tone.info),
+    LifecycleLevel.human_approved: Label("Human approved", Tone.info),
+    LifecycleLevel.merged: Label("Merged", Tone.info),
+    LifecycleLevel.rescan_verified: Label("Rescan verified", Tone.success),
+}
+
+DEPTH_LABELS: dict[VerificationDepth, Label] = {
+    VerificationDepth.requirements_pip: Label("L0 Requirements and pip", Tone.neutral),
+    VerificationDepth.import_migrations: Label("L1 Import and migrations", Tone.neutral),
+    VerificationDepth.targeted_unit: Label("L2 Targeted and unit tests", Tone.info),
+    VerificationDepth.immutable_image_runtime: Label("L3 Immutable-image runtime", Tone.info),
+    VerificationDepth.db_subset: Label("L4 Database subset", Tone.info),
+    VerificationDepth.playwright: Label("L5 Playwright", Tone.success),
+    VerificationDepth.canary: Label("L6 Canary", Tone.success),
+}
+
+CHECK_STATUS_LABELS: dict[CheckStatus, Label] = {
+    CheckStatus.pending: Label("Running", Tone.info),
+    CheckStatus.passed: Label("Passed", Tone.success),
+    CheckStatus.failed: Label("Failed", Tone.danger),
+    CheckStatus.partial: Label("Partial", Tone.warning),
+    CheckStatus.unavailable: Label("No evidence", Tone.neutral),
 }
 
 RISK_LABELS: dict[Risk, Label] = {
@@ -199,7 +219,7 @@ def work_item_state(value: object) -> Label:
     except ValueError:
         pass
     try:
-        return VERIFICATION_LABELS[VerificationLevel[str(value)]]
+        return LIFECYCLE_LABELS[LifecycleLevel[str(value)]]
     except KeyError:
         return _fallback(value)
 
@@ -231,18 +251,41 @@ def severity(value: object) -> Label:
         return _fallback(value)
 
 
-def verification(value: object) -> Label:
+def lifecycle(value: object) -> Label:
     """Accepts the enum, its numeric rank, or its name; `None` renders as a dash."""
     if value is None:
         return Label("—", Tone.neutral)
-    if isinstance(value, VerificationLevel):
-        return VERIFICATION_LABELS[value]
+    if isinstance(value, LifecycleLevel):
+        return LIFECYCLE_LABELS[value]
     raw = str(value)
     try:
-        return VERIFICATION_LABELS[
-            VerificationLevel(int(raw)) if raw.isdigit() else VerificationLevel[raw]
+        return LIFECYCLE_LABELS[LifecycleLevel(int(raw)) if raw.isdigit() else LifecycleLevel[raw]]
+    except (ValueError, KeyError):
+        return _fallback(value)
+
+
+def depth(value: object) -> Label:
+    """Highest verification rung a PR head has proven. `None` means nothing proven yet, which is
+    shown as such rather than as L0."""
+    if value is None or value == "":
+        return Label("Nothing proven yet", Tone.neutral)
+    if isinstance(value, VerificationDepth):
+        return DEPTH_LABELS[value]
+    raw = str(value)
+    if raw[:1] in ("L", "l") and raw[1:].isdigit():
+        raw = raw[1:]
+    try:
+        return DEPTH_LABELS[
+            VerificationDepth(int(raw)) if raw.isdigit() else VerificationDepth[raw]
         ]
     except (ValueError, KeyError):
+        return _fallback(value)
+
+
+def check_status(value: object) -> Label:
+    try:
+        return CHECK_STATUS_LABELS[CheckStatus(str(value))]
+    except ValueError:
         return _fallback(value)
 
 
@@ -330,7 +373,8 @@ EVENT_LABELS: dict[str, Label] = {
     "failed": Label("Failed", Tone.danger),
     "abandoned": Label("Abandoned", Tone.neutral),
     "budget_warning": Label("ACU budget warning", Tone.warning),
-    "verification_level": Label("Verification level changed", Tone.neutral),
+    "lifecycle_level": Label("Lifecycle level changed", Tone.neutral),
+    "verification_depth": Label("Verification depth changed", Tone.neutral),
     "head_changed": Label("PR head changed", Tone.neutral),
     "regression": Label("Regression detected", Tone.danger),
     "reappeared": Label("Finding reappeared", Tone.danger),

@@ -7,11 +7,18 @@ tests can assert which operations happened and that nothing left the allowlisted
 
 from __future__ import annotations
 
+import hashlib
+import io
+import zipfile
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from hardening_loop.config import FORK_REPO, REMEDIATION_BRANCH, assert_repo_allowed
+from hardening_loop.github.artifacts import extract_artifact_zip
 from hardening_loop.github.protocol import (
+    ArtifactInfo,
     BranchFile,
     CheckRun,
     CommitStatus,
@@ -20,7 +27,15 @@ from hardening_loop.github.protocol import (
     Issue,
     PullRequestInfo,
     Review,
+    WorkflowRunInfo,
 )
+
+
+@dataclass
+class _WorkflowRun:
+    info: WorkflowRunInfo
+    workflow_file: str
+    artifacts: list[tuple[ArtifactInfo, bytes]] = field(default_factory=list)
 
 
 class FakeGitHubError(RuntimeError):
@@ -70,6 +85,12 @@ class FakeGitHub:
         self._next_issue = 100
         self._next_pr = 500
         self.fail_next: dict[str, Exception] = {}
+        # method -> callback run once, before that method's next call (scenarios use it to make
+        # something happen "while" the controller is talking to GitHub).
+        self.before_next: dict[str, Callable[[], None]] = {}
+        self.workflow_runs: dict[int, _WorkflowRun] = {}
+        self.workflow_runs_yielded = 0  # how far consumers actually read into the listing
+        self._next_artifact = 9000
 
     # ------------------------------------------------------------- scripting API (scenarios)
 
@@ -111,7 +132,7 @@ class FakeGitHub:
         pr.head_sha = new_sha
 
     def set_checks(self, sha: str, results: dict[str, str | None]) -> None:
-        """`{"security-scan": "success", "app-runs": None}` (None = still running)."""
+        """`{"build-image": "success", "app-runs": None}` (None = still running)."""
         self.checks[sha] = [
             CheckRun(
                 name=name,
@@ -121,6 +142,50 @@ class FakeGitHub:
             )
             for name, conclusion in results.items()
         ]
+
+    def add_workflow_run(
+        self,
+        *,
+        run_id: int,
+        head_sha: str,
+        head_branch: str | None = REMEDIATION_BRANCH,
+        workflow_file: str = "security-scan.yml",
+        event: str = "schedule",
+        status: str = "completed",
+        conclusion: str | None = "success",
+        run_attempt: int = 1,
+    ) -> WorkflowRunInfo:
+        info = WorkflowRunInfo(
+            id=run_id,
+            run_attempt=run_attempt,
+            event=event,
+            status=status,
+            conclusion=conclusion,
+            head_branch=head_branch,
+            head_sha=head_sha,
+            url=f"https://github.com/{self.repo}/actions/runs/{run_id}",
+        )
+        self.workflow_runs[run_id] = _WorkflowRun(info=info, workflow_file=workflow_file)
+        return info
+
+    def add_artifact(self, run_id: int, name: str, tree: Path) -> ArtifactInfo:
+        """Zip `tree` the way actions/upload-artifact does (paths relative to the tree root)."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(tree.rglob("*")):
+                if p.is_file():
+                    zf.write(p, p.relative_to(tree).as_posix())
+        payload = buf.getvalue()
+        n = self._next_artifact
+        self._next_artifact += 1
+        info = ArtifactInfo(
+            id=n,
+            name=name,
+            size_in_bytes=len(payload),
+            digest="sha256:" + hashlib.sha256(payload).hexdigest(),
+        )
+        self.workflow_runs[run_id].artifacts.append((info, payload))
+        return info
 
     def set_status(self, sha: str, context: str, state: str, description: str = "") -> None:
         others = [s for s in self.statuses.get(sha, []) if s.context != context]
@@ -176,6 +241,9 @@ class FakeGitHub:
         if repo != self.repo:
             raise FakeGitHubError(f"fake only serves {self.repo}, got {repo}")
         self.calls.append((method, target))
+        hook = self.before_next.pop(method, None)
+        if hook is not None:
+            hook()
         exc = self.fail_next.pop(method, None)
         if exc is not None:
             raise exc
@@ -307,6 +375,43 @@ class FakeGitHub:
     def branch_head(self, repo: str, branch: str) -> str:
         self._touch("branch_head", repo, branch)
         return self.branches[branch]
+
+    def list_workflow_runs(
+        self,
+        repo: str,
+        workflow_file: str,
+        *,
+        head_sha: str | None = None,
+        branch: str | None = None,
+        status: str | None = None,
+    ) -> Iterator[WorkflowRunInfo]:
+        self._touch("list_workflow_runs", repo, workflow_file)
+        out = [
+            r.info
+            for r in self.workflow_runs.values()
+            if r.workflow_file == workflow_file
+            and (head_sha is None or r.info.head_sha == head_sha)
+            and (branch is None or r.info.head_branch == branch)
+            and (status is None or r.info.status == status)
+        ]
+        for info in sorted(out, key=lambda r: r.id, reverse=True):
+            self.workflow_runs_yielded += 1
+            yield info
+
+    def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]:
+        self._touch("list_run_artifacts", repo, str(run_id))
+        run = self.workflow_runs.get(run_id)
+        if run is None:
+            raise FakeGitHubError(f"unknown workflow run {run_id}")
+        return [info for info, _ in run.artifacts]
+
+    def download_artifact(self, repo: str, artifact_id: int, dest: Path) -> Path:
+        self._touch("download_artifact", repo, str(artifact_id))
+        for run in self.workflow_runs.values():
+            for info, payload in run.artifacts:
+                if info.id == artifact_id:
+                    return extract_artifact_zip(payload, dest)
+        raise FakeGitHubError(f"unknown artifact {artifact_id}")
 
     # ------------------------------------------------------------- assertions
 

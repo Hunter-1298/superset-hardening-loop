@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from hardening_loop.config import GRYPE_VERSION, SYFT_VERSION, TRIVY_VERSION
-from hardening_loop.db import session_scope
+from hardening_loop.db import write_scope
 from hardening_loop.domain.enums import (
     Ecosystem,
     GateMode,
@@ -48,6 +48,9 @@ class Seed:
 
     def with_version(self, version: str) -> Seed:
         return replace(self, pkg_version=version)
+
+    def with_reporters(self, *scanners: Scanner) -> Seed:
+        return replace(self, reported_by=frozenset(scanners))
 
 
 @dataclass(frozen=True)
@@ -307,11 +310,12 @@ class SyntheticRun:
             is_baseline=self.is_baseline,
             run_attempt=self.run_attempt,
             scan_gate_mode=self.gate_mode,
+            primary_target=self.image_target,
         )
 
 
 def ingest_synthetic(engine: Engine, run: SyntheticRun, external_run_id: str) -> IngestResult:
-    with session_scope(engine) as db:
+    with write_scope(engine) as db:
         return ingest_run(db, run.meta(external_run_id), run.jobs(), upper_bounds={}, now=run.at)
 
 

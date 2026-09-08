@@ -38,11 +38,18 @@ from hardening_loop.domain.enums import (
     FindingState,
     Kind,
     Layer,
+    LifecycleLevel,
     Severity,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
-from hardening_loop.metrics import Metrics, RunSummary, compute_metrics, summarize_run
+from hardening_loop.metrics import (
+    Metrics,
+    RunSummary,
+    compute_metrics,
+    metrics_history,
+    summarize_run,
+)
 from hardening_loop.models.lineage import regression_descendants
 from hardening_loop.models.tables import (
     Event,
@@ -54,6 +61,7 @@ from hardening_loop.models.tables import (
     Session,
     SessionPoll,
     Sighting,
+    VerificationCheck,
     WorkItem,
 )
 from hardening_loop.operator import OperatorContext
@@ -107,6 +115,9 @@ LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
     LaunchBlock.closed: "This item is closed.",
     LaunchBlock.at_capacity: "Every concurrent session slot is in use.",
     LaunchBlock.over_budget: "This item's ACU cap would exceed the global ACU budget.",
+    LaunchBlock.scan_pending: (
+        "A scan of the branch is still waiting to be evaluated; it may already resolve this item."
+    ),
 }
 
 
@@ -156,27 +167,55 @@ def parse_kind(value: str | None) -> Kind | None:
         ) from exc
 
 
-def parse_level(value: str | None) -> VerificationLevel | None:
+def parse_lifecycle(value: str | None) -> LifecycleLevel | None:
     """`level` query param: the number (`6`) or the name (`rescan_verified`). Blank means no
     filter; anything else is a 422."""
     if not value:
         return None
     try:
-        return VerificationLevel(int(value)) if value.isdigit() else VerificationLevel[value]
+        return LifecycleLevel(int(value)) if value.isdigit() else LifecycleLevel[value]
     except (ValueError, KeyError) as exc:
         choices = ", ".join(
-            [*(str(int(v)) for v in VerificationLevel), *(v.name for v in VerificationLevel)]
+            [*(str(int(v)) for v in LifecycleLevel), *(v.name for v in LifecycleLevel)]
         )
         raise HTTPException(
-            status_code=422, detail=f"unknown verification level {value!r}; one of {choices}"
+            status_code=422, detail=f"unknown lifecycle level {value!r}; one of {choices}"
         ) from exc
 
 
-def _level_label(value: object) -> str:
+def parse_depth(value: str | None) -> VerificationDepth | None:
+    """`depth` query param: the rung number (`3`), `L3`, or the name (`immutable_image_runtime`)."""
+    if not value:
+        return None
+    raw = value[1:] if value[:1] in ("L", "l") and value[1:].isdigit() else value
     try:
-        return VerificationLevel(int(str(value))).label
+        return VerificationDepth(int(raw)) if raw.isdigit() else VerificationDepth[raw]
+    except (ValueError, KeyError) as exc:
+        choices = ", ".join(
+            [*(f"L{int(v)}" for v in VerificationDepth), *(v.name for v in VerificationDepth)]
+        )
+        raise HTTPException(
+            status_code=422, detail=f"unknown verification depth {value!r}; one of {choices}"
+        ) from exc
+
+
+def _lifecycle_label(value: object) -> str:
+    try:
+        return LifecycleLevel(int(str(value))).label
     except (ValueError, TypeError):
         return str(value)
+
+
+def _depth_code(value: object) -> str:
+    """`L3` for a rung given as enum, number or name; a dash when there is no depth yet."""
+    if value is None or value == "":
+        return "—"
+    try:
+        raw = str(value)
+        depth = VerificationDepth(int(raw)) if raw.isdigit() else VerificationDepth[raw]
+    except (ValueError, KeyError):
+        return str(value)
+    return f"L{int(depth)}"
 
 
 def _pct(value: float | None) -> str:
@@ -224,7 +263,8 @@ def _templates() -> Jinja2Templates:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     env = templates.env
     env.filters["kind"] = _kind_label
-    env.filters["level"] = _level_label
+    env.filters["level"] = _lifecycle_label
+    env.filters["depth_code"] = _depth_code
     env.filters["pct"] = _pct
     env.filters["num"] = _num
     env.filters["money"] = _money
@@ -236,7 +276,9 @@ def _templates() -> Jinja2Templates:
     env.filters["finding_state"] = labels.finding_state
     env.filters["kind_label"] = labels.kind
     env.filters["severity_label"] = labels.severity
-    env.filters["level_label"] = labels.verification
+    env.filters["lifecycle_label"] = labels.lifecycle
+    env.filters["depth_label"] = labels.depth
+    env.filters["check_status"] = labels.check_status
     env.filters["risk_label"] = labels.risk
     env.filters["run_status"] = labels.run_status
     env.filters["trigger_label"] = labels.trigger
@@ -259,7 +301,8 @@ def _templates() -> Jinja2Templates:
     env.globals["work_item_states"] = list(WorkItemState)
     env.globals["finding_states"] = list(FindingState)
     env.globals["layers"] = list(Layer)
-    env.globals["verification_levels"] = list(VerificationLevel)
+    env.globals["lifecycle_levels"] = list(LifecycleLevel)
+    env.globals["depth_levels"] = list(VerificationDepth)
     env.globals["human_action_states"] = labels.HUMAN_ACTION_STATES
     env.globals["ui"] = env.get_template("_macros.html").module
     return templates
@@ -306,10 +349,22 @@ def header_context(engine: Engine, branch: str) -> HeaderContext:
     timestamp the database knows about, so the header never invents a value."""
     with session_scope(engine) as db:
         run = db.exec(
-            select(ScanRun).where(ScanRun.source_branch == branch).order_by(col(ScanRun.id).desc())
+            select(ScanRun)
+            .where(ScanRun.source_branch == branch)
+            .order_by(
+                col(ScanRun.finished_at).desc(),
+                col(ScanRun.ingested_at).desc(),
+                col(ScanRun.id).desc(),
+            )
         ).first()
         if run is None:
-            run = db.exec(select(ScanRun).order_by(col(ScanRun.id).desc())).first()
+            run = db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at).desc(),
+                    col(ScanRun.ingested_at).desc(),
+                    col(ScanRun.id).desc(),
+                )
+            ).first()
         last_event = db.exec(select(Event.ts).order_by(col(Event.ts).desc())).first()
         if run is not None:
             db.expunge(run)
@@ -630,13 +685,15 @@ def create_app(
         kind: str | None = Query(default=None),
         severity: str | None = Query(default=None),
         level: str | None = Query(default=None),
+        depth: str | None = Query(default=None),
         q: str | None = Query(default=None),
         queue: bool = Query(default=False),
     ) -> HTMLResponse:
         state = state or None
         severity = severity or None
         wanted = parse_kind(kind)
-        wanted_level = parse_level(level)
+        wanted_level = parse_lifecycle(level)
+        wanted_depth = parse_depth(depth)
         needle = (q or "").strip()
         with session_scope(engine) as db:
             stmt = select(WorkItem)
@@ -651,7 +708,9 @@ def create_app(
             if severity:
                 stmt = stmt.where(col(WorkItem.severity) == severity.upper())
             if wanted_level is not None:
-                stmt = stmt.where(col(WorkItem.verification_level) == wanted_level)
+                stmt = stmt.where(col(WorkItem.lifecycle_level) == wanted_level)
+            if wanted_depth is not None:
+                stmt = stmt.where(col(WorkItem.verification_depth) == wanted_depth)
             if needle:
                 like = f"%{needle}%"
                 clauses: list[ColumnElement[bool]] = [
@@ -686,6 +745,7 @@ def create_app(
                     "kind": kind or None,
                     "severity": severity or None,
                     "level": level or None,
+                    "depth": depth or None,
                     "queue": "1" if queue else None,
                 },
             )
@@ -726,6 +786,19 @@ def create_app(
             member_ids = [f.id for f in members if f.id is not None]
             session_ids = [s.id for s in sessions if s.id is not None]
             pr_ids = [p.id for p in prs if p.id is not None]
+            current_pr = next((p for p in prs if p.state == "open"), prs[-1] if prs else None)
+            depth_checks = (
+                db.exec(
+                    select(VerificationCheck)
+                    .where(
+                        VerificationCheck.pull_request_id == current_pr.id,
+                        VerificationCheck.head_sha == current_pr.head_sha,
+                    )
+                    .order_by(col(VerificationCheck.depth), col(VerificationCheck.id))
+                ).all()
+                if current_pr is not None and current_pr.id is not None
+                else []
+            )
             events = db.exec(
                 select(Event)
                 .where(
@@ -765,6 +838,8 @@ def create_app(
                 polls=polls,
                 prs=prs,
                 checks=checks,
+                current_pr=current_pr,
+                depth_checks=depth_checks,
                 events=events,
                 retry_events=retry_events,
                 scan_runs=scan_runs,
@@ -894,6 +969,13 @@ def create_app(
     @app.get("/api/metrics", response_model=Metrics)
     def api_metrics() -> Metrics:
         return metrics()
+
+    @app.get("/api/metrics/history")
+    def api_metrics_history(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, Any]]:
+        return [
+            s.model_dump(mode="json", exclude={"body"})
+            for s in metrics_history(engine, limit=limit)
+        ]
 
     @app.get("/api/report", response_model=ReportBody)
     def api_report(live: bool = Query(default=False)) -> ReportBody:

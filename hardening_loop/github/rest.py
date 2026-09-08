@@ -9,10 +9,8 @@ logs or error messages.
 from __future__ import annotations
 
 import base64
-import io
 import time
-import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,7 +19,9 @@ import httpx
 from pydantic import SecretStr
 
 from hardening_loop.config import REPO_ALLOWLIST
+from hardening_loop.github.artifacts import extract_artifact_zip
 from hardening_loop.github.protocol import (
+    ArtifactInfo,
     BranchFile,
     CheckRun,
     CommitStatus,
@@ -30,6 +30,7 @@ from hardening_loop.github.protocol import (
     Issue,
     PullRequestInfo,
     Review,
+    WorkflowRunInfo,
 )
 from hardening_loop.orchestrator.policy import parse_pr_url
 
@@ -296,39 +297,70 @@ class GitHubRest:
         *,
         head_sha: str | None = None,
         branch: str | None = None,
-    ) -> list[dict[str, Any]]:
+        status: str | None = None,
+    ) -> Iterator[WorkflowRunInfo]:
         _assert_allowed(repo)
-        params: dict[str, Any] = {"per_page": 20}
+        params: dict[str, Any] = {}
         if head_sha:
             params["head_sha"] = head_sha
         if branch:
             params["branch"] = branch
-        data = self._request(
-            "GET", f"/repos/{repo}/actions/workflows/{workflow_file}/runs", params=params
-        ).json()
-        return list(data.get("workflow_runs", []))
+        if status:
+            params["status"] = status
+        path = f"/repos/{repo}/actions/workflows/{workflow_file}/runs"
+        for page in range(1, MAX_PAGES + 1):
+            data = self._request(
+                "GET", path, params={**params, "per_page": PER_PAGE, "page": page}
+            ).json()
+            batch = data.get("workflow_runs", [])
+            yield from (_workflow_run(r) for r in batch)
+            if len(batch) < PER_PAGE:
+                return
+        raise GitHubError(f"GET {path}: more than {MAX_PAGES} pages")
 
-    def list_run_artifacts(self, repo: str, run_id: int) -> list[dict[str, Any]]:
+    def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]:
         _assert_allowed(repo)
-        data = self._request(
-            "GET", f"/repos/{repo}/actions/runs/{run_id}/artifacts", params={"per_page": 100}
-        ).json()
-        return list(data.get("artifacts", []))
+        path = f"/repos/{repo}/actions/runs/{run_id}/artifacts"
+        out: list[ArtifactInfo] = []
+        for page in range(1, MAX_PAGES + 1):
+            data = self._request("GET", path, params={"per_page": PER_PAGE, "page": page}).json()
+            batch = data.get("artifacts", [])
+            out.extend(
+                ArtifactInfo(
+                    id=int(a["id"]),
+                    name=str(a["name"]),
+                    size_in_bytes=int(a.get("size_in_bytes") or 0),
+                    expired=bool(a.get("expired", False)),
+                    digest=str(a["digest"]) if a.get("digest") else None,
+                )
+                for a in batch
+            )
+            if len(batch) < PER_PAGE:
+                return out
+        raise GitHubError(f"GET {path}: more than {MAX_PAGES} pages")
 
     def download_artifact(self, repo: str, artifact_id: int, dest: Path) -> Path:
-        """Download and unzip one artifact into `dest`; returns `dest`."""
+        """Download and unzip one artifact into `dest`; returns `dest`. The zip itself is kept
+        beside the tree as `dest.with_suffix('.zip')` so its checksum can be recorded."""
         _assert_allowed(repo)
         resp = self._request(
             "GET", f"/repos/{repo}/actions/artifacts/{artifact_id}/zip", follow_redirects=True
         )
-        dest.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-            for member in zf.infolist():
-                target = (dest / member.filename).resolve()
-                if not target.is_relative_to(dest.resolve()):
-                    raise GitHubError(f"artifact member escapes destination: {member.filename}")
-            zf.extractall(dest)
-        return dest
+        return extract_artifact_zip(resp.content, dest)
+
+
+def _workflow_run(data: dict[str, Any]) -> WorkflowRunInfo:
+    return WorkflowRunInfo(
+        id=int(data["id"]),
+        run_attempt=int(data.get("run_attempt") or 1),
+        event=str(data.get("event") or ""),
+        status=str(data.get("status") or ""),
+        conclusion=str(data["conclusion"]) if data.get("conclusion") else None,
+        head_branch=str(data["head_branch"]) if data.get("head_branch") else None,
+        head_sha=str(data.get("head_sha") or ""),
+        url=str(data.get("html_url") or ""),
+        updated_at=_ts(data.get("updated_at")),
+    )
 
 
 def _ts(value: object) -> datetime | None:

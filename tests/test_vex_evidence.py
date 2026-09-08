@@ -229,7 +229,10 @@ def test_policy_job_of_another_image_is_not_paired(engine: Engine, tmp_path: Pat
         started_at=datetime(2026, 9, 1, tzinfo=UTC),
         finished_at=datetime(2026, 9, 1, 1, tzinfo=UTC),
     )
-    with session_scope(engine) as db, pytest.raises(ValueError, match="cannot speak for another"):
+    with (
+        session_scope(engine) as db,
+        pytest.raises(ValueError, match="non-primary image target have no consumer"),
+    ):
         ingest_run(db, meta, {"lean-raw": raw, "ci-policy": policy}, upper_bounds={})
 
 

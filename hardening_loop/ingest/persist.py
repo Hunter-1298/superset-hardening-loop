@@ -11,13 +11,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from operator import attrgetter
+from typing import Any
 
 from packaging.specifiers import SpecifierSet
 from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from hardening_loop.classify.rules import Classification, ClassificationContext, classify
-from hardening_loop.db import session_scope
+from hardening_loop.db import write_scope
 from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
@@ -79,6 +80,13 @@ class RunMeta:
     is_baseline: bool = False
     run_attempt: int = 1
     scan_gate_mode: GateMode = GateMode.report
+    # Findings are opened from this image only; other targets (the `ci` integration image) are
+    # persisted as separate coverage and never open findings against production.
+    primary_target: ImageTarget = ImageTarget.lean
+    # GitHub job name -> result (`success`, `failure`, ...) for non-scanner jobs such as
+    # `lean-smoke` and `app-runs`; anything but `success` keeps the run incomplete.
+    job_results: dict[str, str] = field(default_factory=dict)
+    workflow: dict[str, Any] | None = None
 
 
 def ingest_baseline(
@@ -100,8 +108,10 @@ def ingest_baseline(
         started_at=manifest.built_at,
         finished_at=manifest.captured_at,
         is_baseline=True,
+        job_results=dict(manifest.run.get("job_results") or {}),
+        workflow=manifest.run or None,
     )
-    with session_scope(engine) as db:
+    with write_scope(engine) as db:
         return ingest_run(db, meta, manifest.jobs, upper_bounds=upper_bounds or {})
 
 
@@ -121,12 +131,21 @@ def ingest_run(
         assert existing.id is not None
         return IngestResult(scan_run_id=existing.id, created=False)
 
-    raw_jobs = [j for j in jobs.values() if j.mode is ScanMode.raw]
-    policy_jobs = [j for j in jobs.values() if j.mode is ScanMode.policy]
+    primary = [j for j in jobs.values() if j.image_target is meta.primary_target]
+    secondary = [j for j in jobs.values() if j.image_target is not meta.primary_target]
+    raw_jobs = [j for j in primary if j.mode is ScanMode.raw]
+    policy_jobs = [j for j in primary if j.mode is ScanMode.policy]
     if len(raw_jobs) != 1:
-        raise ValueError(f"expected exactly one raw job per run, got {len(raw_jobs)}")
+        raise ValueError(
+            f"expected exactly one raw job for {meta.primary_target.value}, got {len(raw_jobs)}"
+        )
     if len(policy_jobs) > 1:
         raise ValueError(f"expected at most one policy job per run, got {len(policy_jobs)}")
+    if any(j.mode is not ScanMode.raw for j in secondary):
+        raise ValueError("policy scans of a non-primary image target have no consumer")
+    for j in secondary:
+        if j.platform != meta.platform:
+            raise ValueError(f"{j.image_target.value} job platform {j.platform} != {meta.platform}")
     raw = raw_jobs[0]
     policy = policy_jobs[0] if policy_jobs else None
     if raw.platform != meta.platform:
@@ -138,7 +157,9 @@ def ingest_run(
                 f"policy job scanned {subject(policy)}, raw job scanned {subject(raw)}: "
                 "suppressions of one image cannot speak for another"
             )
-    all_jobs_succeeded = all(j.all_jobs_succeeded for j in jobs.values())
+    all_jobs_succeeded = all(j.all_jobs_succeeded for j in jobs.values()) and all(
+        r == "success" for r in meta.job_results.values()
+    )
 
     tools = {
         "syft": raw.tools.syft,
@@ -170,14 +191,28 @@ def ingest_run(
         finished_at=meta.finished_at,
         is_baseline=meta.is_baseline,
         ingested_at=ts,
+        workflow=meta.workflow,
     )
     db.add(run)
     db.flush()
     assert run.id is not None
     run_id = run.id
 
-    for job in jobs.values():
+    for job in primary:
         _persist_job_rows(db, run_id, job)
+    for job in secondary:
+        _persist_job_rows(db, run_id, job, suffix=f"@{job.image_target.value}")
+    for name, outcome in sorted(meta.job_results.items()):
+        db.add(
+            ScanJob(
+                scan_run_id=run_id,
+                name=name,
+                layer_scope="runtime",
+                success=outcome == "success",
+                started_at=meta.started_at,
+                finished_at=meta.finished_at,
+            )
+        )
 
     # Findings are opened from raw evidence.
     normalized = normalize(raw.vulns, raw.configs)
@@ -200,7 +235,7 @@ def ingest_run(
     by_sev: Counter[str] = Counter()
     for nf in normalized:
         cls = classify(nf, ctx)
-        finding, is_new = _upsert_finding(db, run_id, raw, nf, cls, ts)
+        finding, is_new = _upsert_finding(db, run, raw, nf, cls, ts)
         assert finding.id is not None
         result.findings_new += int(is_new)
         by_kind[str(cls.kind.value) if cls.kind else "unclassified"] += 1
@@ -274,7 +309,9 @@ def ingest_run(
     return result
 
 
-def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
+def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence, *, suffix: str = "") -> None:
+    """`suffix` distinguishes jobs of a non-primary image target (`trivy-raw@ci`) from the
+    production jobs the closer looks up by bare name."""
     for name, digest in job.files.items():
         db.add(
             Evidence(
@@ -291,7 +328,7 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
     db.add(
         ScanJob(
             scan_run_id=run_id,
-            name=f"trivy-{job.mode.value}",
+            name=f"trivy-{job.mode.value}{suffix}",
             scanner=Scanner.trivy,
             mode=job.mode,
             image_target=job.image_target,
@@ -309,7 +346,7 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
     db.add(
         ScanJob(
             scan_run_id=run_id,
-            name=f"grype-{job.mode.value}",
+            name=f"grype-{job.mode.value}{suffix}",
             scanner=Scanner.grype,
             mode=job.mode,
             image_target=job.image_target,
@@ -327,7 +364,7 @@ def _persist_job_rows(db: Session, run_id: int, job: ScanJobEvidence) -> None:
     db.add(
         ScanJob(
             scan_run_id=run_id,
-            name=f"config-{job.mode.value}",
+            name=f"config-{job.mode.value}{suffix}",
             scanner=Scanner.trivy,
             mode=job.mode,
             image_target=job.image_target,
@@ -353,14 +390,26 @@ def _severity_counts(items: Sequence[RawVuln] | Sequence[RawConfigFinding]) -> d
 
 def _upsert_finding(
     db: Session,
-    run_id: int,
+    run: ScanRun,
     raw: ScanJobEvidence,
     nf: NormalizedFinding,
     cls: Classification,
     ts: datetime,
 ) -> tuple[Finding, bool]:
+    """Open or refresh the finding `nf` names. A finding's mutable description (package, version,
+    severity, classification, `last_seen_run_id`, state) always reflects the run that finished
+    last: a run ingested after a newer scan has already spoken for the finding only records its
+    sightings and, if it finished first, becomes the finding's `first_seen_run_id`."""
+    assert run.id is not None
+    run_id = run.id
     finding = db.exec(select(Finding).where(Finding.dedupe_key == nf.dedupe_key)).first()
     is_new = finding is None
+    if finding is not None and _finished_before(db, run, finding.first_seen_run_id):
+        finding.first_seen_run_id = run_id
+    if finding is not None and _finished_before(db, run, finding.last_seen_run_id):
+        db.add(finding)
+        db.flush()
+        return finding, False
     if finding is None:
         finding = Finding(
             dedupe_key=nf.dedupe_key,
@@ -407,6 +456,17 @@ def _upsert_finding(
     db.add(finding)
     db.flush()
     return finding, is_new
+
+
+def _finished_before(db: Session, run: ScanRun, other_run_id: int) -> bool:
+    """Whether `run` finished strictly before the run `other_run_id` (scan chronology, not
+    ingestion order). Unknown timestamps never reorder."""
+    if other_run_id == run.id or run.finished_at is None:
+        return False
+    other = db.get(ScanRun, other_run_id)
+    return (
+        other is not None and other.finished_at is not None and run.finished_at < other.finished_at
+    )
 
 
 _CLOSED_STATES = frozenset(

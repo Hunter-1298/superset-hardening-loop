@@ -7,7 +7,8 @@ from hardening_loop.domain.enums import (
     CLOSING_FINDING_STATES,
     FindingState,
     Kind,
-    VerificationLevel,
+    LifecycleLevel,
+    VerificationDepth,
     WorkItemState,
 )
 from hardening_loop.orchestrator.state import (
@@ -28,15 +29,27 @@ def test_acu_caps_in_brief_order() -> None:
     assert [ACU_CAPS[k] for k in sorted(Kind)] == [5, 8, 20, 3, 6]
 
 
-def test_verification_ladder() -> None:
-    assert [v.label for v in VerificationLevel] == [
-        "L0 none",
-        "L1 pr_opened",
-        "L2 ci_green",
-        "L3 review_completed",
-        "L4 human_approved",
-        "L5 merged",
-        "L6 rescan_verified",
+def test_lifecycle_ladder_is_workflow_progress() -> None:
+    assert [v.label for v in LifecycleLevel] == [
+        "none",
+        "pr_opened",
+        "ci_green",
+        "review_completed",
+        "human_approved",
+        "merged",
+        "rescan_verified",
+    ]
+
+
+def test_verification_depth_ladder_from_brief() -> None:
+    assert [d.label for d in VerificationDepth] == [
+        "L0 requirements + pip",
+        "L1 import + migrations",
+        "L2 targeted + unit tests",
+        "L3 immutable-image runtime",
+        "L4 database subset",
+        "L5 Playwright",
+        "L6 canary",
     ]
 
 

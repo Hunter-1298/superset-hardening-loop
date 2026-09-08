@@ -5,6 +5,7 @@ its draft PR and deletes its branch (verified against a recorded httpx transport
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,10 @@ from hardening_loop.negative import (
     CASES,
     CHECK_BUILD,
     CHECK_MANIFEST,
+    CHECK_SCAN_MATRIX_TEMPLATE,
     CHECK_SMOKE,
     REGRESSION_PIN,
+    SCAN_MATRIX_LEGS,
     MutationError,
     NegativeRunner,
     all_expected_completed,
@@ -171,6 +174,33 @@ def test_evaluate_strict_on_missing_pending_and_wrong() -> None:
     assert f"{CHECK_MANIFEST}: no check run reported" in failures
 
 
+def test_broken_build_accepts_unexpanded_skipped_scan_matrix() -> None:
+    """When build-image fails GitHub never expands the scan matrix; it reports a single skipped
+    check under the literal template name, which must count as every leg skipped."""
+    case = CASES["broken-build"]
+    runs = [
+        _run(CHECK_BUILD, "failure"),
+        _run("forbid-ignore-files", "success"),
+        _run("vex-lint", "success"),
+        _run(CHECK_SCAN_MATRIX_TEMPLATE, "skipped"),
+        _run("policy-gate", "skipped"),
+        _run(CHECK_SMOKE, "skipped"),
+        _run("app-runs", "skipped"),
+        _run(CHECK_MANIFEST, "skipped"),
+    ]
+    assert all_expected_completed(case, runs)
+    results, failures = evaluate(case, runs)
+    assert failures == []
+    assert all(results[leg] == "skipped" for leg in SCAN_MATRIX_LEGS)
+    assert CHECK_SCAN_MATRIX_TEMPLATE not in results
+
+    # anything but a skip under the template name is not evidence about the legs
+    runs[3] = _run(CHECK_SCAN_MATRIX_TEMPLATE, "failure")
+    assert not all_expected_completed(case, runs)
+    _, failures = evaluate(case, runs)
+    assert failures == [f"{leg}: no check run reported" for leg in SCAN_MATRIX_LEGS]
+
+
 def test_evaluate_prefers_completed_rerun_over_stale_pending() -> None:
     case = CASES["ignore-file"]
     runs = [_run(n, None, status="queued") for n in case.expect] + [
@@ -289,3 +319,101 @@ def test_workflow_job_names_match_expectation_table() -> None:
     ).read_text()
     for name in CASES:
         assert f'"{name}"' in text, name
+
+
+class _ArtifactGitHub(httpx.BaseTransport):
+    """Artifact lookups only: every run has one `scan-evidence-*` artifact whose zip holds a
+    marker file naming the run, so the test can tell which baseline was downloaded."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        import io
+        import zipfile
+
+        path = request.url.path
+        self.calls.append(f"{request.method} {path}")
+        if path.endswith("/artifacts") and "/actions/runs/" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return httpx.Response(
+                200,
+                json={"artifacts": [{"id": run_id * 10, "name": f"scan-evidence-{run_id}"}]},
+            )
+        if "/actions/artifacts/" in path and path.endswith("/zip"):
+            artifact_id = int(path.split("/actions/artifacts/")[1].split("/")[0])
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("run.txt", str(artifact_id // 10))
+            return httpx.Response(200, content=buf.getvalue())
+        if path.endswith("/actions/workflows/security-scan.yml/runs"):
+            # the branch filter is server-side: only `main` runs come back for branch=main
+            branch = request.url.params.get("branch")
+            runs = [
+                {"id": 900, "conclusion": "failure", "head_branch": "main", "head_sha": "a" * 40},
+                {"id": 901, "conclusion": "success", "head_branch": "main", "head_sha": "b" * 40},
+                {"id": 555, "conclusion": "success", "head_branch": "main", "head_sha": "c" * 40},
+                {"id": 777, "conclusion": "success", "head_branch": "other", "head_sha": "d" * 40},
+            ]
+            return httpx.Response(
+                200,
+                json={"workflow_runs": [r for r in runs if branch in (None, r["head_branch"])]},
+            )
+        return httpx.Response(404, json={"message": f"unexpected {request.method} {path}"})
+
+
+def test_baseline_evidence_uses_explicit_successful_base_run(tmp_path: Path) -> None:
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh, repo="Hunter-1298/superset", work_dir=tmp_path, compare_run_id=555, sleep=lambda s: None
+    )
+    run_id, root = runner._baseline_evidence()
+    assert run_id == 555 and root is not None
+    assert (root / "run.txt").read_text() == "555"
+    # the newer successful run 901 is skipped in favour of the explicit id, and the explicit id
+    # is resolved through the security-scan listing for the base branch, not trusted blindly
+    assert "GET /repos/Hunter-1298/superset/actions/runs/901/artifacts" not in fake.calls
+    assert any("/workflows/security-scan.yml/runs" in c for c in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("run_id", "reason"),
+    [
+        (900, "not a successful security-scan run (conclusion=failure)"),
+        (777, "not a security-scan run of main"),  # another branch
+        (123456, "not a security-scan run of main"),  # another workflow / unknown run
+    ],
+)
+def test_baseline_evidence_rejects_unusable_explicit_run(
+    tmp_path: Path, run_id: int, reason: str
+) -> None:
+    from hardening_loop.negative import BaselineError
+
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh,
+        repo="Hunter-1298/superset",
+        work_dir=tmp_path,
+        compare_run_id=run_id,
+        sleep=lambda s: None,
+    )
+    with pytest.raises(BaselineError, match=re.escape(reason)):
+        runner._baseline_evidence()
+    assert not any("/artifacts" in c for c in fake.calls)  # nothing downloaded
+    counts = runner._compare_counts("e" * 40)
+    assert counts["baseline_run_id"] is None
+    assert counts["failures"] == [f"baseline rejected: run {run_id} is {reason}"]
+
+
+def test_baseline_evidence_defaults_to_latest_successful_base_run(tmp_path: Path) -> None:
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh, repo="Hunter-1298/superset", work_dir=tmp_path, sleep=lambda s: None
+    )
+    run_id, root = runner._baseline_evidence()
+    assert run_id == 901 and root is not None
+    assert (root / "run.txt").read_text() == "901"
+    assert "GET /repos/Hunter-1298/superset/actions/runs/900/artifacts" not in fake.calls

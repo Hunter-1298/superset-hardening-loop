@@ -158,7 +158,8 @@
         <dl class="kv">
           <dt>Work item</dt><dd><a href="/issues/{{ wi.id }}">#{{ wi.id }} {{ wi.title }}</a></dd>
           <dt>State</dt><dd>{{ ui.state_badge(wi.state) }}</dd>
-          <dt>Verification</dt><dd>{{ (wi.verification_level|level_label).text }}</dd>
+          <dt>Lifecycle</dt><dd>{{ (wi.lifecycle_level|lifecycle_label).text }}</dd>
+          <dt>Verified depth</dt><dd>{{ (wi.verification_depth|depth_label).text }}</dd>
           <dt>ACU cap</dt><dd>{{ wi.acu_cap|num(0) }}</dd>
           <dt>Issue</dt><dd>{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>{% else %}<span class="muted">not opened yet</span>{% endif %}</dd>
           {% if wi.blocked_reason %}<dt>Blocked</dt><dd>{{ wi.blocked_reason|blocked_reason }}</dd>{% endif %}
@@ -172,7 +173,7 @@
         {% if prs %}
         <h3 class="sub mt">Pull requests</h3>
         <ul class="list-plain list-rows">
-          {% for p in prs %}<li><a href="{{ p.url }}" rel="noopener">#{{ p.number }}</a> · {{ (p.state|pr_state).text }} · {{ (p.verification_level|level_label).text }}</li>{% endfor %}
+          {% for p in prs %}<li><a href="{{ p.url }}" rel="noopener">#{{ p.number }}</a> · {{ (p.state|pr_state).text }} · {{ (p.lifecycle_level|lifecycle_label).text }} · {{ (p.verification_depth|depth_label).text }}</li>{% endfor %}
         </ul>
         {% endif %}
         {% else %}

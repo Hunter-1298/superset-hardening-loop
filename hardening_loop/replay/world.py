@@ -16,22 +16,39 @@ from sqlmodel import col, select
 from hardening_loop.config import Settings
 from hardening_loop.db import open_database, session_scope
 from hardening_loop.devin.enums import DevinStatus, DevinStatusDetail
-from hardening_loop.devin.fake import FakeDevin
+from hardening_loop.devin.fake import FakeDevin, FakeDevinError
+from hardening_loop.devin.protocol import ReviewStatus
 from hardening_loop.domain.enums import Kind, WorkItemState
 from hardening_loop.github.fake import FakeGitHub
 from hardening_loop.models.tables import (
     Event,
     Finding,
     PullRequest,
+    ScanIntake,
+    ScanRun,
     Session,
+    Sighting,
     WorkItem,
 )
 from hardening_loop.orchestrator.engine import Orchestrator, TickReport
 from hardening_loop.replay.synth import BASELINE_SHA, T0, SyntheticRun, ingest_synthetic
 
-REVIEW_CONTEXT = "devin-review"
 APPROVER = "Hunter-1298"
-DEFAULT_CHECKS = ("security-scan", "lean-smoke", "app-runs")
+# Check-run names as the fork's workflows report them (job names; matrix jobs carry their
+# values in parentheses). They cover the ladder rungs the fork can prove: L0 (check-python-deps,
+# build-image), L1 (lean-smoke), L2 (unit-tests), L3 (app-runs) and L4 (test-*).
+DEFAULT_CHECKS = (
+    "check-python-deps",
+    "build-image",
+    "scan-lean-raw",
+    "scan-lean-policy",
+    "lean-smoke",
+    "unit-tests (current)",
+    "app-runs",
+    "test-postgres",
+    "test-mysql",
+    "test-sqlite",
+)
 
 
 class ManualClock:
@@ -86,10 +103,10 @@ class World:
         self.clock = ManualClock()
         self.gh = FakeGitHub(main_head=BASELINE_SHA)
         self.devin = FakeDevin()
+        self.devin.head_resolver = self._pr_head
         overrides: dict[str, Any] = {
             "replay_mode": True,
             "data_dir": db_path.parent,
-            "devin_review_status_context": REVIEW_CONTEXT,
             "approver_logins": [APPROVER],
             "max_concurrent_sessions": 1,
             "retries_per_work_item": 2,
@@ -180,6 +197,33 @@ class World:
                 db.expunge(r)
             return rows
 
+    def scan_runs(self) -> list[ScanRun]:
+        with session_scope(self.engine) as db:
+            rows = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+            for r in rows:
+                db.expunge(r)
+            return rows
+
+    def sightings(self, finding_id: int) -> list[Sighting]:
+        with session_scope(self.engine) as db:
+            rows = list(
+                db.exec(
+                    select(Sighting)
+                    .where(Sighting.finding_id == finding_id)
+                    .order_by(col(Sighting.id))
+                ).all()
+            )
+            for r in rows:
+                db.expunge(r)
+            return rows
+
+    def scan_intakes(self) -> list[ScanIntake]:
+        with session_scope(self.engine) as db:
+            rows = list(db.exec(select(ScanIntake).order_by(col(ScanIntake.id))).all())
+            for r in rows:
+                db.expunge(r)
+            return rows
+
     def pr_row(self, wi_id: int) -> PullRequest | None:
         with session_scope(self.engine) as db:
             row = db.exec(select(PullRequest).where(PullRequest.work_item_id == wi_id)).first()
@@ -254,8 +298,19 @@ class World:
                 results[name] = "success"
         self.gh.set_checks(head, results)
 
-    def review_done(self, head: str, state: str = "success") -> None:
-        self.gh.set_status(head, REVIEW_CONTEXT, state, "Devin Review finished")
+    def _pr_head(self, pr_url: str) -> str | None:
+        number = int(pr_url.rsplit("/", 1)[1])
+        pr = self.gh.prs.get(number)
+        return pr.head_sha if pr else None
+
+    def review_done(self, head: str, status: ReviewStatus = ReviewStatus.completed) -> None:
+        """Devin finishes the review the controller triggered for `head`. Raises if the controller
+        never asked for one, so a scenario cannot fake its way past the review stage."""
+        for (url, sha_), _ in list(self.devin.reviews.items()):
+            if sha_ == head:
+                self.devin.finish_review(url, head, status)
+                return
+        raise FakeDevinError(f"controller never triggered a review of {head[:12]}")
 
     def human_approves_and_merges(self, wi: WorkItem, *, merge_label: str | None = None) -> str:
         assert wi.pr_number is not None
@@ -283,7 +338,6 @@ class World:
 __all__ = [
     "APPROVER",
     "DEFAULT_CHECKS",
-    "REVIEW_CONTEXT",
     "Check",
     "ManualClock",
     "ScenarioResult",

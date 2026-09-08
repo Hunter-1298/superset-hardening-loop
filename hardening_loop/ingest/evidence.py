@@ -192,6 +192,69 @@ def load_scan_job(path: Path) -> ScanJobEvidence:
     )
 
 
+# Each runtime job writes one verdict file the workflow attaches under `runtime/`; it names the
+# exact image the job started, so it is the proof that `run.job_results[job] == "success"` means
+# what it says. lean-smoke starts the production image, app-runs the ci image.
+RUNTIME_RECORDS: dict[str, tuple[str, ImageTarget]] = {
+    "lean-smoke": ("runtime/lean-smoke/lean-smoke.json", ImageTarget.lean),
+    "app-runs": ("runtime/app-runs/app-runs.json", ImageTarget.ci),
+}
+
+
+class RuntimeRecord(BaseModel):
+    """Verdict written by lean_smoke.sh / app_runs.py: the image that ran and whether it passed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    job: str
+    path: str  # relative to the bundle root, checksummed in manifest `files`
+    image_ref: str
+    passed: bool
+    failed_step: str | None
+    checks: dict[str, str]
+
+    @property
+    def digest(self) -> str:
+        return self.image_ref.rsplit("@", 1)[-1]
+
+
+def load_runtime_record(root: Path, job: str) -> RuntimeRecord:
+    """Parse the attached verdict for `job`; raises EvidenceError when it is absent or malformed."""
+    rel, _target = RUNTIME_RECORDS[job]
+    path = root / rel
+    if not path.is_file():
+        raise EvidenceError(f"{job}: no runtime record at {rel}")
+    try:
+        doc = json.loads(path.read_text())
+    except ValueError as exc:
+        raise EvidenceError(f"{rel}: not JSON ({exc})") from exc
+    if not isinstance(doc, dict):
+        raise EvidenceError(f"{rel}: not a JSON object")
+    image_ref, passed = doc.get("image_ref"), doc.get("passed")
+    checks = doc.get("checks")
+    if not isinstance(image_ref, str) or "@sha256:" not in image_ref:
+        raise EvidenceError(f"{rel}: image_ref {image_ref!r} is not a digest reference")
+    if not isinstance(passed, bool):
+        raise EvidenceError(f"{rel}: passed {passed!r} is not a boolean")
+    if not isinstance(checks, dict) or not all(isinstance(v, str) for v in checks.values()):
+        raise EvidenceError(f"{rel}: checks is not a name -> result map")
+    failed_step = doc.get("failed_step")
+    if failed_step is not None and not isinstance(failed_step, str):
+        raise EvidenceError(f"{rel}: failed_step {failed_step!r} is not a string")
+    if passed and failed_step is not None:
+        raise EvidenceError(f"{rel}: passed=true with failed_step {failed_step!r}")
+    if not passed and not failed_step:
+        raise EvidenceError(f"{rel}: passed=false without a failed_step")
+    return RuntimeRecord(
+        job=job,
+        path=rel,
+        image_ref=image_ref,
+        passed=passed,
+        failed_step=failed_step,
+        checks={str(k): v for k, v in checks.items()},
+    )
+
+
 class BaselineManifest(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -208,6 +271,7 @@ class BaselineManifest(BaseModel):
     jobs: dict[str, ScanJobEvidence]
     run: dict[str, Any] = Field(default_factory=dict)  # GitHub Actions run metadata, if any
     gates: dict[str, Any] = Field(default_factory=dict)  # per policy job gate.json, if any
+    runtime: dict[str, RuntimeRecord] = Field(default_factory=dict)  # attached verdicts, if any
 
     @property
     def lean_image_id(self) -> str:
@@ -237,6 +301,14 @@ def load_baseline(path: Path) -> BaselineManifest:
             )
         jobs[name] = job
 
+    # Only records the manifest lists (and `_verify_files` therefore checksummed) count; a file
+    # dropped into the tree without a manifest entry is ignored, not trusted.
+    runtime = {
+        job: load_runtime_record(path, job)
+        for job, (rel, _target) in RUNTIME_RECORDS.items()
+        if rel in manifest["files"]
+    }
+
     return BaselineManifest(
         path=path,
         source_repo=manifest["source_repo"],
@@ -251,6 +323,7 @@ def load_baseline(path: Path) -> BaselineManifest:
         jobs=jobs,
         run=dict(manifest.get("run") or {}),
         gates=dict(manifest.get("gates") or {}),
+        runtime=runtime,
     )
 
 

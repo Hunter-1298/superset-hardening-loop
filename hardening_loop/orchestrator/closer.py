@@ -106,8 +106,17 @@ def validate_closing_run(
     merge_sha: str | None,
     is_ancestor: AncestryFn,
     require_policy: bool,
+    superseded_by: ScanRun | None = None,
 ) -> RunValidity:
+    """Why `run` may not serve as closing evidence for `finding`; `superseded_by` is a run that
+    finished later and already spoke for the finding (reported or closed it), which makes this
+    older run's evidence about it worthless either way."""
     reasons: list[str] = []
+    if superseded_by is not None:
+        reasons.append(
+            f"run finished before {superseded_by.external_run_id}, the later evidence for this "
+            "finding"
+        )
     if run.source_repo != FORK_REPO:
         reasons.append(f"repo {run.source_repo} != {FORK_REPO}")
     if run.source_branch != REMEDIATION_BRANCH:

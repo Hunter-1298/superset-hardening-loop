@@ -18,7 +18,13 @@ from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
 from hardening_loop.dashboard.labels import blocked_reason_text
 from hardening_loop.db import open_database, session_scope
-from hardening_loop.domain.enums import Kind, Severity, VerificationLevel, WorkItemState
+from hardening_loop.domain.enums import (
+    Kind,
+    LifecycleLevel,
+    Severity,
+    VerificationDepth,
+    WorkItemState,
+)
 from hardening_loop.metrics import Metrics, compute_metrics
 from hardening_loop.models.tables import Finding, PullRequest, Session, WorkItem
 from hardening_loop.orchestrator.closer import CLOSING_FINDING_STATES
@@ -155,11 +161,11 @@ def test_acu_and_cost_per_verified_issue(metrics: Metrics, engine: Engine) -> No
     assert no_price.cost.acu_per_verified_issue == metrics.cost.acu_per_verified_issue
 
 
-def test_highest_verification_level_per_pr(metrics: Metrics, engine: Engine) -> None:
+def test_highest_lifecycle_level_per_pr(metrics: Metrics, engine: Engine) -> None:
     with session_scope(engine) as db:
         prs = db.exec(select(PullRequest)).all()
     assert len(metrics.pr_levels) == len(prs) == 5
-    assert {p.level for p in metrics.pr_levels} == {VerificationLevel.rescan_verified}
+    assert {p.level for p in metrics.pr_levels} == {LifecycleLevel.rescan_verified}
     by_wi = {p.work_item_id: p for p in metrics.pr_levels}
     assert by_wi[2].first_head_checks_green is False and by_wi[2].retries_used == 1
     assert all(p.first_head_checks_green for wi, p in by_wi.items() if wi != 2)
@@ -213,7 +219,8 @@ def test_overview_shows_required_metrics(client: TestClient, metrics: Metrics) -
         "Cost per verified issue",
         "Needs attention",
         "Work items by state",
-        "Verification level per PR",
+        "Pull requests by lifecycle and depth",
+        "Highest verified depth per pull request",
         "Recent scans",
         "Recent remediation activity",
         "Findings by kind",
@@ -470,9 +477,7 @@ def test_work_item_filters_are_server_side(client: TestClient, engine: Engine) -
         by_state = {i for i, w in items if w.state == WorkItemState.needs_human}
         by_sev = {i for i, w in items if w.severity == Severity.high}
         by_kind = {i for i, w in items if w.kind == Kind.container_hardening}
-        by_level = {
-            i for i, w in items if w.verification_level == VerificationLevel.rescan_verified
-        }
+        by_level = {i for i, w in items if w.lifecycle_level == LifecycleLevel.rescan_verified}
         paramiko = {i for i, w in items if "paramiko" in w.title.lower()}
         queue = {
             i
@@ -509,6 +514,65 @@ def test_work_item_filters_are_server_side(client: TestClient, engine: Engine) -
     # search text is escaped, never reflected raw
     html = client.get("/issues?q=%3Cscript%3Ealert(1)%3C/script%3E").text
     assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html
+
+
+def test_lifecycle_and_depth_are_shown_and_filtered_separately(
+    client: TestClient, engine: Engine
+) -> None:
+    """Lifecycle (how far the fix travelled) and verification depth (what its head proved) are
+    independent columns and filters; a verified item with no PR has full lifecycle and no depth."""
+    with session_scope(engine) as db:
+        items = db.exec(select(WorkItem)).all()
+        all_ids = {w.id or 0 for w in items}
+        with_depth = {
+            w.id or 0 for w in items if w.verification_depth is VerificationDepth.db_subset
+        }
+        verified_no_pr = {
+            w.id or 0
+            for w in items
+            if w.lifecycle_level is LifecycleLevel.rescan_verified and w.verification_depth is None
+        }
+        rungs = {p.work_item_id: dict(p.depth_rungs) for p in db.exec(select(PullRequest)).all()}
+    assert with_depth and verified_no_pr
+
+    def ids(path: str) -> set[int]:
+        html = client.get(path).text
+        rows = html[html.index("<tbody") :]
+        return {int(i) for i in re.findall(r'href="/issues/(\d+)"', rows)}
+
+    for alias in ("db_subset", "4", "L4"):
+        assert ids(f"/issues?depth={alias}") == with_depth, alias
+    assert ids("/issues?level=rescan_verified") >= with_depth | verified_no_pr
+    assert ids("/issues?level=rescan_verified&depth=L4") == with_depth
+    html = client.get("/issues?depth=L4").text
+    assert "Depth: <strong>L4 Database subset</strong>" in html
+    assert client.get("/issues?depth=L9").status_code == 422
+    assert client.get("/issues?depth=bogus").status_code == 422
+    assert ids("/issues?q=&state=&severity=&kind=&level=&depth=") == all_ids
+
+    wi_id = min(with_depth)
+    page = client.get(f"/issues/{wi_id}").text
+    assert "Verified depth" in page and "L4 Database subset" in page
+    assert "Rungs proven by complete CI evidence on head" in page
+    for rung_text in (
+        "L0 Requirements and pip",
+        "L3 Immutable-image runtime",
+        "L5 Playwright",
+        "L6 Canary",
+    ):
+        assert rung_text in page
+    # the L3 rung is partial (no screenshot check exists) and L5/L6 have no evidence at all
+    assert "Partial" in page and "No evidence" in page
+    assert "screenshot" in page
+    assert rungs[wi_id]["immutable_image_runtime"] == "partial"
+
+    bare = client.get(f"/issues/{min(verified_no_pr)}").text
+    assert "Rescan verified" in bare and "Nothing proven yet" in bare
+
+    md = client.get("/report.md").text
+    assert "| Lifecycle | Depth | Rungs |" in md
+    assert "L4 database subset | L0=passed L1=passed L2=passed L3=partial L4=passed" in md
+    assert "L5=unavailable L6=unavailable" in md
 
 
 def test_work_items_table_structure(client: TestClient) -> None:
@@ -610,8 +674,8 @@ def test_report_deltas_outcomes_and_costs(engine: Engine, settings: Settings) ->
     assert body.estimated_cost_total_usd == pytest.approx(body.acu_total * ACU_COST)
     blocked = [w for w in body.work_items if w.blocked_reason]
     assert blocked and blocked[0].state == "needs_human"
-    assert {w.verification_label for w in body.work_items if w.state == "verified"} == {
-        "L6 rescan_verified"
+    assert {w.lifecycle_label for w in body.work_items if w.state == "verified"} == {
+        "rescan_verified"
     }
 
 
@@ -629,7 +693,7 @@ def test_report_compares_dependencies_with_upstream_master(
     assert pillow.upstream_master_version == "12.3.0"
     assert pillow.relation_to_upstream == "below"
     assert pillow.min_fixed_version == "10.3.0"
-    assert pillow.retries_used == 1 and pillow.verification_label == "L6 rescan_verified"
+    assert pillow.retries_used == 1 and pillow.lifecycle_label == "rescan_verified"
     assert rows["requests"].relation_to_upstream == "no_target"
 
 
@@ -637,7 +701,7 @@ def test_report_regression_keeps_package_and_lineage(engine: Engine, settings: S
     body = build_report_for(engine, settings, NOW)
     crypto = [d for d in body.dependencies if d.package == "cryptography"]
     assert len(crypto) == 2, "verified original plus its regression row"
-    verified = next(d for d in crypto if d.verification_label == "L6 rescan_verified")
+    verified = next(d for d in crypto if d.lifecycle_label == "rescan_verified")
     regression = next(d for d in crypto if d.state == "queued")
     assert regression.work_item_id != verified.work_item_id
     for row in crypto:

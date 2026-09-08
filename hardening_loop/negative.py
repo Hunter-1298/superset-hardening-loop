@@ -46,6 +46,10 @@ CHECK_GATE = "policy-gate"
 CHECK_SMOKE = "lean-smoke"
 CHECK_APP_RUNS = "app-runs"
 CHECK_MANIFEST = "scan-manifest"
+# When `build-image` fails, the scan matrix is never expanded: GitHub reports one skipped check
+# run under the literal template name instead of one per leg.
+CHECK_SCAN_MATRIX_TEMPLATE = "scan-${{ matrix.target }}-${{ matrix.mode }}"
+SCAN_MATRIX_LEGS: tuple[str, ...] = (CHECK_SCAN_LEAN_RAW, CHECK_SCAN_LEAN_POLICY, CHECK_SCAN_CI_RAW)
 ALL_CHECKS: tuple[str, ...] = (
     CHECK_BUILD,
     CHECK_IGNORE,
@@ -64,6 +68,10 @@ EVIDENCE_ARTIFACT_PREFIX = "scan-evidence-"
 MARKER = "ci-negative"
 REGRESSION_PIN = "urllib3==1.26.4"  # CVE-2021-33503 + CVE-2023-43804 (HIGH), well below main's pin
 _BASE_IN_LINE = "urllib3>=2.6.3,<3.0.0"
+
+
+class BaselineError(RuntimeError):
+    """The explicit dependency-regression baseline run is not usable."""
 
 
 class MutationError(RuntimeError):
@@ -287,10 +295,30 @@ class CaseReport:
         }
 
 
+def expand_matrix(runs: list[CheckRun]) -> list[CheckRun]:
+    """Replace a skipped, unexpanded scan-matrix check run with one skipped run per leg so the
+    expectation table can be evaluated by leg name. Any other conclusion under the template name
+    is left as-is (and therefore reported as a missing leg)."""
+    out: list[CheckRun] = []
+    for run in runs:
+        if (
+            run.name == CHECK_SCAN_MATRIX_TEMPLATE
+            and run.status == "completed"
+            and run.conclusion == "skipped"
+        ):
+            out.extend(
+                CheckRun(name=leg, status=run.status, conclusion=run.conclusion)
+                for leg in SCAN_MATRIX_LEGS
+            )
+        else:
+            out.append(run)
+    return out
+
+
 def evaluate(case: NegativeCase, runs: list[CheckRun]) -> tuple[dict[str, str | None], list[str]]:
     """Compare completed check runs with the expectation table. Missing expected checks fail."""
     by_name: dict[str, CheckRun] = {}
-    for run in runs:
+    for run in expand_matrix(runs):
         prev = by_name.get(run.name)
         if prev is None or (prev.status != "completed" and run.status == "completed"):
             by_name[run.name] = run
@@ -308,7 +336,7 @@ def evaluate(case: NegativeCase, runs: list[CheckRun]) -> tuple[dict[str, str | 
 
 
 def all_expected_completed(case: NegativeCase, runs: list[CheckRun]) -> bool:
-    names = {r.name for r in runs if r.status == "completed"}
+    names = {r.name for r in expand_matrix(runs) if r.status == "completed"}
     return all(name in names for name in case.expect)
 
 
@@ -340,6 +368,7 @@ class NegativeRunner:
         timeout_seconds: float = 90 * 60,
         work_dir: Path,
         sleep: Callable[[float], None] = time.sleep,
+        compare_run_id: int | None = None,
     ) -> None:
         self.gh = gh
         self.repo = repo
@@ -348,6 +377,7 @@ class NegativeRunner:
         self.timeout_seconds = timeout_seconds
         self.work_dir = work_dir
         self.sleep = sleep
+        self.compare_run_id = compare_run_id
 
     def run(self, case_name: str, *, branch: str, head_sha: str, run_url: str) -> CaseReport:
         """Branch is already pushed by the workflow (git needs a real checkout for the dependency
@@ -408,36 +438,64 @@ class NegativeRunner:
 
     def _evidence_for(self, head_sha: str) -> Path | None:
         for run in self.gh.list_workflow_runs(self.repo, SECURITY_SCAN_WORKFLOW, head_sha=head_sha):
-            if run.get("head_sha") != head_sha:
+            if run.head_sha != head_sha:
                 continue
-            for artifact in self.gh.list_run_artifacts(self.repo, int(run["id"])):
-                if str(artifact["name"]).startswith(EVIDENCE_ARTIFACT_PREFIX):
-                    dest = self.work_dir / "evidence" / str(run["id"])
-                    return self.gh.download_artifact(self.repo, int(artifact["id"]), dest)
+            for artifact in self.gh.list_run_artifacts(self.repo, run.id):
+                if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+                    dest = self.work_dir / "evidence" / str(run.id)
+                    return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
-    def _latest_main_evidence(self) -> Path | None:
+    def _baseline_evidence(self) -> tuple[int | None, Path | None]:
+        """Evidence to compare the regressed scan against: an explicit run id when given, else
+        the latest successful `security-scan` run on the base branch. Either way the run must be
+        a successful `security-scan` run of the base branch; an explicit id that is not is
+        rejected rather than compared against."""
         for run in self.gh.list_workflow_runs(
             self.repo, SECURITY_SCAN_WORKFLOW, branch=self.base_branch
         ):
-            if run.get("conclusion") != "success":
+            if self.compare_run_id is not None and run.id != self.compare_run_id:
                 continue
-            for artifact in self.gh.list_run_artifacts(self.repo, int(run["id"])):
-                if str(artifact["name"]).startswith(EVIDENCE_ARTIFACT_PREFIX):
-                    dest = self.work_dir / "evidence" / f"main-{run['id']}"
-                    return self.gh.download_artifact(self.repo, int(artifact["id"]), dest)
+            if run.conclusion != "success":
+                if self.compare_run_id is not None:
+                    raise BaselineError(
+                        f"run {run.id} is not a successful security-scan run"
+                        f" (conclusion={run.conclusion})"
+                    )
+                continue
+            root = self._evidence_for_run(run.id, "main")
+            if root is not None or self.compare_run_id is not None:
+                return run.id, root
+        if self.compare_run_id is not None:
+            raise BaselineError(
+                f"run {self.compare_run_id} is not a security-scan run of {self.base_branch}"
+            )
+        return None, None
+
+    def _evidence_for_run(self, run_id: int, label: str) -> Path | None:
+        for artifact in self.gh.list_run_artifacts(self.repo, run_id):
+            if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+                dest = self.work_dir / "evidence" / f"{label}-{run_id}"
+                return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
     def _compare_counts(self, head_sha: str) -> dict[str, Any]:
         failures: list[str] = []
         pr_root = self._evidence_for(head_sha)
-        main_root = self._latest_main_evidence()
-        out: dict[str, Any] = {"failures": failures}
+        try:
+            baseline_run_id, main_root = self._baseline_evidence()
+        except BaselineError as exc:
+            return {"failures": [f"baseline rejected: {exc}"], "baseline_run_id": None}
+        out: dict[str, Any] = {"failures": failures, "baseline_run_id": baseline_run_id}
         if pr_root is None:
             failures.append("no scan-evidence artifact for the PR head")
             return out
         if main_root is None:
-            failures.append(f"no successful security-scan run with evidence on {self.base_branch}")
+            failures.append(
+                f"no scan-evidence artifact for run {self.compare_run_id}"
+                if self.compare_run_id is not None
+                else f"no successful security-scan run with evidence on {self.base_branch}"
+            )
             return out
         try:
             pr_counts, main_counts = raw_counts(pr_root), raw_counts(main_root)

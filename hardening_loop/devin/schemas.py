@@ -8,7 +8,9 @@ trusted for state: only GitHub Checks decide.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -254,6 +256,24 @@ def schema_for(kind: Kind) -> dict[str, Any]:
         "properties": props,
         "allOf": deepcopy(_CORE_RULES) + deepcopy(_EXTENSION_RULES[kind]),
     }
+
+
+def export_schemas(directory: Path, *, write: bool) -> list[str]:
+    """Mirror `schema_for(kind)` into `<directory>/<playbook_slug>.json`, the committed copies a
+    reviewer can read without importing Python. Returns the file names that were (or, with
+    `write=False`, would be) rewritten, so CI can fail when the export is stale."""
+    stale: list[str] = []
+    for kind in Kind:
+        path = directory / f"{kind.playbook_slug}.json"
+        want = json.dumps(schema_for(kind), indent=2, sort_keys=True) + "\n"
+        have = path.read_text(encoding="utf-8") if path.exists() else None
+        if have == want:
+            continue
+        stale.append(path.name)
+        if write:
+            directory.mkdir(parents=True, exist_ok=True)
+            path.write_text(want, encoding="utf-8")
+    return stale
 
 
 _VALIDATORS: dict[Kind, Draft202012Validator] = {}

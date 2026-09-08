@@ -16,6 +16,7 @@ import logging
 import secrets
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.engine import Engine
@@ -23,10 +24,12 @@ from sqlmodel import select
 
 from hardening_loop.config import BASELINE_SHA, Settings
 from hardening_loop.db import open_database, session_scope
+from hardening_loop.devin.assets import load_assets, persisted_assets
 from hardening_loop.devin.fake import FakeDevin
 from hardening_loop.devin.rest import DevinRest
 from hardening_loop.github.fake import FakeGitHub
 from hardening_loop.github.rest import GitHubRest
+from hardening_loop.metrics import snapshot_metrics
 from hardening_loop.models.tables import ScanRun
 from hardening_loop.orchestrator.engine import Orchestrator, TickReport
 from hardening_loop.orchestrator.launch import LaunchPreview, LaunchResult
@@ -69,11 +72,26 @@ def build_live_orchestrator(settings: Settings, *, engine: Engine | None = None)
         raise OperatorConfigError(
             "HL_OPERATOR_LOGIN (the GitHub login recorded on every launch) is required"
         )
+    engine = engine or open_database(settings.database_path)
+    assets = persisted_assets(engine, load_assets(settings.repo_root))
+    if not assets.ok:
+        raise OperatorConfigError(
+            "Devin assets are not in sync with the committed playbooks/knowledge "
+            f"(missing={assets.missing}, drifted={assets.drifted}); "
+            "run `hardening-loop assets sync`"
+        )
     gh = GitHubRest(settings.github_token, api_base=settings.github_api_base)
     devin = DevinRest(
         settings.devin_api_key, settings.devin_org_id, api_base=settings.devin_api_base
     )
-    return Orchestrator(engine or open_database(settings.database_path), gh, devin, settings)
+    return Orchestrator(
+        engine,
+        gh,
+        devin,
+        settings,
+        playbook_ids=assets.playbook_ids,
+        knowledge_ids=assets.knowledge_ids,
+    )
 
 
 def build_doubles_orchestrator(settings: Settings, *, engine: Engine | None = None) -> Orchestrator:
@@ -123,8 +141,17 @@ class OperatorContext:
             return self.orchestrator.launch(work_item_id, operator=self.login)
 
     def tick(self) -> TickReport:
+        """One control-loop iteration followed by a persisted metrics snapshot, so the trend
+        survives restarts even when nothing else changed."""
         with self.lock:
-            return self.orchestrator.tick(auto_dispatch=self.auto_dispatch)
+            report = self.orchestrator.tick(auto_dispatch=self.auto_dispatch)
+            snapshot_metrics(
+                self.engine,
+                trigger="tick",
+                acu_cost_usd=self.orchestrator.settings.acu_cost_usd,
+                now=datetime.now(UTC),
+            )
+            return report
 
     @classmethod
     def for_doubles(cls, orchestrator: Orchestrator, *, login: str) -> OperatorContext:

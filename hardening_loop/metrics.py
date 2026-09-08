@@ -15,17 +15,20 @@ from sqlmodel import col, select
 from hardening_loop.db import session_scope
 from hardening_loop.domain.enums import (
     ACTIVE_WORK_ITEM_STATES,
+    CheckStatus,
     FindingState,
     Kind,
+    LifecycleLevel,
     ScanMode,
     ScanRunStatus,
     Severity,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 from hardening_loop.gate import GateVerdict, gate_verdict
 from hardening_loop.models.tables import (
     Finding,
+    MetricsSnapshot,
     PullRequest,
     ScanRun,
     Session,
@@ -93,14 +96,32 @@ class Cost(BaseModel):
 
 
 class PRLevel(BaseModel):
+    """Lifecycle progress and verification depth of one work item's PR. `level` is how far the
+    fix travelled (PR -> CI -> review -> approval -> merge -> rescan); `depth` is the highest
+    L0-L6 rung its current head proved with complete check evidence, None when nothing has."""
+
     work_item_id: int
     kind: str
     pr_url: str
     level: int
     level_name: str
+    depth: int | None
+    depth_name: str | None
+    depth_rungs: dict[str, str]
     first_head_checks_green: bool | None
     retries_used: int
     state: str
+
+
+class DepthSummary(BaseModel):
+    """Verification depth across PRs: how many PR heads hold each rung as their highest, and
+    how many rungs are only `partial` or `unavailable` (evidence gaps, never counted as passed)."""
+
+    highest_by_depth: dict[str, int]
+    prs_without_depth: int
+    partial_rungs: int
+    unavailable_rungs: int
+    failed_rungs: int
 
 
 class Throughput(BaseModel):
@@ -125,6 +146,7 @@ class Metrics(BaseModel):
     timing_by_kind: dict[str, Timing]
     cost: Cost
     pr_levels: list[PRLevel]
+    depth: DepthSummary
     throughput: Throughput
     retries_total: int
     active_sessions: int
@@ -137,21 +159,21 @@ class Metrics(BaseModel):
 
 
 def _counts_by_severity(engine: Engine, run_id: int, mode: ScanMode) -> dict[str, int]:
-    """Findings present in `run_id` for `mode`, counted once per finding (not per scanner)."""
+    """Findings present in `run_id` for `mode`, counted once per finding (not per scanner) at the
+    highest severity any scanner recorded for it in that run. The sightings' own severities are
+    used, not the finding's, so a run's totals do not change when a later run rescores it."""
     with session_scope(engine) as db:
-        ids = set(
-            db.exec(
-                select(Sighting.finding_id).where(
-                    Sighting.scan_run_id == run_id, Sighting.mode == mode, col(Sighting.present)
-                )
-            ).all()
-        )
-        severities = (
-            db.exec(select(Finding.severity).where(col(Finding.id).in_(list(ids)))).all()
-            if ids
-            else []
-        )
-    c: Counter[str] = Counter(str(Severity(s).value) for s in severities)
+        rows = db.exec(
+            select(Sighting.finding_id, Sighting.severity).where(
+                Sighting.scan_run_id == run_id, Sighting.mode == mode, col(Sighting.present)
+            )
+        ).all()
+    highest: dict[int, Severity] = {}
+    for fid, sev in rows:
+        severity = Severity(sev) if sev is not None else Severity.unknown
+        if fid not in highest or severity.rank > highest[fid].rank:
+            highest[fid] = severity
+    c: Counter[str] = Counter(s.value for s in highest.values())
     return {s.value: c.get(s.value, 0) for s in Severity}
 
 
@@ -243,7 +265,13 @@ def _day(ts: datetime | None) -> str | None:
 
 def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime) -> Metrics:
     with session_scope(engine) as db:
-        runs = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+        runs = list(
+            db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at), col(ScanRun.ingested_at), col(ScanRun.id)
+                )
+            ).all()
+        )
         findings = list(db.exec(select(Finding)).all())
         items = list(db.exec(select(WorkItem).order_by(col(WorkItem.id))).all())
         prs = list(db.exec(select(PullRequest)).all())
@@ -313,8 +341,11 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
             work_item_id=w.id or 0,
             kind=w.kind.slug,
             pr_url=w.pr_url or "",
-            level=int(w.verification_level),
-            level_name=VerificationLevel(w.verification_level).name,
+            level=int(w.lifecycle_level),
+            level_name=LifecycleLevel(w.lifecycle_level).name,
+            depth=None if w.verification_depth is None else int(w.verification_depth),
+            depth_name=None if w.verification_depth is None else w.verification_depth.name,
+            depth_rungs=dict(pr_by_wi[w.id or -1].depth_rungs),
             first_head_checks_green=pr_by_wi[w.id or -1].first_head_checks_green,
             retries_used=w.retries_used,
             state=w.state.value,
@@ -322,6 +353,16 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         for w in items
         if (w.id or -1) in pr_by_wi
     ]
+    rung_values = [v for lv in pr_levels for v in lv.depth_rungs.values()]
+    depth = DepthSummary(
+        highest_by_depth={
+            d.name: sum(1 for lv in pr_levels if lv.depth_name == d.name) for d in VerificationDepth
+        },
+        prs_without_depth=sum(1 for lv in pr_levels if lv.depth is None),
+        partial_rungs=rung_values.count(CheckStatus.partial.value),
+        unavailable_rungs=rung_values.count(CheckStatus.unavailable.value),
+        failed_rungs=rung_values.count(CheckStatus.failed.value),
+    )
 
     throughput = Throughput(
         verified_per_day=dict(
@@ -340,7 +381,7 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         for r in runs
         if r.source_branch == "main" and r.status is ScanRunStatus.complete and not r.is_baseline
     ] or [r for r in runs if r.source_branch == "main"]
-    latest_main = main_runs[-1] if main_runs else None
+    latest_main = max(main_runs, key=ScanRun.chronology) if main_runs else None
     gate_ready = (
         next(s for s in run_summaries if s.id == latest_main.id).gate["ready_for_enforce"]
         if latest_main is not None
@@ -363,6 +404,7 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         timing_by_kind={k.slug: _timing(verified_by_kind.get(k.slug, [])) for k in Kind},
         cost=cost,
         pr_levels=pr_levels,
+        depth=depth,
         throughput=throughput,
         retries_total=sum(w.retries_used for w in items),
         active_sessions=sum(1 for w in items if w.state in ACTIVE_WORK_ITEM_STATES),
@@ -372,6 +414,47 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         gate_ready_for_enforce=bool(gate_ready) if gate_ready is not None else None,
         latest_main_run_id=latest_main.id if latest_main else None,
     )
+
+
+# --------------------------------------------------------------------------- persisted snapshots
+
+
+def snapshot_metrics(
+    engine: Engine, *, trigger: str, acu_cost_usd: float | None, now: datetime
+) -> MetricsSnapshot:
+    """Compute the current metrics and persist them as one `metrics_snapshots` row. The headline
+    columns are denormalized for cheap trend queries; `body` keeps the full `Metrics` payload."""
+    m = compute_metrics(engine, acu_cost_usd=acu_cost_usd, now=now)
+    row = MetricsSnapshot(
+        taken_at=now,
+        trigger=trigger,
+        latest_main_run_id=m.latest_main_run_id,
+        open_high_critical=m.open_high_critical,
+        needs_human=m.needs_human,
+        active_sessions=m.active_sessions,
+        verified_prs=m.cost.verified_items,
+        acus_total=m.cost.acu_total,
+        cost_usd_total=m.cost.estimated_cost_total_usd,
+        body=m.model_dump(mode="json"),
+    )
+    with session_scope(engine) as db:
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        db.expunge(row)
+    return row
+
+
+def metrics_history(engine: Engine, *, limit: int = 200) -> list[MetricsSnapshot]:
+    """Newest-first persisted snapshots (headline columns only are meant for charts; `body` is
+    the full payload of each)."""
+    with session_scope(engine) as db:
+        rows = db.exec(
+            select(MetricsSnapshot).order_by(col(MetricsSnapshot.id).desc()).limit(limit)
+        ).all()
+        for r in rows:
+            db.expunge(r)
+        return list(rows)
 
 
 __all__ = [
@@ -385,8 +468,10 @@ __all__ = [
     "Throughput",
     "Timing",
     "compute_metrics",
+    "metrics_history",
     "policy_counts_by_severity",
     "raw_counts_by_severity",
     "run_gate",
+    "snapshot_metrics",
     "summarize_run",
 ]

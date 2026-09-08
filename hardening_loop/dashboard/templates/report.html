@@ -89,7 +89,8 @@
       <th scope="col">{{ comparison_branch }}</th>
       <th scope="col">Compared with upstream</th>
       <th scope="col">State</th>
-      <th scope="col">Verification</th>
+      <th scope="col">Lifecycle</th>
+      <th scope="col">Depth</th>
       <th scope="col" class="num">ACU</th>
       <th scope="col" class="num">Retries</th>
       <th scope="col">Links</th>
@@ -103,7 +104,8 @@
       <td class="mono">{{ d.upstream_master_version or "—" }}</td>
       <td>{{ ui.badge(d.relation_to_upstream|relation_label) }}</td>
       <td>{{ ui.state_badge(d.state) }}</td>
-      <td>{{ ui.level_badge(d.verification_level) }}</td>
+      <td>{{ ui.level_badge(d.lifecycle_level) }}</td>
+      <td>{{ d.verification_depth|depth_code }}</td>
       <td class="num">{{ d.acus|num }}</td>
       <td class="num">{{ d.retries_used }}</td>
       <td>{% if d.pr_url %}{{ ui.external_link(d.pr_url, "Pull request") }}{% else %}<span class="muted">—</span>{% endif %}{% if d.blocked_reason %}<span class="secondary">{{ d.blocked_reason|blocked_reason }}</span>{% endif %}</td>
@@ -171,7 +173,8 @@
         <th scope="col" class="w-title">Work item</th>
         <th scope="col">Kind</th>
         <th scope="col">State</th>
-        <th scope="col">Verification</th>
+        <th scope="col">Lifecycle</th>
+        <th scope="col">Depth</th>
         <th scope="col" class="num">ACU</th>
         <th scope="col" class="num">Cost</th>
         <th scope="col" class="num">Retries</th>
@@ -184,7 +187,8 @@
         <td class="w-title"><a class="primary" href="/issues/{{ w.work_item_id }}">{{ w.title }}</a><span class="secondary mono">#{{ w.work_item_id }}</span>{% if w.blocked_reason %}<span class="secondary">{{ w.blocked_reason|blocked_reason }}</span>{% endif %}</td>
         <td>{{ ui.kind_badge(w.kind) }}</td>
         <td>{{ ui.state_badge(w.state) }}</td>
-        <td>{{ ui.level_badge(w.verification_level) }}</td>
+        <td>{{ ui.level_badge(w.lifecycle_level) }}</td>
+        <td>{{ ui.depth_badge(w.verification_depth) }}</td>
         <td class="num">{{ w.acus|num }}<span class="secondary">cap {{ w.acu_cap|num }}</span></td>
         <td class="num">{{ w.estimated_cost_usd|money }}</td>
         <td class="num">{{ w.retries_used }}</td>

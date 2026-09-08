@@ -48,7 +48,6 @@ class Settings(BaseSettings):
     review_timeout_minutes: int = Field(default=30, ge=1)
     acu_cost_usd: float | None = None
     approver_logins: list[str] = ["Hunter-1298"]
-    devin_review_status_context: str | None = None  # discovered by `doctor`, never assumed
     # Check names that must be green on the PR head. Empty = every check run present must pass.
     required_check_names: list[str] = []
     max_dispatch_failures: int = Field(default=3, ge=1)
@@ -62,6 +61,9 @@ class Settings(BaseSettings):
     operator_mode: bool = False
     operator_login: str | None = None
     auto_dispatch: bool = False
+    # With auto-dispatch off, `auto_open_issues=False` also stops the loop from opening a tracking
+    # issue for every queued work item; the issue is opened when the item is launched instead.
+    auto_open_issues: bool = True
 
     # Location of the committed `fixtures/` tree (baseline scan evidence, source snapshots).
     # Defaults to the checkout root for an editable install; the image sets HL_REPO_ROOT=/app.

@@ -62,4 +62,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+tmp_path_retention_policy = "failed"
 filterwarnings = ["error::DeprecationWarning:hardening_loop.*"]

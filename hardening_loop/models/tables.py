@@ -10,19 +10,23 @@ from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
 from hardening_loop.domain.enums import (
+    CheckSource,
+    CheckStatus,
     Ecosystem,
     FindingState,
     GateMode,
     ImageTarget,
+    IntakeStatus,
     Kind,
     Layer,
+    LifecycleLevel,
     Risk,
     ScanMode,
     Scanner,
     ScanRunStatus,
     Severity,
     Trigger,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 
@@ -78,6 +82,47 @@ class ScanRun(SQLModel, table=True):
     finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     ingested_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     is_baseline: bool = False
+    # GitHub Actions run metadata from the evidence manifest (url, workflow_sha, job_results, ...).
+    workflow: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    # When the orchestrator evaluated this run as closing evidence (closure, regressions, drift).
+    # NULL means the evaluation is still owed, however the run got here (poll, CLI, crash window).
+    closure_applied_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
+
+    def chronology(self) -> tuple[datetime, datetime, int]:
+        """Sort key placing runs in the order the scans finished, not the order the controller
+        ingested them (a backlog is drained newest first). Runs without a finish time sort first,
+        like NULLs in an ascending SQL `ORDER BY`."""
+        return (
+            self.finished_at or datetime.min.replace(tzinfo=UTC),
+            self.ingested_at,
+            self.id or 0,
+        )
+
+
+class ScanIntake(SQLModel, table=True):
+    """One attempt to bring a completed fork `security-scan` run into the controller. Every run
+    the poller sees gets exactly one row, so a rejected bundle stays visible with its reasons and
+    is never silently retried or silently skipped."""
+
+    __tablename__ = "scan_intakes"
+    id: int | None = Field(default=None, primary_key=True)
+    external_run_id: str = Field(index=True, unique=True)
+    source_repo: str
+    workflow_run_id: int
+    run_attempt: int
+    head_branch: str | None = None
+    head_sha: str | None = None
+    conclusion: str | None = None
+    url: str | None = None
+    artifact_id: int | None = None
+    artifact_name: str | None = None
+    artifact_digest: str | None = None  # digest GitHub reports for the artifact, when it does
+    bundle_sha256: str | None = None  # sha256 of the downloaded zip
+    bundle_path: str | None = None
+    status: IntakeStatus
+    reasons: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    scan_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
+    observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class ScanJob(SQLModel, table=True):
@@ -200,7 +245,9 @@ class WorkItem(SQLModel, table=True):
     pr_url: str | None = None
     pr_head_sha: str | None = None
     merge_sha: str | None = None
-    verification_level: VerificationLevel = VerificationLevel.none
+    lifecycle_level: LifecycleLevel = LifecycleLevel.none
+    # highest depth rung fully passed on the current PR head; None until CI proves one
+    verification_depth: VerificationDepth | None = None
     blocked_reason: str | None = None
     human_resolution: str | None = None  # disposition:approved | disagreement:resolved
     dispatch_failures: int = 0
@@ -260,8 +307,13 @@ class PullRequest(SQLModel, table=True):
     first_head_checks_green: bool | None = None
     diff_policy_ok: bool | None = None
     diff_policy_violations: list[str] = Field(default_factory=list, sa_column=Column(JSON))
-    verification_level: VerificationLevel = VerificationLevel.pr_opened
+    lifecycle_level: LifecycleLevel = LifecycleLevel.pr_opened
+    verification_depth: VerificationDepth | None = None
+    # rung name -> CheckStatus value for the current head, so `partial`/`unavailable` are visible
+    depth_rungs: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
     review_status: str | None = None
+    review_id: str | None = None
+    review_head_sha: str | None = None
     review_comment_count: int = 0
     approved_by: str | None = None
     opened_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
@@ -278,6 +330,28 @@ class PRCheck(SQLModel, table=True):
     name: str
     status: str  # queued | in_progress | completed
     conclusion: str | None = None
+    url: str | None = None
+    observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+
+
+class VerificationCheck(SQLModel, table=True):
+    """One ladder component evaluated on one PR head. Unavailable components are stored too,
+    so a rung can never look passed because its evidence was simply missing."""
+
+    __tablename__ = "verification_checks"
+    __table_args__ = (
+        UniqueConstraint(
+            "pull_request_id", "head_sha", "source", "name", name="uq_verification_check"
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    pull_request_id: int = Field(foreign_key="pull_requests.id", index=True)
+    head_sha: str
+    depth: VerificationDepth
+    name: str
+    source: CheckSource
+    status: CheckStatus
+    detail: str = ""
     url: str | None = None
     observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
@@ -329,3 +403,39 @@ class FixtureMeta(SQLModel, table=True):
     captured_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     manifest: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     sha256sums_verified: bool = False
+
+
+class MetricsSnapshot(SQLModel, table=True):
+    """`compute_metrics()` output captured at a point in time (every operator tick, `metrics
+    snapshot`, end of replay) so throughput, cost and verification trends survive restarts and
+    can be compared across runs instead of being recomputed from whatever the DB holds now."""
+
+    __tablename__ = "metrics_snapshots"
+    id: int | None = Field(default=None, primary_key=True)
+    taken_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    trigger: str
+    latest_main_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
+    open_high_critical: int
+    needs_human: int
+    active_sessions: int
+    verified_prs: int
+    acus_total: float
+    cost_usd_total: float | None = None
+    body: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+
+class DevinAsset(SQLModel, table=True):
+    """One synced Devin org asset (playbook or knowledge note). `content_sha256` is the hash of the
+    exact upsert body last confirmed at Devin, so `doctor` can detect local drift without a call and
+    `assets sync` can prove a repeat run is a no-op."""
+
+    __tablename__ = "devin_assets"
+    __table_args__ = (UniqueConstraint("asset_kind", "slug", name="uq_devin_assets_kind_slug"),)
+    id: int | None = Field(default=None, primary_key=True)
+    asset_kind: str  # "playbook" | "knowledge"
+    slug: str
+    remote_id: str
+    title: str
+    content_sha256: str
+    last_action: str  # created | updated | unchanged | adopted
+    synced_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)

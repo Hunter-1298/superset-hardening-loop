@@ -1,0 +1,34 @@
+# Devin environment blueprint for the remediation target, Hunter-1298/superset.
+#
+# This is the committed copy of the blueprint applied in Devin settings (Settings -> Environment
+# -> Hunter-1298/superset). Remediation sessions launched by the controller boot from the snapshot
+# this builds, so pre-commit/ruff (pinned to requirements/development.txt), actionlint and
+# shellcheck are already present and the repo rules are surfaced to the session. Keep this file
+# and the applied blueprint identical; `hardening-loop doctor` checks the file is present.
+#
+# https://docs.devin.ai/onboard-devin/environment-yaml
+initialize:
+  - name: pre-commit + ruff (pinned to requirements/development.txt)
+    run: python3 -m pip install --user --quiet "pre-commit==4.6.2" "ruff==0.9.7"
+  - name: actionlint (workflow linter)
+    run: |
+      mkdir -p "$HOME/.local/bin"
+      curl -fsSL https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz | tar xz -C "$HOME/.local/bin" actionlint
+  - name: shellcheck
+    run: curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar xJ -C "$HOME/.local/bin" --strip-components=1 shellcheck-v0.10.0/shellcheck
+  - run: echo "PATH=$HOME/.local/bin:$PATH" >> $ENVRC
+maintenance: |
+  pre-commit install
+knowledge:
+  - name: lint
+    contents: |
+      # stage changed files, then: pre-commit run          (AGENTS.md: changed files only, not --all-files)
+      # actionlint .github/workflows/security-scan.yml && shellcheck scripts/ci/*.sh
+  - name: security-scan CI
+    contents: |
+      # .github/workflows/security-scan.yml builds lean/ci images to GHCR, scans the exact digest (Syft/Trivy/Grype pinned via
+      # .github/actions/install-scanners from Hunter-1298/superset-hardening-loop), runs scripts/ci/lean_smoke.sh and scripts/ci/app_runs.py.
+      # Local runtime checks need a repo@sha256: reference:  scripts/ci/lean_smoke.sh <ref> /tmp/lean-smoke ; SUPERSET_IMAGE=<ref> python3 scripts/ci/app_runs.py --out /tmp/app-runs
+  - name: rules
+    contents: |
+      # Never target apache/superset; never hand-edit requirements/*.txt (use scripts/uv-pip-compile.sh); never add .trivyignore/.grype* files.

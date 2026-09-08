@@ -22,6 +22,10 @@ on:
       base_branch:
         default: main
         required: true
+      compare_run_id:
+        description: "dependency-regression baseline: successful security-scan run id (default: latest successful run on base_branch)"
+        default: ""
+        required: false
 
 permissions:
   contents: read
@@ -110,7 +114,8 @@ jobs:
             --branch "$BRANCH" --head-sha "${{ steps.push.outputs.head_sha }}" \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             --out "reports/${{ matrix.case }}/ci-negative-report.json" \
-            --work-dir "reports/${{ matrix.case }}/work"
+            --work-dir "reports/${{ matrix.case }}/work" \
+            ${{ inputs.compare_run_id != '' && format('--compare-run-id {0}', inputs.compare_run_id) || '' }}
 
       - name: make sure the branch is gone even if the driver crashed
         if: always() && steps.push.outcome == 'success'

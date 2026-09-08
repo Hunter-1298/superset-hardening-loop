@@ -19,10 +19,11 @@ from hardening_loop.db import session_scope
 from hardening_loop.domain.enums import (
     CLOSING_TRIGGERS,
     Kind,
+    LifecycleLevel,
     ScanMode,
     ScanRunStatus,
     Severity,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 from hardening_loop.ingest.evidence import load_source_file, parse_requirements_pins
@@ -100,8 +101,10 @@ class DependencyRow(BaseModel):
     vuln_ids: list[str]
     bound_blocked: bool
     state: str
-    verification_level: int
-    verification_label: str
+    lifecycle_level: int
+    lifecycle_label: str
+    verification_depth: int | None
+    depth_label: str
     outcome_states: dict[str, int]
     acus: float
     retries_used: int
@@ -114,8 +117,11 @@ class WorkItemRow(BaseModel):
     kind: str
     title: str
     state: str
-    verification_level: int
-    verification_label: str
+    lifecycle_level: int
+    lifecycle_label: str
+    verification_depth: int | None
+    depth_label: str
+    depth_rungs: dict[str, str]
     acus: float
     acu_cap: float
     estimated_cost_usd: float | None
@@ -253,7 +259,10 @@ def select_runs(
 ) -> tuple[ScanRun | None, ScanRun | None]:
     """Baseline = the flagged baseline run (else the oldest run on `branch`); latest = the newest
     successful non-PR run of `branch`, falling back to the newest run of `branch` of any status."""
-    on_branch = [r for r in runs if r.source_repo == fork_repo and r.source_branch == branch]
+    on_branch = sorted(
+        (r for r in runs if r.source_repo == fork_repo and r.source_branch == branch),
+        key=ScanRun.chronology,
+    )
     baseline = next((r for r in on_branch if r.is_baseline), on_branch[0] if on_branch else None)
     closing = [
         r for r in on_branch if r.status is ScanRunStatus.complete and r.trigger in CLOSING_TRIGGERS
@@ -336,8 +345,10 @@ def dependency_rows(
                 vuln_ids=sorted({f.vuln_id for f in members}),
                 bound_blocked=any(f.bound_blocked for f in members),
                 state=w.state.value,
-                verification_level=int(w.verification_level),
-                verification_label=VerificationLevel(w.verification_level).label,
+                lifecycle_level=int(w.lifecycle_level),
+                lifecycle_label=LifecycleLevel(w.lifecycle_level).label,
+                verification_depth=_depth_int(w.verification_depth),
+                depth_label=_depth_label(w.verification_depth),
                 outcome_states=dict(Counter(f.state.value for f in members)),
                 acus=float(sum(s.acus_consumed for s in sessions)),
                 retries_used=w.retries_used,
@@ -367,7 +378,13 @@ def build_report(
     upstream_pins_source: str | None,
 ) -> ReportBody:
     with session_scope(engine) as db:
-        runs = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+        runs = list(
+            db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at), col(ScanRun.ingested_at), col(ScanRun.id)
+                )
+            ).all()
+        )
         findings = list(db.exec(select(Finding).order_by(col(Finding.id))).all())
         items = list(db.exec(select(WorkItem).order_by(col(WorkItem.id))).all())
         prs = list(db.exec(select(PullRequest)).all())
@@ -430,8 +447,11 @@ def build_report(
             kind=w.kind.slug,
             title=w.title,
             state=w.state.value,
-            verification_level=int(w.verification_level),
-            verification_label=VerificationLevel(w.verification_level).label,
+            lifecycle_level=int(w.lifecycle_level),
+            lifecycle_label=LifecycleLevel(w.lifecycle_level).label,
+            verification_depth=_depth_int(w.verification_depth),
+            depth_label=_depth_label(w.verification_depth),
+            depth_rungs=dict(pr_by_wi[w.id].depth_rungs) if w.id in pr_by_wi else {},
             acus=acu_by_wi.get(w.id, 0.0),
             acu_cap=w.acu_cap,
             estimated_cost_usd=(
@@ -559,19 +579,20 @@ def render_markdown(body: ReportBody) -> str:
         + (f" (pins from {body.upstream_pins_source})" if body.upstream_pins_source else ""),
         "",
         "| WI | Package | Baseline | Devin target | upstream-master | Relation | Min fixed | "
-        "Bound blocked | State | Level | ACUs | Retries | Outcomes |",
-        "|---:|---|---|---|---|---|---|---|---|---|---:|---:|---|",
+        "Bound blocked | State | Lifecycle | Depth | ACUs | Retries | Outcomes |",
+        "|---:|---|---|---|---|---|---|---|---|---|---|---:|---:|---|",
     ]
     for dep in body.dependencies:
         out.append(
             f"| {dep.work_item_id} | {dep.package} | {_fmt(dep.baseline_version)} | "
             f"{_fmt(dep.devin_target_version)} | {_fmt(dep.upstream_master_version)} | "
             f"{dep.relation_to_upstream} | {_fmt(dep.min_fixed_version)} | "
-            f"{'yes' if dep.bound_blocked else 'no'} | {dep.state} | {dep.verification_label} | "
-            f"{dep.acus:.2f} | {dep.retries_used} | {_fmt(dep.outcome_states)} |"
+            f"{'yes' if dep.bound_blocked else 'no'} | {dep.state} | {dep.lifecycle_label} | "
+            f"{dep.depth_label} | {dep.acus:.2f} | {dep.retries_used} | "
+            f"{_fmt(dep.outcome_states)} |"
         )
     if not body.dependencies:
-        out.append("| - | no dependency-upgrade work items | | | | | | | | | | | |")
+        out.append("| - | no dependency-upgrade work items | | | | | | | | | | | | |")
 
     out += [
         "",
@@ -581,18 +602,40 @@ def render_markdown(body: ReportBody) -> str:
         f"total cost {_fmt(body.estimated_cost_total_usd)}; verified items {body.verified_items}; "
         f"retries {body.retries_total}.",
         "",
-        "| WI | Kind | State | Level | ACUs / cap | Cost USD | Retries | First-try CI | Members | "
-        "Outcomes |",
-        "|---:|---|---|---|---|---:|---:|---|---:|---|",
+        "| WI | Kind | State | Lifecycle | Depth | Rungs | ACUs / cap | Cost USD | Retries | "
+        "First-try CI | Members | Outcomes |",
+        "|---:|---|---|---|---|---|---|---:|---:|---|---:|---|",
     ]
     for w in body.work_items:
         first = "-" if w.first_head_checks_green is None else str(w.first_head_checks_green)
         out.append(
-            f"| {w.work_item_id} | {w.kind} | {w.state} | {w.verification_label} | "
+            f"| {w.work_item_id} | {w.kind} | {w.state} | {w.lifecycle_label} | "
+            f"{w.depth_label} | {_rungs(w.depth_rungs)} | "
             f"{w.acus:.2f} / {w.acu_cap:.0f} | {_fmt(w.estimated_cost_usd)} | {w.retries_used} | "
             f"{first} | {w.member_findings} | {_fmt(w.member_outcomes)} |"
         )
     return "\n".join(out) + "\n"
+
+
+def _depth_int(depth: VerificationDepth | None) -> int | None:
+    return None if depth is None else int(depth)
+
+
+def _depth_label(depth: VerificationDepth | None) -> str:
+    """`none` when no rung has complete passing evidence; L0 is never implied."""
+    return "none" if depth is None else depth.label
+
+
+def _rungs(rungs: dict[str, str]) -> str:
+    """Compact `L0=passed L3=partial L6=unavailable` view so evidence gaps stay greppable."""
+    if not rungs:
+        return "-"
+    parts = []
+    for d in VerificationDepth:
+        status = rungs.get(d.name)
+        if status is not None:
+            parts.append(f"L{int(d)}={status}")
+    return " ".join(parts) or "-"
 
 
 def persist_report(engine: Engine, body: ReportBody, markdown: str) -> int:

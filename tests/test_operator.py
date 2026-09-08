@@ -384,6 +384,7 @@ def test_launch_creates_a_missing_issue_first(
     gh = orch.gh
     assert isinstance(gh, FakeGitHub)
     before = set(gh.issues)
+    gh.issues[wi.issue_number or 0].state = "closed"  # nothing open to adopt
     with session_scope(orch.engine) as db:
         row = db.get(WorkItem, wi.id)
         assert row is not None
@@ -396,6 +397,55 @@ def test_launch_creates_a_missing_issue_first(
     after = _items(orch)["pypi:cryptography"]
     assert after.issue_number is not None and after.issue_number not in before
     assert after.state is WorkItemState.session_active
+
+
+def test_launch_adopts_an_existing_open_issue_instead_of_duplicating(
+    client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]
+) -> None:
+    _, orch, ctx = world
+    wi = _items(orch)["pypi:cryptography"]
+    gh = orch.gh
+    assert isinstance(gh, FakeGitHub)
+    # Simulate a crash after GitHub created the issue but before the database recorded it.
+    orphan = gh.issues[wi.issue_number or 0]
+    with session_scope(orch.engine) as db:
+        row = db.get(WorkItem, wi.id)
+        assert row is not None
+        row.issue_number = None
+        row.issue_url = None
+        row.state = WorkItemState.queued
+        db.add(row)
+    before = set(gh.issues)
+    assert client.post(f"/operator/launch/{wi.id}", data=_form(ctx)).status_code == 200
+    after = _items(orch)["pypi:cryptography"]
+    assert set(gh.issues) == before, "no second issue for the same title"
+    assert after.issue_number is not None and after.issue_number == wi.issue_number
+    assert gh.issues[after.issue_number].title == orphan.title
+    with session_scope(orch.engine) as db:
+        reasons = [
+            e.reason
+            for e in db.exec(select(Event).where(Event.entity_id == wi.id)).all()
+            if e.event == "issue_created"
+        ]
+    assert any(r and r.startswith("adopted existing ") for r in reasons)
+
+
+def test_auto_open_issues_off_defers_the_issue_to_launch(tmp_path: Path) -> None:
+    settings = _settings(tmp_path / "quiet.sqlite3", auto_open_issues=False)
+    orch = build_doubles_orchestrator(settings)
+    gh = orch.gh
+    assert isinstance(gh, FakeGitHub)
+    items = _items(orch)
+    assert items and all(w.state is WorkItemState.queued for w in items.values())
+    assert gh.issues == {}
+    orch.tick(auto_dispatch=False)
+    assert gh.issues == {}, "ticks never open issues while auto_open_issues is off"
+    ctx = OperatorContext.for_doubles(orch, login=LOGIN)
+    wi = items["pypi:cryptography"]
+    with TestClient(create_app(settings, operator=ctx)) as c:
+        assert c.post(f"/operator/launch/{wi.id}", data=_form(ctx)).status_code == 200
+    assert len(gh.issues) == 1
+    assert _items(orch)["pypi:cryptography"].state is WorkItemState.session_active
 
 
 def test_relaunch_after_needs_human_reuses_the_same_item(
