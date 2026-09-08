@@ -12,7 +12,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -27,7 +29,7 @@ from hardening_loop.ci import (
     load_registry_image,
     write_scan_manifest,
 )
-from hardening_loop.config import Settings
+from hardening_loop.config import BASELINE_SHA, FORK_REPO, REMEDIATION_BRANCH, Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
 from hardening_loop.db import open_database
 from hardening_loop.devin.assets import AssetError, AssetSyncer, load_assets
@@ -36,9 +38,15 @@ from hardening_loop.devin.rest import DevinError, DevinRest
 from hardening_loop.devin.schemas import export_schemas
 from hardening_loop.doctor import run_doctor
 from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus
+from hardening_loop.github.protocol import WorkflowRunInfo
 from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
-from hardening_loop.ingest.intake import IntakeExpectation, IntakeOutcome, ScanIntakeService
+from hardening_loop.ingest.intake import (
+    IntakeExpectation,
+    IntakeOutcome,
+    ScanIntakeService,
+    validate_bundle,
+)
 from hardening_loop.logging_utils import configure_logging
 from hardening_loop.metrics import metrics_history, snapshot_metrics
 from hardening_loop.negative import CASES, MutationError, NegativeRunner, mutate
@@ -328,6 +336,59 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 1 if fresh_rejects else 0
 
 
+def _git_is_ancestor(repo: Path) -> Callable[[str, str], bool]:
+    def is_ancestor(base: str, head: str) -> bool:
+        proc = subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", base, head],  # noqa: S607
+            check=False,
+            capture_output=True,
+        )
+        return proc.returncode == 0
+
+    return is_ancestor
+
+
+def cmd_evidence_verify(args: argparse.Namespace) -> int:
+    """Run intake's fail-closed bundle checks against an already-downloaded evidence tree, with no
+    GitHub access: checksums, manifest schema, source repo/branch/sha, run id/attempt, platform,
+    baseline ancestry (asked of the local git checkout), required scan jobs, scanner set, runtime
+    results. Exit 0 only when the bundle would be accepted; every rejection reason is printed."""
+    run = WorkflowRunInfo(
+        id=args.run_id,
+        run_attempt=args.run_attempt,
+        event=args.event,
+        status="completed",
+        conclusion="success",
+        head_branch=args.source_branch,
+        head_sha=args.head_sha,
+        url="",
+    )
+    expect = IntakeExpectation(
+        source_repo=args.source_repo,
+        source_branch=args.source_branch,
+        baseline_sha=args.baseline_sha,
+        platform=args.platform,
+    )
+    manifest, reasons = validate_bundle(
+        Path(args.bundle), run, expect, is_ancestor=_git_is_ancestor(Path(args.git))
+    )
+    verdict = {
+        "bundle": str(Path(args.bundle)),
+        "accepted": not reasons,
+        "reasons": reasons,
+        "source_sha": manifest.source_sha if manifest else None,
+        "source_repo": manifest.source_repo if manifest else None,
+        "jobs": sorted(manifest.jobs) if manifest else [],
+    }
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(json.dumps(verdict, indent=2) + "\n")
+    print(json.dumps(verdict, indent=2))
+    for reason in reasons:
+        print(f"::error::evidence rejected: {reason}")
+    return 0 if not reasons else 1
+
+
 def _step_summary(markdown: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if path:
@@ -595,6 +656,23 @@ def build_parser() -> argparse.ArgumentParser:
     ing.add_argument("--limit", type=int, default=10, help="max completed runs to consider")
     ing.add_argument("--json", default=None, help="also write the outcomes to this path")
     ing.set_defaults(fn=cmd_ingest)
+
+    ev = sub.add_parser(
+        "evidence-verify",
+        help="offline: apply intake's fail-closed checks to a downloaded scan-evidence bundle",
+    )
+    ev.add_argument("bundle", help="extracted scan-evidence-<sha> directory (holds manifest.json)")
+    ev.add_argument("--run-id", type=int, required=True, help="Actions run id the bundle came from")
+    ev.add_argument("--run-attempt", type=int, default=1)
+    ev.add_argument("--head-sha", required=True, help="head sha GitHub reports for that run")
+    ev.add_argument("--source-repo", default=FORK_REPO)
+    ev.add_argument("--source-branch", default=REMEDIATION_BRANCH)
+    ev.add_argument("--baseline-sha", default=BASELINE_SHA)
+    ev.add_argument("--platform", default="linux/amd64")
+    ev.add_argument("--event", default="push")
+    ev.add_argument("--git", default=".", help="fork checkout used to answer baseline ancestry")
+    ev.add_argument("--out", help="also write the verdict JSON here")
+    ev.set_defaults(fn=cmd_evidence_verify)
 
     g = sub.add_parser("gate", help="apply SCAN_GATE_MODE to one policy scan job directory")
     g.add_argument("--job", required=True, help="scan_image.sh output dir (mode=policy)")

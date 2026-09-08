@@ -29,6 +29,15 @@ Every command below is run from the controller checkout with the virtualenv acti
    no new sighting and no new evidence directory. `data/evidence/runs/<run id>/<attempt>/`
    holds the verified bundle (`manifest.json`, raw Trivy/Grype JSON, SARIF, SBOM, lean-smoke
    and app-runs records) with the per-file checksums the intake verified.
+
+   The same checks run offline against any extracted bundle, with no GitHub access and no
+   database, which is what the fork's `evidence-negative` workflow uses to prove tampered and
+   source-mismatched evidence is refused:
+
+   ```bash
+   hardening-loop evidence-verify data/evidence/runs/<run id>/1 \
+     --run-id <run id> --head-sha <fork main sha> --git ../superset
+   ```
 6. The operator-triggered negatives (`ci-negative` in the controller repository) have each
    produced the expected failure once against the current fork `main`.
 

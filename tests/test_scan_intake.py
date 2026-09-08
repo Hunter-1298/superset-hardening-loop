@@ -360,3 +360,91 @@ def test_ingest_cli_refuses_without_token(
 ) -> None:
     assert main(["ingest", "--db", str(tmp_path / "c.sqlite3")]) == 2
     assert "HL_GITHUB_TOKEN" in capsys.readouterr().err
+
+
+def _git_repo_with(tmp_path: Path) -> Path:
+    """A throwaway git repo (`baseline -> main2`, plus an orphan) for offline ancestry answers."""
+    import subprocess
+
+    repo = tmp_path / "fork-git"
+    repo.mkdir()
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@x",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@x",
+        "HOME": str(tmp_path),
+    }
+
+    def git(*a: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(repo), *a], check=True, capture_output=True, text=True, env=env
+        ).stdout.strip()
+
+    git("init", "-q")
+    (repo / "f").write_text("a")
+    git("add", "f")
+    git("commit", "-q", "-m", "baseline")
+    base = git("rev-parse", "HEAD")
+    (repo / "f").write_text("b")
+    git("commit", "-q", "-am", "main2")
+    head = git("rev-parse", "HEAD")
+    git("checkout", "-q", "--orphan", "unrelated")
+    (repo / "f").write_text("c")
+    git("add", "f")
+    git("commit", "-q", "-m", "unrelated")
+    unrelated = git("rev-parse", "HEAD")
+    (repo / ".shas").write_text(json.dumps([base, head, unrelated]))
+    return repo
+
+
+def test_evidence_verify_cli_accepts_matching_bundle_and_rejects_offline(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = _git_repo_with(tmp_path)
+    base, head, unrelated = json.loads((repo / ".shas").read_text())
+
+    good = _bundle(tmp_path / "good", source_sha=head)
+    common = [
+        "--run-id",
+        str(RUN_ID),
+        "--head-sha",
+        head,
+        "--baseline-sha",
+        base,
+        "--git",
+        str(repo),
+    ]
+    out = tmp_path / "verdict.json"
+    assert main(["evidence-verify", str(good), *common, "--out", str(out)]) == 0
+    verdict = json.loads(out.read_text())
+    assert verdict["accepted"] is True and verdict["reasons"] == []
+    assert verdict["source_sha"] == head
+
+    # A byte changed in a checksummed raw file.
+    tampered = _bundle(tmp_path / "tampered", source_sha=head)
+    vuln = tampered / "lean" / "raw" / "trivy-vuln.json"
+    vuln.write_text(vuln.read_text().replace("{", " {", 1))
+    assert main(["evidence-verify", str(tampered), *common]) == 1
+    assert "failed verification" in capsys.readouterr().out
+
+    # Evidence for a commit that is not the run's head.
+    other = _bundle(tmp_path / "other", source_sha=base)
+    assert main(["evidence-verify", str(other), *common]) == 1
+    assert "workflow run was for" in capsys.readouterr().out
+
+    # Evidence built from a commit outside the baseline's history.
+    foreign_history = _bundle(tmp_path / "foreign-history", source_sha=unrelated)
+    rc = main(["evidence-verify", str(foreign_history), *common, "--head-sha", unrelated])
+    assert rc == 1
+    assert "does not descend from baseline" in capsys.readouterr().out
+
+    # Another repository, even a real one.
+    foreign = _bundle(tmp_path / "foreign", source_sha=head, source_repo="apache/superset")
+    assert main(["evidence-verify", str(foreign), *common]) == 1
+    assert "outside the allowlist" in capsys.readouterr().out
+
+    # No manifest at all.
+    (good / "manifest.json").unlink()
+    assert main(["evidence-verify", str(good), *common]) == 1
+    assert "no manifest.json" in capsys.readouterr().out
