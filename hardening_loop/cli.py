@@ -39,6 +39,7 @@ from hardening_loop.operator import (
     OperatorRuntime,
     build_doubles_orchestrator,
     build_live_orchestrator,
+    require_loopback_bind,
 )
 from hardening_loop.replay.runner import run_all
 from hardening_loop.replay.scenarios import SCENARIOS
@@ -115,6 +116,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         update["operator_login"] = args.operator_login
     settings = settings.model_copy(update=update)
     try:
+        require_loopback_bind(host)
         if args.doubles:
             orch = build_doubles_orchestrator(settings)
             assert settings.operator_login is not None

@@ -632,11 +632,13 @@ class Orchestrator:
                     f"unexpected_state:{wi.state.value}",
                     issue_url=wi.issue_url,
                 )
+            approved_here = False
             try:
                 if pv.needs_dispatch_approval:
                     self.gh.add_labels(
                         self.repo, wi.issue_number, [HumanLabel.dispatch_approved.value]
                     )
+                    approved_here = True
                     try:
                         self.gh.remove_label(self.repo, wi.issue_number, AWAITING_DISPATCH_LABEL)
                     except Exception as exc:
@@ -648,6 +650,8 @@ class Orchestrator:
                     f"(cap {wi.acu_cap:.0f} ACU, base `{REMEDIATION_BRANCH}`).",
                 )
             except Exception as exc:
+                if approved_here:
+                    self._revoke_dispatch_approval(wi.issue_number)
                 return self._launch_failed(db, wi, f"github:{exc}")
             self._event(
                 db,
@@ -693,6 +697,14 @@ class Orchestrator:
     def launch_work_item(self, work_item_id: int, operator_actor: str) -> LaunchResult:
         """Alias of `launch` with positional operator identity."""
         return self.launch(work_item_id, operator=operator_actor)
+
+    def _revoke_dispatch_approval(self, issue_number: int) -> None:
+        """Undo the approval a failed launch granted so the scheduler cannot dispatch it later."""
+        try:
+            self.gh.remove_label(self.repo, issue_number, HumanLabel.dispatch_approved.value)
+            self.gh.add_labels(self.repo, issue_number, [AWAITING_DISPATCH_LABEL])
+        except Exception:
+            log.exception("could not revoke dispatch approval on #%s", issue_number)
 
     def _launch_failed(self, db: DbSession, wi: WorkItem, reason: str) -> LaunchResult:
         assert wi.id is not None
@@ -772,11 +784,22 @@ class Orchestrator:
         self._wi(db, wi, WorkItemEvent.session_created, snap.session_id)
         for f in members:
             self._finding(db, f, FindingEvent.remediation_started, snap.session_id)
-        self.gh.comment_issue(
-            self.repo,
-            wi.issue_number,
-            f"Devin session started: {snap.url or snap.session_id} (cap {wi.acu_cap:.0f} ACU)",
-        )
+        try:
+            self.gh.comment_issue(
+                self.repo,
+                wi.issue_number,
+                f"Devin session started: {snap.url or snap.session_id} (cap {wi.acu_cap:.0f} ACU)",
+            )
+        except Exception as exc:
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=wi.id,
+                event="issue_comment_failed",
+                from_state=wi.state.value,
+                to_state=wi.state.value,
+                reason=str(exc)[:300],
+            )
         return "created"
 
     def _adopt_tagged_session(self, db: DbSession, wi: WorkItem) -> str | None:

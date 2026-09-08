@@ -36,9 +36,10 @@ from hardening_loop.operator import (
     OperatorRuntime,
     build_doubles_orchestrator,
     build_live_orchestrator,
+    require_loopback_bind,
 )
 from hardening_loop.orchestrator.engine import AWAITING_DISPATCH_LABEL, Orchestrator
-from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.orchestrator.launch import LaunchBlock, LaunchResult
 from hardening_loop.replay.synth import SyntheticRun, ingest_synthetic
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -222,6 +223,9 @@ def test_confirmation_page_previews_the_launch(
         ({"confirm": "yes"}, {}, 400),
         ({"confirm": "launch"}, {"sec-fetch-site": "cross-site"}, 403),
         ({"confirm": "launch"}, {"sec-fetch-site": "same-site"}, 403),
+        ({"confirm": "launch"}, {"origin": "https://attacker.invalid"}, 403),
+        ({"confirm": "launch"}, {"origin": "null"}, 403),
+        ({"confirm": "launch"}, {"origin": "http://testserver:9"}, 403),  # wrong port
     ],
 )
 def test_launch_post_rejections_create_nothing(
@@ -240,6 +244,20 @@ def test_launch_post_rejections_create_nothing(
     assert r.status_code == status
     assert _devin(orch).created_requests() == []
     assert _items(orch)["pypi:cryptography"].state is WorkItemState.issue_open
+
+
+def test_launch_post_accepts_matching_origin(
+    client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]
+) -> None:
+    _, orch, ctx = world
+    wi = _items(orch)["pypi:cryptography"]
+    r = client.post(
+        f"/operator/launch/{wi.id}",
+        data=_form(ctx),
+        headers={"origin": "http://testserver", "sec-fetch-site": "same-origin"},
+    )
+    assert r.status_code == 200
+    assert len(_devin(orch).created_requests()) == 1
 
 
 def test_launch_post_requires_form_encoding(
@@ -421,6 +439,90 @@ def test_launch_failure_at_devin_is_reported_not_swallowed(
         WorkItemState.issue_open,
         WorkItemState.needs_human,
     )
+
+
+def test_failed_audit_comment_revokes_dispatch_approval(
+    client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]
+) -> None:
+    """Approval granted by a launch that then fails must not leave the item eligible for the
+    scheduler: the next auto-dispatch tick creates nothing."""
+    _, orch, ctx = world
+    wi = _items(orch)["pypi:requests"]
+    assert wi.severity is Severity.medium and wi.issue_number is not None
+    gh = orch.gh
+    assert isinstance(gh, FakeGitHub)
+    gh.fail_next["comment_issue"] = RuntimeError("github 502")
+    r = client.post(f"/operator/launch/{wi.id}", data=_form(ctx))
+    assert r.status_code == 502
+    labels = gh.issues[wi.issue_number].labels
+    assert "dispatch:approved" not in labels and AWAITING_DISPATCH_LABEL in labels
+    assert _devin(orch).created_requests() == []
+    orch.tick(auto_dispatch=True)  # HIGH items dispatch; the MEDIUM one must not
+    assert not any(f"wi-{wi.id}" in req.tags for req in _devin(orch).created_requests())
+    assert _items(orch)["pypi:requests"].state is WorkItemState.issue_open
+
+
+def test_github_failure_after_session_creation_keeps_the_session(
+    client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]
+) -> None:
+    """Devin accepted the session; a failing 'session started' comment is recorded as an event
+    and the launch still reports the session instead of escaping as a 500."""
+    _, orch, ctx = world
+    wi = _items(orch)["pypi:cryptography"]
+    gh = orch.gh
+    assert isinstance(gh, FakeGitHub)
+    calls = 0
+
+    def flaky(repo: str, number: int, body: str) -> None:
+        nonlocal calls
+        calls += 1
+        if "Devin session started" in body:
+            raise RuntimeError("github 502")
+        FakeGitHub.comment_issue(gh, repo, number, body)
+
+    gh.comment_issue = flaky  # type: ignore[method-assign]
+    r = client.post(f"/operator/launch/{wi.id}", data=_form(ctx))
+    assert r.status_code == 200 and calls == 2
+    created = _devin(orch).created_requests()
+    assert len(created) == 1
+    after = _items(orch)["pypi:cryptography"]
+    assert after.state is WorkItemState.session_active and after.active_session_id
+    with session_scope(orch.engine) as db:
+        rows = db.exec(select(Session).where(Session.work_item_id == wi.id)).all()
+        assert [s.devin_id for s in rows] == [after.active_session_id]
+        names = [
+            e.event
+            for e in db.exec(
+                select(Event).where(Event.entity_type == "work_item", Event.entity_id == wi.id)
+            ).all()
+        ]
+    assert "issue_comment_failed" in names
+
+
+def test_unexpected_launch_exception_is_a_structured_502(
+    client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]
+) -> None:
+    _, orch, ctx = world
+    wi = _items(orch)["pypi:cryptography"]
+
+    def boom(work_item_id: int) -> LaunchResult:
+        raise RuntimeError("unexpected")
+
+    ctx.launch = boom  # type: ignore[method-assign]
+    r = client.post(f"/operator/launch/{wi.id}", data=_form(ctx))
+    assert r.status_code == 502
+    assert "RuntimeError" in _text(r)
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "[::1]", "127.0.0.2"])
+def test_operator_mode_binds_loopback(host: str) -> None:
+    require_loopback_bind(host)
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.0.0.5", "dashboard.example", ""])
+def test_operator_mode_refuses_non_loopback_bind(host: str) -> None:
+    with pytest.raises(OperatorConfigError, match="loopback"):
+        require_loopback_bind(host)
 
 
 # ------------------------------------------------------------------------- poll loop
