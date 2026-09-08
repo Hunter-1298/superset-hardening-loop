@@ -1,14 +1,92 @@
 {% extends "base.html" %}
-{% block title %}PRs · Superset hardening loop{% endblock %}
+{% block title %}Pull requests · Superset hardening loop{% endblock %}
 {% block content %}
-<h1>Pull requests <span class="muted">({{ prs|length }})</span></h1>
-<h2>Highest verification level per PR</h2>
-<table><tr><th>Work item</th><th>Kind</th><th>PR</th><th>Level</th><th>First head green</th><th class="num">Retries</th><th>Item state</th></tr>
-{% for l in levels %}<tr><td><a href="/issues/{{ l.work_item_id }}">#{{ l.work_item_id }}</a></td><td>{{ l.kind|kind }}</td><td><a href="{{ l.pr_url }}">{{ l.pr_url }}</a></td><td>L{{ l.level }} {{ l.level_name }}</td><td>{{ l.first_head_checks_green }}</td><td class="num">{{ l.retries_used }}</td><td>{{ l.state }}</td></tr>
-{% else %}<tr><td colspan="7" class="muted">No PRs.</td></tr>{% endfor %}
-</table>
-<h2>All PR rows</h2>
-<table><tr><th>PR</th><th>Work item</th><th>State</th><th>Head</th><th>Merge</th><th>Level</th><th>Diff policy</th><th>Review</th><th>Approved by</th><th>Opened</th><th>Merged</th></tr>
-{% for p in prs %}<tr><td><a href="{{ p.url }}">{{ p.repo }}#{{ p.number }}</a></td><td><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td><td>{{ p.state }}</td><td class="mono">{{ p.head_sha|short }}</td><td class="mono">{{ p.merge_sha|short }}</td><td>{{ p.verification_level.label }}</td><td class="{{ 'ok' if p.diff_policy_ok else 'bad' }}">{{ p.diff_policy_ok }}</td><td>{{ p.review_status or '' }}</td><td>{{ p.approved_by or '' }}</td><td class="muted">{{ p.opened_at }}</td><td class="muted">{{ p.merged_at or '' }}</td></tr>{% endfor %}
-</table>
+{% set merged = prs|selectattr("state", "equalto", "merged")|list %}
+{% set open_prs = prs|selectattr("state", "equalto", "open")|list %}
+{% set verified = levels.values()|selectattr("level_name", "equalto", "rescan_verified")|list %}
+{% set first_try = levels.values()|selectattr("first_head_checks_green", "equalto", True)|list %}
+{{ ui.page_header("Pull requests", prs|length ~ " remediation pull request" ~ ("" if prs|length == 1 else "s") ~ " opened by Devin on the fork. Reviews, approvals and merges happen in GitHub.") }}
+
+{% if prs %}
+<section class="stats compact" aria-label="Pull request summary">
+  {{ ui.stat("Open", open_prs|length) }}
+  {{ ui.stat("Merged by a person", merged|length, note="of " ~ prs|length ~ " opened") }}
+  {{ ui.stat("Verified by rescan", verified|length, tone="success" if verified else None) }}
+  {{ ui.stat("Green on first head", first_try|length) }}
+</section>
+{% endif %}
+
+<section class="section" aria-labelledby="levels-heading">
+  {{ ui.section_head("Highest verification level per pull request", id="levels-heading", count=levels|length) }}
+  {% if levels %}
+  <div class="table-wrap allow-sticky">
+  <table class="data">
+    <thead><tr>
+      <th scope="col" class="w-title">Work item</th>
+      <th scope="col">Pull request</th>
+      <th scope="col">Verification</th>
+      <th scope="col">Kind</th>
+      <th scope="col">First head green</th>
+      <th scope="col" class="num">Retries</th>
+      <th scope="col">Item state</th>
+    </tr></thead>
+    <tbody>
+    {% for l in levels.values()|sort(attribute="level", reverse=True) %}
+    <tr>
+      <td class="w-title"><a class="primary" href="/issues/{{ l.work_item_id }}">{{ titles.get(l.work_item_id) or "Work item #" ~ l.work_item_id }}</a><span class="secondary mono">#{{ l.work_item_id }}</span></td>
+      <td>{{ ui.external_link(l.pr_url, l.pr_url|replace("https://github.com/", "")) }}</td>
+      <td>{{ ui.level_badge(l.level) }}</td>
+      <td>{{ ui.kind_badge(l.kind) }}</td>
+      <td>{% if l.first_head_checks_green is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(l.first_head_checks_green, title="CI on the first pushed head") }}{% endif %}</td>
+      <td class="num">{{ l.retries_used }}</td>
+      <td>{{ ui.state_badge(l.state) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  {{ ui.empty("No pull requests yet", "Pull requests appear once a Devin session pushes a remediation branch to the fork.") }}
+  {% endif %}
+</section>
+
+{% if prs %}
+<details class="disclosure">
+  <summary>All pull request records <span class="muted">{{ prs|length }}</span></summary>
+  <div class="disclosure-body table-wrap">
+    <table class="data">
+      <thead><tr>
+        <th scope="col">Pull request</th>
+        <th scope="col">Work item</th>
+        <th scope="col">State</th>
+        <th scope="col">Verification</th>
+        <th scope="col">Head</th>
+        <th scope="col">Merge commit</th>
+        <th scope="col">Diff policy</th>
+        <th scope="col">Devin Review</th>
+        <th scope="col">Approved by</th>
+        <th scope="col" class="w-date">Opened</th>
+        <th scope="col" class="w-date">Merged</th>
+      </tr></thead>
+      <tbody>
+      {% for p in prs %}
+      <tr>
+        <td>{{ ui.external_link(p.url, p.repo ~ "#" ~ p.number) }}<span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
+        <td><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td>
+        <td>{{ ui.pr_state_badge(p.state) }}</td>
+        <td>{{ ui.level_badge(p.verification_level) }}</td>
+        <td>{{ ui.sha(p.head_sha) }}</td>
+        <td>{{ ui.sha(p.merge_sha) }}</td>
+        <td>{% if p.diff_policy_ok is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(p.diff_policy_ok, title=(p.diff_policy_violations|join("; ") if p.diff_policy_violations else "Only allowed files changed")) }}{% endif %}</td>
+        <td>{% if p.review_status %}{{ (p.review_status|plain_label).text }}{% if p.review_comment_count %}<span class="secondary">{{ p.review_comment_count }} comment{{ "" if p.review_comment_count == 1 else "s" }}</span>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td>{{ p.approved_by or "—" }}</td>
+        <td class="w-date">{{ p.opened_at|dt }}</td>
+        <td class="w-date">{{ p.merged_at|dt }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
 {% endblock %}

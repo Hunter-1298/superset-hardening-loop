@@ -1,0 +1,11 @@
+{# Expects `launch` (LaunchPreview or None), `wi`, `launch_block_text`. Rendered only in operator mode. #}
+{% if launch %}
+<div class="launch-panel" role="region" aria-label="Launch Devin">
+  {% if launch.eligible %}
+  <a class="btn btn-primary" href="/operator/launch/{{ wi.id }}">{{ "Relaunch Devin" if launch.action.value == "relaunch" else "Launch Devin" }}</a>
+  <span class="small muted">Cap {{ launch.acu_cap|num(0) }} ACU · {{ launch.active_sessions }} of {{ launch.max_concurrent_sessions }} session slots in use · {{ launch.acu_committed_after|num(0) }} of {{ launch.global_acu_budget|num(0) }} ACU committed after launch{% if launch.needs_issue %} · opens the GitHub issue first{% endif %}{% if launch.needs_dispatch_approval %} · adds <span class="mono">dispatch:approved</span>{% endif %}</span>
+  {% else %}
+  <span class="small muted">Launch unavailable: {{ launch_block_text[launch.block] }}</span>
+  {% endif %}
+</div>
+{% endif %}

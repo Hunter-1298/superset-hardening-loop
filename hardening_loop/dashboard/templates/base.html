@@ -2,46 +2,62 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>{% block title %}Superset hardening loop{% endblock %}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root { --bg:#0f1419; --fg:#e6e6e6; --muted:#8b98a5; --card:#1a2129; --line:#2b3540; --ok:#3fb950; --warn:#d29922; --bad:#f85149; --info:#58a6ff; }
-  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
-  header { display:flex; gap:1.5rem; align-items:center; padding:.75rem 1.25rem; border-bottom:1px solid var(--line); background:var(--card); }
-  header a { color:var(--fg); text-decoration:none; } header a:hover { color:var(--info); }
-  header .brand { font-weight:600; } header .meta { margin-left:auto; color:var(--muted); font-size:12px; }
-  main { padding:1.25rem; max-width:1400px; margin:0 auto; }
-  h1 { font-size:20px; margin:.25rem 0 1rem; } h2 { font-size:16px; margin:1.5rem 0 .5rem; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
-  .cards { display:grid; grid-template-columns:repeat(auto-fill, minmax(190px, 1fr)); gap:.75rem; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:.75rem 1rem; min-width:0; overflow-wrap:anywhere; }
-  .card .label { color:var(--muted); font-size:12px; } .card .value { font-size:22px; font-weight:600; } .card .sub { color:var(--muted); font-size:12px; }
-  table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line); border-radius:8px; overflow:hidden; font-size:13px; }
-  th, td { text-align:left; padding:.4rem .6rem; border-bottom:1px solid var(--line); vertical-align:top; } th { color:var(--muted); font-weight:500; }
-  tr:last-child td { border-bottom:none; } td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
-  code, .mono { font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
-  .pill { display:inline-block; padding:.05rem .5rem; border-radius:999px; font-size:12px; border:1px solid var(--line); }
-  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .info { color:var(--info); } .muted { color:var(--muted); }
-  .sev-CRITICAL { color:#ff7b72; font-weight:600; } .sev-HIGH { color:#f0883e; } .sev-MEDIUM { color:#d29922; } .sev-LOW { color:#8b98a5; } .sev-UNKNOWN { color:#6e7681; }
-  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:1rem; } @media (max-width:900px) { .grid2 { grid-template-columns:1fr; } }
-  .banner { padding:.5rem .75rem; border-radius:6px; border:1px solid var(--line); background:#1f2a1f; margin-bottom:1rem; }
-  .banner.replay { background:#2a2417; } pre { white-space:pre-wrap; background:var(--card); border:1px solid var(--line); padding:.75rem; border-radius:8px; font-size:12px; }
-  a { color:var(--info); } .filters a { margin-right:.75rem; }
-</style>
+<meta name="color-scheme" content="light">
+<title>{% block title %}Superset hardening loop{% endblock %}</title>
+<link rel="stylesheet" href="/static/dashboard.css">
 </head>
 <body>
-<header>
-  <a class="brand" href="/">Superset hardening loop</a>
-  <a href="/runs">Runs</a>
-  <a href="/findings">Findings</a>
-  <a href="/issues">Issues</a>
-  <a href="/prs">PRs</a>
-  <a href="/report">Report</a>
-  <a href="/api/metrics">API</a>
-  <span class="meta">{{ fork_repo }} · {{ branch }} · gate={{ gate_mode }} · read-only{% if replay_mode %} · REPLAY (no spend){% endif %}</span>
-</header>
-<main>
-{% if replay_mode %}<div class="banner replay">Replay mode: all data below was produced by the real orchestrator against in-memory GitHub/Devin doubles with outbound network blocked. No Devin ACUs were spent.</div>{% endif %}
-{% block content %}{% endblock %}
-</main>
+<a class="skip-link" href="#main">Skip to main content</a>
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <a class="brand" href="/">Hardening loop</a>
+      <button class="nav-toggle" type="button" aria-controls="primary-nav" aria-expanded="false" data-nav-toggle>Menu</button>
+    </div>
+    <nav id="primary-nav" aria-label="Primary">
+      {% set current = nav_current(current_path) %}
+      <ul class="nav-list">
+        {% for item in nav_items %}
+        <li><a class="nav-link{% if item.secondary %} is-secondary{% endif %}" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}><span>{{ item.label }}</span></a></li>
+        {% endfor %}
+      </ul>
+    </nav>
+    <div class="nav-footer">
+      <a href="/api/metrics">Metrics JSON</a>
+      <a href="/api/docs">API reference</a>
+      {% if operator %}<span>Operator mode as <span class="mono">{{ operator.login }}</span>. Launches spend ACUs; approvals and merges still happen in GitHub.</span>{% else %}<span>Read-only. Approvals and merges happen in GitHub.</span>{% endif %}
+    </div>
+  </aside>
+
+  <div class="content">
+    <header class="topbar" aria-label="Current context">
+      <div class="topbar-scope mono">
+        <span class="sr-only">Repository</span><span>{{ fork_repo }}</span><span class="sep" aria-hidden="true">/</span><span class="sr-only">Branch</span><span>{{ branch }}</span>
+      </div>
+      <div class="topbar-status">
+        <span><span class="sr-only">Latest scan</span>{% if latest_run %}<a href="/runs/{{ latest_run.id }}" class="mono">{{ latest_run.external_run_id }}</a> {{ ui.run_status_badge(latest_run.status) }} {{ ui.gate_badge(latest_run.gate.passed, latest_run.gate.mode) }}{% else %}<span class="muted">No scans yet</span>{% endif %}</span>
+        <span class="muted"><span class="sr-only">Last updated</span><time datetime="{{ last_updated.isoformat() if last_updated else '' }}">{{ last_updated|dt }} UTC</time></span>
+        {% if operator %}<span class="mode-tag">Operator</span>{% endif %}
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      {% if replay_mode %}<p class="replay-note" role="note"><strong>Replay mode:</strong> the orchestrator ran against local GitHub and Devin doubles with outbound network blocked. No Devin ACUs were spent.</p>{% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+<script>
+  (function () {
+    var toggle = document.querySelector('[data-nav-toggle]');
+    var sidebar = document.getElementById('sidebar');
+    if (!toggle || !sidebar) return;
+    toggle.addEventListener('click', function () {
+      var open = sidebar.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  })();
+</script>
 </body>
 </html>

@@ -26,6 +26,8 @@ from hardening_loop.gate import gate_verdict
 from hardening_loop.ingest.evidence import load_baseline, load_source_pyproject
 from hardening_loop.ingest.persist import ingest_baseline
 from hardening_loop.models.tables import NegativeRun, WorkItem
+from hardening_loop.orchestrator.engine import AWAITING_DISPATCH_LABEL
+from hardening_loop.orchestrator.launch import LaunchBlock
 from hardening_loop.replay.synth import (
     BASELINE_SHA,
     CONFIG_SEEDS,
@@ -1279,6 +1281,81 @@ def n5(w: World, r: ScenarioResult) -> None:
         observed={"state": wi.state.value, "reason": wi.blocked_reason},
     )
     r.expect("reason names approved path", "approved" in (wi.blocked_reason or ""))
+
+
+# ----------------------------------------------------------------------------- OP1
+
+
+@scenario(
+    "OP1", "Operator launch from the dashboard: capacity refusal, approval trail, same lifecycle"
+)
+def op1(w: World, r: ScenarioResult) -> None:
+    """A MEDIUM finding is never auto-dispatched. An operator launch is refused while the single
+    session slot is taken, then goes through the ordinary dispatch path with `dispatch:approved`
+    and an audit comment on the issue, and the item closes exactly like an automatic one."""
+    w.settings.max_concurrent_sessions = 1
+    w.baseline("cryptography", "requests")
+    w.tick()
+    items = {wi.group_key: wi for wi in w.work_items()}
+    auto, manual = items["pypi:cryptography"], items["pypi:requests"]
+    r.eq("HIGH item auto-dispatched", auto.state, WorkItemState.session_active)
+    r.eq("MEDIUM item only has its issue", manual.state, WorkItemState.issue_open)
+    r.expect(
+        "MEDIUM issue awaits dispatch approval",
+        AWAITING_DISPATCH_LABEL in w.issue_labels(manual),
+    )
+    mid = manual.id or 0
+
+    pv = w.orch.launch_preview(mid)
+    r.eq("preview: blocked at capacity", pv.block, LaunchBlock.at_capacity)
+    r.expect("preview: would need dispatch approval", pv.needs_dispatch_approval)
+    r.expect("preview: issue already exists", not pv.needs_issue)
+    res = w.orch.launch(mid, operator="operator-demo")
+    r.eq("launch refused at capacity", res.outcome, "rejected")
+    r.eq("refusal names the block", res.reason, LaunchBlock.at_capacity.value)
+    r.eq("no session created by the refusal", len(w.devin.created_requests()), 1)
+    r.expect("refusal audited", "operator_launch_refused" in w.event_names(mid))
+    r.eq("item state unchanged", w.state_of(mid), WorkItemState.issue_open)
+
+    w.settings.max_concurrent_sessions = 2
+    res = w.orch.launch_work_item(mid, "operator-demo")
+    r.eq("launch creates a session once a slot is free", res.outcome, "created")
+    manual = w.wi(mid)
+    r.eq("item now session_active", manual.state, WorkItemState.session_active)
+    labels = w.issue_labels(manual)
+    r.expect("dispatch:approved recorded on the issue", "dispatch:approved" in labels)
+    r.expect("awaiting-approval label removed", AWAITING_DISPATCH_LABEL not in labels)
+    comments = w.gh.issues[manual.issue_number or 0].comments
+    r.expect(
+        "operator audit comment on the issue",
+        any("operator-demo" in c and "launched" in c for c in comments),
+        comments,
+    )
+    r.expect("operator_launch event", "operator_launch" in w.event_names(mid))
+    reqs = w.devin.created_requests()
+    r.eq("exactly two sessions exist", len(reqs), 2)
+    r.eq("operator session capped at the kind cap", reqs[-1].max_acu_limit, manual.acu_cap)
+    r.expect("operator session tagged wi-<id>", f"wi-{mid}" in reqs[-1].tags)
+
+    again = w.orch.launch(mid, operator="operator-demo")
+    r.eq(
+        "second launch refused: session in flight",
+        again.reason,
+        LaunchBlock.session_in_flight.value,
+    )
+    r.eq("still two sessions", len(w.devin.created_requests()), 2)
+
+    manual, _ = _to_ready_for_human(
+        w, r, manual, _dep_output("requests", "2.31.0", "2.32.0"), DEP_FILES, acus=1.4
+    )
+    manual, merge = _merge(w, r, manual)
+    w.apply_run(w.ingest(w.closing_run(merge, "cryptography")))
+    r.eq(
+        "operator-launched item closes on a source-matching rescan",
+        w.state_of(mid),
+        WorkItemState.verified,
+    )
+    r.eq("finding fixed", w.finding_by_vuln("CVE-2024-35195").state, FindingState.fixed)
 
 
 # ----------------------------------------------------------------------------- DEMO

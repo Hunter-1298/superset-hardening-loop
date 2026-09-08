@@ -16,6 +16,7 @@ from sqlmodel import col, select
 
 from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
+from hardening_loop.dashboard.labels import blocked_reason_text
 from hardening_loop.db import open_database, session_scope
 from hardening_loop.domain.enums import Kind, Severity, VerificationLevel, WorkItemState
 from hardening_loop.metrics import Metrics, compute_metrics
@@ -197,7 +198,8 @@ def test_html_pages_render(client: TestClient, path: str) -> None:
     r = client.get(path)
     assert r.status_code == 200, r.text[:300]
     assert "text/html" in r.headers["content-type"]
-    assert "REPLAY (no spend)" in r.text
+    assert "Replay mode:" in r.text and "No Devin ACUs were spent" in r.text
+    assert 'lang="en"' in r.text and 'name="viewport"' in r.text
 
 
 def test_overview_shows_required_metrics(client: TestClient, metrics: Metrics) -> None:
@@ -206,16 +208,25 @@ def test_overview_shows_required_metrics(client: TestClient, metrics: Metrics) -
         "Open HIGH/CRITICAL",
         "Gate ready for enforce",
         "First-try success",
-        "Remediation time",
+        "Median remediation time",
         "ACU per verified issue",
-        "Est. cost per verified issue",
-        "Issues by state",
+        "Cost per verified issue",
+        "Needs attention",
+        "Work items by state",
+        "Verification level per PR",
+        "Recent scans",
+        "Recent remediation activity",
         "Findings by kind",
-        "Throughput",
+        "Throughput per day",
     ):
         assert label in html
     assert f">{metrics.open_high_critical}<" in html
     assert "80%" in html
+    # the six lead metrics come first, breakdowns are folded into disclosures below them
+    assert html.index("Open HIGH/CRITICAL") < html.index("Needs attention")
+    assert html.index("Needs attention") < html.index("Recent scans")
+    assert html.index("Recent scans") < html.index("<details")
+    assert html.index("<details") < html.index("Findings by kind")
 
 
 def test_overview_kind_links_resolve(client: TestClient) -> None:
@@ -230,11 +241,24 @@ def test_overview_kind_links_resolve(client: TestClient) -> None:
     assert r.status_code == 422 and "unknown kind" in r.json()["detail"]
 
 
-def test_issue_page_shows_blocked_reason_and_events(client: TestClient) -> None:
-    html = client.get("/issues?state=needs_human").text
-    assert "blocked_reason" in html
+def test_issue_page_shows_blocked_reason_and_events(client: TestClient, engine: Engine) -> None:
+    with session_scope(engine) as db:
+        blocked = db.exec(
+            select(WorkItem).where(WorkItem.state == WorkItemState.needs_human)
+        ).first()
+        assert blocked is not None and blocked.blocked_reason
+        reason, blocked_id = blocked.blocked_reason, blocked.id
+    # the list shows the item, its detail page carries the blocked reason and next action
+    listing = client.get("/issues?state=needs_human").text
+    assert f'href="/issues/{blocked_id}"' in listing
+    assert reason not in listing
+    detail = client.get(f"/issues/{blocked_id}").text
+    assert reason in detail and "Next human action" in detail
+    assert "Retries and blockers" in detail
     html = client.get("/issues/2").text
-    assert "rescan_verified" in html and "Devin sessions" in html and "Events" in html
+    for section in ("Lifecycle", "Findings", "Devin sessions", "Pull requests and CI checks"):
+        assert section in html
+    assert "Verified by rescan" in html and 'class="timeline"' in html
 
 
 def test_issue_page_lists_session_prs_and_regression_lineage(
@@ -252,10 +276,10 @@ def test_issue_page_lists_session_prs_and_regression_lineage(
         moved = db.exec(select(Finding).where(Finding.work_item_id == regression_id)).all()
         assert moved
     html = client.get("/issues/2").text
-    assert f'<a href="{pr_url}">{pr_url}</a>' in html
+    assert f'<a href="{pr_url}" rel="noopener">' in html
     origin_html = client.get(f"/issues/{origin_id}").text
     assert f'href="/issues/{regression_id}"' in origin_html
-    assert f"Member findings ({len(moved)})" in origin_html
+    assert f'id="findings-heading">Findings <span class="count">{len(moved)}</span>' in origin_html
     assert f'href="/issues/{origin_id}"' in client.get(f"/issues/{regression_id}").text
 
 
@@ -279,6 +303,281 @@ def test_dashboard_is_read_only(client: TestClient, method: str) -> None:
     assert r.status_code == 405
     assert "read-only" in r.json()["detail"]
     assert r.headers["allow"] == "GET, HEAD, OPTIONS"
+
+
+def test_every_route_is_get_only(client: TestClient) -> None:
+    """Every registered route (pages, API, static) accepts only safe methods and rejects the
+    rest with 405 before any handler runs."""
+    from starlette.routing import Mount, Route
+
+    routes = client.app.routes  # type: ignore[attr-defined]
+    paths: list[str] = []
+    for route in routes:
+        if isinstance(route, Route):
+            assert route.methods is not None and route.methods <= {"GET", "HEAD"}, route.path
+            paths.append(
+                route.path.replace("{run_id}", "1")
+                .replace("{wi_id}", "2")
+                .replace("{finding_id}", "1")
+            )
+        elif isinstance(route, Mount):
+            paths.append(route.path + "/dashboard.css")
+    assert "/" in paths and "/api/metrics" in paths and "/static/dashboard.css" in paths
+    for path in paths:
+        assert client.get(path).status_code == 200, path
+        for method in ("POST", "PUT", "PATCH", "DELETE"):
+            r = client.request(method, path)
+            assert r.status_code == 405, (method, path)
+            assert r.headers["allow"] == "GET, HEAD, OPTIONS"
+
+
+# ---------------------------------------------------------------------------- redesign UI
+
+
+def test_layout_navigation_and_header(client: TestClient) -> None:
+    html = client.get("/runs").text
+    assert '<nav id="primary-nav" aria-label="Primary">' in html
+    nav = html[html.index('<nav id="primary-nav"') : html.index("</nav>")]
+    labels = re.findall(r"<span>([^<]+)</span></a>", nav)
+    assert labels == ["Overview", "CVEs", "Work items", "Scans", "Pull requests", "Report"]
+    assert 'href="/runs" aria-current="page"' in nav
+    assert nav.count('aria-current="page"') == 1
+    # compact context header: repository, branch, latest scan status, last updated
+    assert 'aria-label="Current context"' in html
+    for key in ("Repository", "Branch", "Latest scan", "Last updated"):
+        assert key in html
+    assert "Hunter-1298/superset" in html and ">main<" in html
+    assert re.search(r'href="/runs/\d+"', html)
+    assert "<time datetime=" in html
+    # accessibility scaffolding
+    assert '<a class="skip-link" href="#main">' in html
+    assert '<main id="main" tabindex="-1">' in html
+    assert 'aria-controls="primary-nav" aria-expanded="false"' in html
+
+
+@pytest.mark.parametrize(
+    ("path", "title"),
+    [
+        ("/", "Overview"),
+        ("/issues", "Work items"),
+        ("/runs", "Scans"),
+        ("/findings", "CVEs"),
+        ("/prs", "Pull requests"),
+        ("/report", "Run report"),
+    ],
+)
+def test_every_page_has_title_and_lede(client: TestClient, path: str, title: str) -> None:
+    html = client.get(path).text
+    assert re.search(rf"<h1>\s*{re.escape(title)}\s*</h1>", html), path
+    lede = re.search(r'<p class="lede">\s*(.+?)\s*</p>', html, re.S)
+    assert lede and len(lede.group(1)) > 20, path
+    assert html.count("<h1>") == 1
+
+
+def test_readable_labels_replace_raw_enums(client: TestClient) -> None:
+    def visible(html: str) -> str:
+        """Strip attributes, options and secondary/mono spans so only primary text remains."""
+        html = re.sub(
+            r"<(code|span|div|td)[^>]*class=\"[^\"]*(mono|secondary)[^\"]*\"[^>]*>.*?</\1>",
+            "",
+            html,
+            flags=re.S,
+        )
+        html = re.sub(r"<option[^>]*>.*?</option>", "", html, flags=re.S)
+        html = re.sub(r"<details.*?</details>", "", html, flags=re.S)
+        html = re.sub(r"\s(title|value|href)=\"[^\"]*\"", "", html)
+        return html
+
+    issues = client.get("/issues").text
+    assert "Needs attention" in issues and "Ready for review" in issues and "Verified" in issues
+    assert "Dependency upgrade" in issues and "Container hardening" in issues
+    for raw in ("needs_human", "ready_for_human", "rescan_verified", "dependency_upgrade"):
+        assert not re.search(rf">[^<]*\b{raw}\b[^<]*<", visible(issues)), raw
+    detail = client.get("/issues/2").text
+    assert "Devin session started" in detail and "Pull request opened" in detail
+    for raw in ("session_created", "pr_opened", "in_remediation", "awaiting_rescan"):
+        assert not re.search(rf">[^<]*\b{raw}\b[^<]*<", visible(detail)), raw
+    runs = client.get("/runs").text
+    assert "Complete" in runs and "Gate passed (report)" in runs
+    # badges never rely on colour alone: every badge carries readable text
+    for badge in re.findall(
+        r'<span class="badge badge-[a-z]+"[^>]*>\s*(.*?)\s*</span>', issues, re.S
+    ):
+        assert badge.strip(), "empty badge"
+
+
+def test_blocked_reasons_render_without_machine_prefix(client: TestClient, engine: Engine) -> None:
+    assert (
+        blocked_reason_text("blocked_reason:needs a VEX") == "Devin reported a blocker: needs a VEX"
+    )
+    assert blocked_reason_text("invalid_transition:queued:pr_opened") == (
+        "The controller refused a state transition: queued:pr_opened"
+    )
+    assert blocked_reason_text("no_change_needed_requires_human_verification") == (
+        "No change needed requires human verification"
+    )
+    assert blocked_reason_text("Plain sentence: with colon") == "Plain sentence: with colon"
+    assert blocked_reason_text(None) == ""
+
+    with session_scope(engine) as db:
+        blocked = db.exec(
+            select(WorkItem).where(col(WorkItem.state) == WorkItemState.needs_human.value)
+        ).first()
+        assert blocked is not None and blocked.blocked_reason
+        blocked_id, reason = blocked.id, blocked.blocked_reason
+    assert reason.startswith("blocked_reason:")
+    detail_text = reason.split(":", 1)[1][:40]
+    for html in (client.get("/").text, client.get(f"/issues/{blocked_id}").text):
+        assert detail_text in html
+        assert "Devin reported a blocker:" in html
+        prose = re.sub(r"<[^>]*class=\"[^\"]*mono[^\"]*\"[^>]*>[^<]*</[^>]+>", "", html)
+        assert not re.search(r">\s*blocked_reason:", prose)
+
+
+def test_report_outcome_cards_name_what_they_count(client: TestClient, engine: Engine) -> None:
+    html = client.get("/report").text
+    with session_scope(engine) as db:
+        states = [w.state for w in db.exec(select(WorkItem)).all()]
+    needing_person = sum(
+        1
+        for s in states
+        if s in (WorkItemState.needs_human, WorkItemState.ready_for_human, WorkItemState.failed)
+    )
+    assert needing_person >= 1
+    assert "Findings fixed" in html and "Findings in regression" in html
+    assert "Findings closed as blocked" in html
+    labels = re.findall(r'<div class="label">([^<]*)</div>', html)
+    assert "Blocked on a person" not in labels and "Regressions" not in labels
+    card = re.search(
+        r"Work items needing a person.*?<div class=\"value[^\"]*\">\s*(\d+)",
+        html,
+        re.S,
+    )
+    assert card is not None, "work-item card missing"
+    assert int(card.group(1)) == needing_person
+
+
+def test_work_item_filters_are_server_side(client: TestClient, engine: Engine) -> None:
+    def ids(path: str) -> list[int]:
+        html = client.get(path).text
+        assert html.count("<h1>") == 1
+        rows = html[html.index("<tbody") :] if "<tbody" in html else ""
+        return sorted({int(i) for i in re.findall(r'href="/issues/(\d+)"', rows)})
+
+    with session_scope(engine) as db:
+        items = [(w.id or 0, w) for w in db.exec(select(WorkItem)).all()]
+        all_ids = sorted(i for i, _ in items)
+        by_state = {i for i, w in items if w.state == WorkItemState.needs_human}
+        by_sev = {i for i, w in items if w.severity == Severity.high}
+        by_kind = {i for i, w in items if w.kind == Kind.container_hardening}
+        by_level = {
+            i for i, w in items if w.verification_level == VerificationLevel.rescan_verified
+        }
+        paramiko = {i for i, w in items if "paramiko" in w.title.lower()}
+        queue = {
+            i
+            for i, w in items
+            if w.state in (WorkItemState.needs_human, WorkItemState.ready_for_human)
+        }
+    assert all((by_state, by_sev, by_kind, by_level, paramiko, queue))
+    assert ids("/issues") == all_ids
+    assert ids("/issues?state=needs_human") == sorted(by_state)
+    assert ids("/issues?severity=high") == sorted(by_sev)
+    assert ids("/issues?kind=container_hardening") == ids("/issues?kind=3") == sorted(by_kind)
+    assert ids("/issues?level=rescan_verified") == sorted(by_level)
+    assert ids("/issues?q=PARAMIKO") == sorted(paramiko)
+    assert ids("/issues?queue=1") == sorted(queue)
+    assert ids("/issues?severity=high&level=rescan_verified") == sorted(by_sev & by_level)
+    # active filters are echoed as readable pills, invalid enum values are rejected
+    html = client.get("/issues?state=needs_human&kind=3&q=x").text
+    assert "Needs attention" in html and "Container hardening" in html
+    assert "Search: <strong>x</strong>" in html
+    # submitting the form with every select on "Any" sends blank values: no filter, no 422
+    blank = "/issues?q=&state=&severity=&kind=&level="
+    assert ids(blank) == all_ids
+    assert 'id="f-queue" type="checkbox" name="queue" value="1"' in client.get(blank).text
+    assert ids("/issues?q=paramiko&state=&severity=&kind=&level=") == sorted(paramiko)
+    assert ids("/issues?queue=1&state=&severity=&kind=&level=") == sorted(queue)
+    findings_all = client.get("/findings").text.count("<tr")
+    assert client.get("/findings?severity=&state=&kind=&layer=").text.count("<tr") == findings_all
+    # unknown state/severity values simply match nothing; kind/level aliases are validated
+    for bogus in ("/issues?state=bogus", "/issues?severity=bogus"):
+        r = client.get(bogus)
+        assert r.status_code == 200 and "No work items match" in r.text, bogus
+    assert client.get("/issues?kind=bogus").status_code == 422
+    assert client.get("/issues?level=bogus").status_code == 422
+    # search text is escaped, never reflected raw
+    html = client.get("/issues?q=%3Cscript%3Ealert(1)%3C/script%3E").text
+    assert "<script>alert(1)</script>" not in html and "&lt;script&gt;" in html
+
+
+def test_work_items_table_structure(client: TestClient) -> None:
+    html = client.get("/issues").text
+    assert 'class="table-wrap allow-sticky"' in html
+    assert '<table class="data">' in html
+    head = html[html.index("<thead") : html.index("</thead>")]
+    cols = [
+        re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<th[^>]*>(.*?)</th>", head, re.S)
+    ]
+    assert cols[:3] == ["Work item", "Severity", "State"]
+    # fingerprints belong to the detail page, not the list
+    assert "fingerprint" not in html.lower()
+
+
+def test_no_results_state(client: TestClient) -> None:
+    html = client.get("/issues?q=zzz-no-such-item").text
+    assert "No work items match" in html
+    assert 'href="/issues"' in html
+    findings = client.get("/findings?state=fixed&kind=unclassified").text
+    assert "No findings match" in findings
+
+
+def test_empty_database_states(tmp_path: Path) -> None:
+    empty = Settings(
+        data_dir=tmp_path,
+        database_file="empty.sqlite3",
+        replay_mode=True,
+        acu_cost_usd=ACU_COST,
+        repo_root=REPO_ROOT,
+    )
+    open_database(empty.database_path).dispose()
+    with TestClient(create_app(empty)) as c:
+        for path in ("/", "/issues", "/runs", "/findings", "/prs", "/report"):
+            r = c.get(path)
+            assert r.status_code == 200, path
+            assert 'class="empty' in r.text, path
+        html = c.get("/").text
+        assert "No scans yet" in html and "No work items yet" in html
+        assert "Nothing needs attention" in html
+        assert "No work items yet" in c.get("/issues").text
+        assert "No findings yet" in c.get("/findings").text
+        assert c.get("/api/metrics").json()["open_high_critical"] == 0
+        assert c.get("/report").text.count("<h1>") == 1
+
+
+def test_error_pages_are_html_for_browsers_and_json_for_api(client: TestClient) -> None:
+    r = client.get("/issues/9999", headers={"accept": "text/html"})
+    assert r.status_code == 404 and "text/html" in r.headers["content-type"]
+    assert "<h1>" in r.text and "Page not found" in r.text and 'href="/"' in r.text
+    r = client.get("/issues/9999", headers={"accept": "application/json"})
+    assert r.status_code == 404 and r.json()["detail"]
+    # the JSON API never switches to HTML, whatever the client accepts
+    r = client.get("/api/work-items/9999/events", headers={"accept": "text/html"})
+    assert r.status_code == 404 and r.headers["content-type"].startswith("application/json")
+
+
+def test_responsive_structure_and_no_inline_styles(client: TestClient) -> None:
+    css = client.get("/static/dashboard.css")
+    assert css.status_code == 200 and "text/css" in css.headers["content-type"]
+    text = css.text
+    assert "@media (max-width" in text and ".sidebar" in text and ".nav-toggle" in text
+    assert "position: sticky" in text
+    assert ":focus-visible" in text
+    assert "prefers-reduced-motion" in text
+    for path in ("/", "/issues", "/issues/2", "/runs", "/runs/1", "/findings", "/prs", "/report"):
+        html = client.get(path).text
+        assert " style=" not in html, path
+        assert "<table" not in html or '<table class="' in html, path
 
 
 # --------------------------------------------------------------------------------- report

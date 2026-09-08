@@ -1,41 +1,232 @@
 {% extends "base.html" %}
 {% block title %}Run report · Superset hardening loop{% endblock %}
 {% block content %}
-<h1>Run report <span class="muted">— {{ source }}</span></h1>
-<p><a href="/report.md">Markdown</a> · <a href="/api/report">JSON</a> · <a href="/report?live=1">recompute now</a></p>
-{% for n in report.notes %}<div class="banner">{{ n }}</div>{% endfor %}
-{% macro runblock(label, r) %}
-<div class="card">
-<div class="label">{{ label }}</div>
-{% if r %}
-<div class="value" style="font-size:15px">{{ r.external_run_id }} <span class="muted">{{ r.source_branch }} @ {{ r.source_sha|short }}</span></div>
-<div class="sub">status {{ r.status }} · trigger {{ r.trigger }} · gate {{ r.gate_mode }}: {{ 'pass' if r.gate_passed else 'fail' }}{% if r.gate_ready_for_enforce %} · <span class="ok">enforce-ready</span>{% endif %}</div>
-<div class="sub mono">lean {{ r.lean_digest }}</div>
-<div class="sub">raw {{ r.raw_total }} {{ r.raw_by_severity }}<br>policy {{ r.policy_total }} {{ r.policy_by_severity }}</div>
-<div class="sub">tools {{ r.tools }}</div>
-<div class="sub">db built {{ r.db_built_at }}</div>
-<div class="sub">jobs: {% for j in r.jobs %}<span class="{{ 'ok' if j.success else 'bad' }}">{{ j.name }}</span> {% endfor %}</div>
-{% else %}<div class="value muted">none</div>{% endif %}
+{% set b = report.baseline %}
+{% set l = report.latest %}
+{% set fixed_total = report.outcomes.get("fixed", 0) %}
+{% set disposition_total = report.outcomes.get("approved_disposition", 0) %}
+{% set regression_total = report.outcomes.get("regression", 0) %}
+{% set blocked_total = report.outcomes.get("human_blocked", 0) %}
+{% set needs_person_total = report.work_items_by_state.get("needs_human", 0) + report.work_items_by_state.get("ready_for_human", 0) + report.work_items_by_state.get("failed", 0) %}
+{% call ui.page_header("Run report", "Baseline against the latest " ~ branch ~ " scan, with every finding outcome and each dependency upgrade compared to " ~ comparison_branch ~ ".") %}
+  <a href="/report.md">Markdown</a>
+  <a href="/api/report">JSON</a>
+  <a href="/report?live=1">Recompute now</a>
+{% endcall %}
+<p class="small muted">Generated {{ report.generated_at|dt }} · {{ source }}</p>
+
+{% if report.notes %}
+<div class="notice notice-warning" role="status">{% for n in report.notes %}<p>{{ n }}</p>{% endfor %}</div>
+{% endif %}
+
+{% if b or l %}
+<section class="section" aria-labelledby="decision-heading">
+  {{ ui.section_head("Where the remediation branch stands", id="decision-heading") }}
+  <div class="card compare">
+    <div class="col">
+      <h3>Baseline</h3>
+      {% if b %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ b.policy_by_severity.get("HIGH", 0) + b.policy_by_severity.get("CRITICAL", 0) }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ b.raw_by_severity.get("HIGH", 0) + b.raw_by_severity.get("CRITICAL", 0) }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ b.raw_total }} / {{ b.policy_total }}</span></div>
+      <div class="row"><span class="k">Gate</span>{{ ui.gate_badge(b.gate_passed, b.gate_mode) }}</div>
+      <div class="row"><span class="k">Scan</span><a href="/runs/{{ b.id }}">{{ b.external_run_id }}</a></div>
+      <div class="row"><span class="k">Commit</span>{{ ui.sha(b.source_sha) }}</div>
+      {% else %}<p class="muted">No baseline scan ingested.</p>{% endif %}
+    </div>
+    <div class="col">
+      <h3>Change</h3>
+      {% if b and l %}
+      {% set bh = b.policy_by_severity.get("HIGH", 0) + b.policy_by_severity.get("CRITICAL", 0) %}
+      {% set lh = l.policy_by_severity.get("HIGH", 0) + l.policy_by_severity.get("CRITICAL", 0) %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ ui.delta(lh - bh) }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ ui.delta((l.raw_by_severity.get("HIGH", 0) + l.raw_by_severity.get("CRITICAL", 0)) - (b.raw_by_severity.get("HIGH", 0) + b.raw_by_severity.get("CRITICAL", 0))) }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ ui.delta(l.raw_total - b.raw_total) }} / {{ ui.delta(l.policy_total - b.policy_total) }}</span></div>
+      <div class="row"><span class="k">Ready for enforce mode</span>{{ ui.yes_no_badge(l.gate_ready_for_enforce, title="True only when policy HIGH and CRITICAL are both zero") }}</div>
+      <div class="row"><span class="k">Can close findings</span>{{ ui.yes_no_badge(report.latest_is_closing_candidate, title="Complete, successful scan of " ~ branch ~ " with every original detector") }}</div>
+      {% else %}<p class="muted">Appears once both a baseline and a later {{ branch }} scan exist.</p>{% endif %}
+    </div>
+    <div class="col">
+      <h3>Latest {{ branch }}</h3>
+      {% if l %}
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ l.policy_by_severity.get("HIGH", 0) + l.policy_by_severity.get("CRITICAL", 0) }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ l.raw_by_severity.get("HIGH", 0) + l.raw_by_severity.get("CRITICAL", 0) }}</span></div>
+      <div class="row"><span class="k">All findings, raw / policy</span><span>{{ l.raw_total }} / {{ l.policy_total }}</span></div>
+      <div class="row"><span class="k">Gate</span>{{ ui.gate_badge(l.gate_passed, l.gate_mode) }}</div>
+      <div class="row"><span class="k">Scan</span><a href="/runs/{{ l.id }}">{{ l.external_run_id }}</a></div>
+      <div class="row"><span class="k">Commit</span>{{ ui.sha(l.source_sha) }}</div>
+      {% else %}<p class="muted">No later scan of {{ branch }} yet.</p>{% endif %}
+    </div>
+    {% if l %}<div class="verdict"><strong>Latest gate verdict.</strong> {{ l.gate_reason }}</div>{% endif %}
+  </div>
+</section>
+{% else %}
+{{ ui.empty("No scans to report on", "The report fills in once a baseline scan has been ingested.") }}
+{% endif %}
+
+<section class="stats compact" aria-label="Remediation outcomes">
+  {{ ui.stat("Findings fixed", fixed_total, tone="success" if fixed_total else None) }}
+  {{ ui.stat("Approved dispositions", disposition_total) }}
+  {{ ui.stat("Findings in regression", regression_total, tone="danger" if regression_total else None) }}
+  {{ ui.stat("Findings closed as blocked", blocked_total, tone="warning" if blocked_total else None) }}
+  {{ ui.stat("Work items needing a person", needs_person_total, tone="warning" if needs_person_total else None) }}
+  {{ ui.stat("ACU used", report.acu_total|num, note=report.verified_items ~ " verified · " ~ report.retries_total ~ " retries") }}
+  {{ ui.stat("Estimated cost", report.estimated_cost_total_usd|money, note=("$" ~ report.acu_cost_usd ~ " per ACU") if report.acu_cost_usd else "ACU price not configured") }}
+</section>
+
+<section class="section" aria-labelledby="deps-heading">
+  {{ ui.section_head("Dependency upgrades compared with " ~ comparison_branch, id="deps-heading", count=report.dependencies|length) }}
+  {% if report.dependencies %}
+  <div class="table-wrap allow-sticky">
+  <table class="data">
+    <thead><tr>
+      <th scope="col" class="w-title">Package</th>
+      <th scope="col">Baseline</th>
+      <th scope="col">Devin target</th>
+      <th scope="col">{{ comparison_branch }}</th>
+      <th scope="col">Compared with upstream</th>
+      <th scope="col">State</th>
+      <th scope="col">Verification</th>
+      <th scope="col" class="num">ACU</th>
+      <th scope="col" class="num">Retries</th>
+      <th scope="col">Links</th>
+    </tr></thead>
+    <tbody>
+    {% for d in report.dependencies %}
+    <tr>
+      <td class="w-title"><a class="primary mono" href="/issues/{{ d.work_item_id }}">{{ d.package }}</a><span class="secondary mono">#{{ d.work_item_id }} · {{ d.vuln_ids|join(", ") }}</span>{% if d.bound_blocked %}<span class="secondary" title="A pyproject upper bound blocks the minimum fixed version {{ d.min_fixed_version or '' }}">upper bound blocks the upgrade</span>{% endif %}</td>
+      <td class="mono">{{ d.baseline_version or "—" }}</td>
+      <td class="mono">{{ d.devin_target_version or "—" }}{% if d.min_fixed_version %}<span class="secondary">fix ≥ {{ d.min_fixed_version }}</span>{% endif %}</td>
+      <td class="mono">{{ d.upstream_master_version or "—" }}</td>
+      <td>{{ ui.badge(d.relation_to_upstream|relation_label) }}</td>
+      <td>{{ ui.state_badge(d.state) }}</td>
+      <td>{{ ui.level_badge(d.verification_level) }}</td>
+      <td class="num">{{ d.acus|num }}</td>
+      <td class="num">{{ d.retries_used }}</td>
+      <td>{% if d.pr_url %}{{ ui.external_link(d.pr_url, "Pull request") }}{% else %}<span class="muted">—</span>{% endif %}{% if d.blocked_reason %}<span class="secondary">{{ d.blocked_reason|blocked_reason }}</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if report.upstream_pins_source %}<p class="small muted mt">Upstream pins from <span class="mono">{{ report.upstream_pins_source }}</span>.</p>{% endif %}
+  {% else %}
+  {{ ui.empty("No dependency-upgrade work items", compact=True) }}
+  {% endif %}
+</section>
+
+<div class="grid grid-2">
+  <section class="section" aria-labelledby="sev-heading">
+    {{ ui.section_head("Severity change, baseline to latest", id="sev-heading") }}
+    {% if report.severity_deltas %}
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Severity</th><th scope="col" class="num">Raw</th><th scope="col" class="num">Δ raw</th><th scope="col" class="num">Policy</th><th scope="col" class="num">Δ policy</th></tr></thead>
+      <tbody>
+      {% for d in report.severity_deltas %}
+      <tr>
+        <td>{{ ui.severity_badge(d.severity) }}</td>
+        <td class="num">{{ d.baseline_raw }} → {{ d.latest_raw }}</td>
+        <td class="num">{{ ui.delta(d.raw_delta) }}</td>
+        <td class="num">{{ d.baseline_policy }} → {{ d.latest_policy }}</td>
+        <td class="num">{{ ui.delta(d.policy_delta) }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}
+    {{ ui.empty("No comparison yet", compact=True) }}
+    {% endif %}
+  </section>
+
+  <section class="section" aria-labelledby="outcomes-heading">
+    {{ ui.section_head("Finding outcomes and work item states", id="outcomes-heading") }}
+    <div class="table-wrap">
+    <table class="data">
+      <thead><tr><th scope="col">Finding outcome</th><th scope="col" class="num">Findings</th></tr></thead>
+      <tbody>
+      {% for k, n in report.outcomes.items() %}<tr><td>{{ ui.finding_state_badge(k) }}</td><td class="num">{{ n }}</td></tr>{% else %}<tr><td colspan="2" class="muted">No findings.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <table class="data">
+      <thead><tr><th scope="col">Work item state</th><th scope="col" class="num">Work items</th></tr></thead>
+      <tbody>
+      {% for k, n in report.work_items_by_state.items() %}<tr><td>{{ ui.state_badge(k) }}</td><td class="num">{{ n }}</td></tr>{% else %}<tr><td colspan="2" class="muted">No work items.</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
 </div>
-{% endmacro %}
-<div class="grid2">{{ runblock('Baseline', report.baseline) }}{{ runblock('Latest ' ~ branch ~ ' run', report.latest) }}</div>
-<h2>Severity deltas (raw / policy)</h2>
-<table><tr><th>Severity</th><th class="num">Raw baseline</th><th class="num">Raw latest</th><th class="num">Δ</th><th class="num">Policy baseline</th><th class="num">Policy latest</th><th class="num">Δ</th></tr>
-{% for d in report.severity_deltas %}<tr><td class="sev-{{ d.severity }}">{{ d.severity }}</td><td class="num">{{ d.baseline_raw }}</td><td class="num">{{ d.latest_raw }}</td><td class="num {{ 'ok' if d.raw_delta < 0 else ('bad' if d.raw_delta > 0 else '') }}">{{ d.raw_delta }}</td><td class="num">{{ d.baseline_policy }}</td><td class="num">{{ d.latest_policy }}</td><td class="num {{ 'ok' if d.policy_delta < 0 else ('bad' if d.policy_delta > 0 else '') }}">{{ d.policy_delta }}</td></tr>{% endfor %}
-</table>
-<div class="grid2">
-<div><h2>Finding outcomes</h2><table><tr><th>Outcome</th><th class="num">Count</th></tr>{% for k, n in report.outcomes.items() %}<tr><td>{{ k }}</td><td class="num">{{ n }}</td></tr>{% endfor %}</table></div>
-<div><h2>Work items by state</h2><table><tr><th>State</th><th class="num">Count</th></tr>{% for k, n in report.work_items_by_state.items() %}<tr><td>{{ k }}</td><td class="num">{{ n }}</td></tr>{% endfor %}</table>
-<div class="cards" style="margin-top:.75rem"><div class="card"><div class="label">ACU total</div><div class="value">{{ report.acu_total|num }}</div><div class="sub">{{ report.verified_items }} verified · {{ report.retries_total }} retries</div></div><div class="card"><div class="label">Estimated cost</div><div class="value">{{ report.estimated_cost_total_usd|money }}</div><div class="sub">{% if report.acu_cost_usd %}${{ report.acu_cost_usd }}/ACU{% endif %}</div></div></div></div>
-</div>
-<h2>Dependency upgrades vs {{ comparison_branch }} {% if report.upstream_master_sha %}<span class="mono muted">@ {{ report.upstream_master_sha|short }}</span>{% endif %}</h2>
-{% if report.upstream_pins_source %}<p class="muted">Upstream pins from <code>{{ report.upstream_pins_source }}</code></p>{% endif %}
-<table><tr><th>Item</th><th>Package</th><th>Baseline</th><th>Devin target</th><th>{{ comparison_branch }}</th><th>Relation</th><th>Min fixed</th><th>Vulns</th><th>State</th><th>Verification</th><th class="num">ACU</th><th class="num">Retries</th><th>PR</th></tr>
-{% for d in report.dependencies %}<tr><td><a href="/issues/{{ d.work_item_id }}">#{{ d.work_item_id }}</a></td><td class="mono">{{ d.package }}{% if d.bound_blocked %} <span class="pill warn">bound-blocked</span>{% endif %}</td><td class="mono">{{ d.baseline_version or '' }}</td><td class="mono">{{ d.devin_target_version or '—' }}</td><td class="mono">{{ d.upstream_master_version or '—' }}</td><td>{{ d.relation_to_upstream }}</td><td class="mono">{{ d.min_fixed_version or '' }}</td><td class="mono">{{ d.vuln_ids|join(', ') }}</td><td>{{ d.state }}</td><td>{{ d.verification_label }}</td><td class="num">{{ d.acus|num }}</td><td class="num">{{ d.retries_used }}</td><td>{% if d.pr_url %}<a href="{{ d.pr_url }}">PR</a>{% endif %}{% if d.blocked_reason %} <span class="bad">{{ d.blocked_reason }}</span>{% endif %}</td></tr>
-{% else %}<tr><td colspan="13" class="muted">No dependency-upgrade work items.</td></tr>{% endfor %}
-</table>
-<h2>All work items</h2>
-<table><tr><th>Item</th><th>Kind</th><th>Title</th><th>State</th><th>Verification</th><th class="num">ACU</th><th class="num">Cost</th><th class="num">Retries</th><th>First head green</th><th>Members / outcomes</th><th>Blocked reason</th></tr>
-{% for w in report.work_items %}<tr><td><a href="/issues/{{ w.work_item_id }}">#{{ w.work_item_id }}</a></td><td>{{ w.kind }}</td><td>{{ w.title }}</td><td>{{ w.state }}</td><td>{{ w.verification_label }}</td><td class="num">{{ w.acus|num }}</td><td class="num">{{ w.estimated_cost_usd|money if w.estimated_cost_usd is not none else 'n/a' }}</td><td class="num">{{ w.retries_used }}</td><td>{{ w.first_head_checks_green }}</td><td class="mono">{{ w.member_findings }} · {{ w.member_outcomes }}</td><td class="mono">{{ w.blocked_reason or '' }}</td></tr>{% endfor %}
-</table>
+
+<details class="disclosure">
+  <summary>All work items <span class="muted">{{ report.work_items|length }}</span></summary>
+  <div class="disclosure-body table-wrap">
+    {% if report.work_items %}
+    <table class="data">
+      <thead><tr>
+        <th scope="col" class="w-title">Work item</th>
+        <th scope="col">Kind</th>
+        <th scope="col">State</th>
+        <th scope="col">Verification</th>
+        <th scope="col" class="num">ACU</th>
+        <th scope="col" class="num">Cost</th>
+        <th scope="col" class="num">Retries</th>
+        <th scope="col">First head green</th>
+        <th scope="col">Member outcomes</th>
+      </tr></thead>
+      <tbody>
+      {% for w in report.work_items %}
+      <tr>
+        <td class="w-title"><a class="primary" href="/issues/{{ w.work_item_id }}">{{ w.title }}</a><span class="secondary mono">#{{ w.work_item_id }}</span>{% if w.blocked_reason %}<span class="secondary">{{ w.blocked_reason|blocked_reason }}</span>{% endif %}</td>
+        <td>{{ ui.kind_badge(w.kind) }}</td>
+        <td>{{ ui.state_badge(w.state) }}</td>
+        <td>{{ ui.level_badge(w.verification_level) }}</td>
+        <td class="num">{{ w.acus|num }}<span class="secondary">cap {{ w.acu_cap|num }}</span></td>
+        <td class="num">{{ w.estimated_cost_usd|money }}</td>
+        <td class="num">{{ w.retries_used }}</td>
+        <td>{% if w.first_head_checks_green is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(w.first_head_checks_green) }}{% endif %}</td>
+        <td class="small">{{ w.member_findings }} finding{{ "" if w.member_findings == 1 else "s" }}: {% for k, n in w.member_outcomes.items() %}{{ n }} {{ k|outcome_label|lower }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    {{ ui.empty("No work items", compact=True) }}
+    {% endif %}
+  </div>
+</details>
+
+{% if b or l %}
+<details class="disclosure">
+  <summary>Raw scan facts</summary>
+  <div class="disclosure-body padded grid grid-2">
+    {% for label, r in [("Baseline", b), ("Latest " ~ branch, l)] if r %}
+    <div>
+      <h3>{{ label }} <span class="mono muted">{{ r.external_run_id }}</span></h3>
+      <dl class="kv mt">
+        <dt>Branch</dt><dd class="mono">{{ r.source_branch }}</dd>
+        <dt>Commit</dt><dd>{{ ui.sha(r.source_sha, 40) }}</dd>
+        <dt>Trigger</dt><dd>{{ r.trigger|trigger_label }}</dd>
+        <dt>Status</dt><dd>{{ ui.run_status_badge(r.status) }}</dd>
+        <dt>Platform</dt><dd class="mono">{{ r.platform }}</dd>
+        <dt>Lean image</dt><dd class="mono">{{ r.lean_digest or "—" }}</dd>
+        <dt>CI image</dt><dd class="mono">{{ r.ci_digest or "—" }}</dd>
+        <dt>Ingested</dt><dd>{{ r.ingested_at|dt }}</dd>
+        <dt>Jobs</dt><dd>{% for j in r.jobs %}<span class="mono">{{ j.name }}</span> {{ ui.yes_no_badge(j.success) }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>
+        <dt>Raw by layer</dt><dd>{% for k, n in r.raw_by_layer.items() %}{{ k|layer_label }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+        <dt>Raw by scanner</dt><dd>{% for k, n in r.raw_by_scanner.items() %}{{ k|scanner_label }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+        <dt>Raw by kind</dt><dd>{% for k, n in r.raw_by_kind.items() %}{{ k|kind }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+        <dt>Policy by kind</dt><dd>{% for k, n in r.policy_by_kind.items() %}{{ k|kind }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+        <dt>Tools</dt><dd class="mono">{% for k, v in r.tools.items() %}{{ k }} {{ v }}{% if not loop.last %} · {% endif %}{% endfor %}</dd>
+        <dt>Databases built</dt><dd>{% for k, v in r.db_built_at.items() %}<span class="mono">{{ k }}</span> {{ v|dt }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>
+      </dl>
+    </div>
+    {% endfor %}
+  </div>
+</details>
+{% endif %}
 {% endblock %}

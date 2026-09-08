@@ -1,26 +1,110 @@
 {% extends "base.html" %}
-{% block title %}Issues · Superset hardening loop{% endblock %}
+{% block title %}Work items · Superset hardening loop{% endblock %}
 {% block content %}
-<h1>Work items / issues <span class="muted">({{ items|length }})</span></h1>
-<p class="filters">Filters: {% for k, v in filters.items() if v is not none %}<span class="pill">{{ k }}={{ v }}</span> {% endfor %}<a href="/issues">clear</a>
- · <a href="/issues?state=needs_human">needs_human</a> <a href="/issues?state=ready_for_human">ready_for_human</a> <a href="/issues?state=verified">verified</a></p>
-<table>
-<tr><th>#</th><th>Kind</th><th>Group</th><th>Severity</th><th>State</th><th>Verification</th><th class="num">ACU / cap</th><th class="num">Cost</th><th class="num">Retries</th><th>Issue</th><th>PR</th><th>Blocked reason</th></tr>
-{% for w in items %}
-<tr>
-<td><a href="/issues/{{ w.id }}">{{ w.id }}</a></td>
-<td>{{ w.kind.name }}</td>
-<td class="mono">{{ w.group_key }}{% if w.regression_of_work_item_id %} <span class="pill bad">regression of #{{ w.regression_of_work_item_id }}</span>{% endif %}</td>
-<td class="sev-{{ w.severity.value }}">{{ w.severity.value }}{% if w.risk.value != 'normal' %} <span class="pill warn">{{ w.risk.value }}</span>{% endif %}</td>
-<td class="{{ 'ok' if w.state.value == 'verified' else ('bad' if w.state.value in ('needs_human', 'failed', 'abandoned') else '') }}">{{ w.state.value }}</td>
-<td>{{ w.verification_level.label }}</td>
-<td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }} / {{ w.acu_cap }}</td>
-<td class="num">{{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money if acu_cost_usd is not none else 'n/a' }}</td>
-<td class="num">{{ w.retries_used }}</td>
-<td>{% if w.issue_url %}<a href="{{ w.issue_url }}">#{{ w.issue_number }}</a>{% endif %}</td>
-<td>{% if w.pr_url %}<a href="{{ w.pr_url }}">#{{ w.pr_number }}</a>{% endif %}</td>
-<td class="mono">{{ w.blocked_reason or '' }}{% if w.human_resolution %} <span class="pill info">{{ w.human_resolution }}</span>{% endif %}</td>
-</tr>
-{% else %}<tr><td colspan="12" class="muted">No work items.</td></tr>{% endfor %}
+{% set active = [] %}
+{% for k, v in filters.items() if v %}{% set _ = active.append(k) %}{% endfor %}
+{{ ui.page_header("Work items", total ~ " work item" ~ ("" if total == 1 else "s") ~ " on " ~ branch ~ ", one GitHub issue and one Devin session each.") }}
+
+<section class="section" aria-label="Work items">
+<form class="filters" method="get" action="/issues" role="search" aria-label="Filter work items">
+  <div class="field grow">
+    <label for="f-q">Search</label>
+    <input id="f-q" type="search" name="q" value="{{ filters.q or '' }}" placeholder="Title, package, #id, issue or PR number">
+  </div>
+  <div class="field">
+    <label for="f-state">State</label>
+    <select id="f-state" name="state">
+      <option value="">Any</option>
+      {% for s in work_item_states %}<option value="{{ s.value }}"{% if filters.state == s.value %} selected{% endif %}>{{ (s|wi_state).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-severity">Severity</label>
+    <select id="f-severity" name="severity">
+      <option value="">Any</option>
+      {% for s in severities %}<option value="{{ s.value }}"{% if filters.severity and filters.severity|upper == s.value %} selected{% endif %}>{{ (s|severity_label).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-kind">Kind</label>
+    <select id="f-kind" name="kind">
+      <option value="">Any</option>
+      {% for k in kinds %}<option value="{{ k.slug }}"{% if filters.kind in (k.slug, k.value|string) %} selected{% endif %}>{{ (k|kind_label).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-level">Verification</label>
+    <select id="f-level" name="level">
+      <option value="">Any</option>
+      {% for lv in verification_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|level_label).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field check">
+    <input id="f-queue" type="checkbox" name="queue" value="1"{% if filters.queue %} checked{% endif %}>
+    <label for="f-queue">Needs a person</label>
+  </div>
+  <div class="actions">
+    <button class="btn btn-primary" type="submit">Apply</button>
+    {% if active %}<a href="/issues">Clear</a>{% endif %}
+  </div>
+</form>
+
+{% if active %}
+<div class="active-filters" aria-label="Active filters">
+  <span>{{ items|length }} of {{ total }} · </span>
+  {% if filters.queue %}<span class="pill">Needs a person</span>{% endif %}
+  {% if filters.q %}<span class="pill">Search: <strong>{{ filters.q }}</strong></span>{% endif %}
+  {% if filters.state %}<span class="pill">State: <strong>{{ (filters.state|wi_state).text }}</strong></span>{% endif %}
+  {% if filters.severity %}<span class="pill">Severity: <strong>{{ (filters.severity|severity_label).text }}</strong></span>{% endif %}
+  {% if filters.kind %}<span class="pill">Kind: <strong>{{ filters.kind|kind }}</strong></span>{% endif %}
+  {% if filters.level %}<span class="pill">Verification: <strong>{{ (filters.level|level_label).text }}</strong></span>{% endif %}
+</div>
+{% endif %}
+
+{% if items %}
+<div class="table-wrap allow-sticky">
+<table class="data">
+  <thead><tr>
+    <th scope="col" class="w-title">Work item</th>
+    <th scope="col">Severity</th>
+    <th scope="col">State</th>
+    <th scope="col">Kind</th>
+    <th scope="col">Verification</th>
+    <th scope="col" class="num">ACU</th>
+    {% if acu_cost_usd %}<th scope="col" class="num">Est. cost</th>{% endif %}
+    <th scope="col" class="w-links">GitHub</th>
+    <th scope="col" class="w-date">Updated</th>
+  </tr></thead>
+  <tbody>
+  {% for w in items %}
+  <tr>
+    <td class="w-title">
+      <a class="primary" href="/issues/{{ w.id }}">{{ w.title }}</a>
+      <span class="secondary"><span class="mono">#{{ w.id }}</span>{% if w.retries_used %} · {{ w.retries_used }} retr{{ 'y' if w.retries_used == 1 else 'ies' }}{% endif %}{% if w.regression_of_work_item_id %} · regression of <a href="/issues/{{ w.regression_of_work_item_id }}">#{{ w.regression_of_work_item_id }}</a>{% endif %}{% if w.state.value in ('needs_human', 'failed') and w.blocked_reason %} · blocked{% endif %}</span>
+    </td>
+    <td>{{ ui.severity_badge(w.severity) }}</td>
+    <td>{{ ui.state_badge(w.state) }}</td>
+    <td>{{ ui.kind_badge(w.kind) }}</td>
+    <td>{{ ui.level_badge(w.verification_level) }}</td>
+    <td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }}<span class="secondary">of {{ w.acu_cap|num(0) }}</span></td>
+    {% if acu_cost_usd %}<td class="num">{{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money }}</td>{% endif %}
+    <td class="w-links">
+      {% if w.issue_url %}<a href="{{ w.issue_url }}">Issue #{{ w.issue_number }}</a>{% endif %}
+      {% if w.pr_url %}<a href="{{ w.pr_url }}">PR #{{ w.pr_number }}</a>{% endif %}
+      {% if not w.issue_url and not w.pr_url %}<span class="muted">—</span>{% endif %}
+    </td>
+    <td class="w-date"><time datetime="{{ w.updated_at.isoformat() }}">{{ w.updated_at|dt }}</time></td>
+  </tr>
+  {% endfor %}
+  </tbody>
 </table>
+</div>
+{% elif total == 0 %}
+{{ ui.empty("No work items yet", "Work items are created when a scan is ingested and its findings are classified.") }}
+{% else %}
+{% call ui.empty("No work items match these filters") %}
+<p class="hint"><a href="/issues">Clear filters</a></p>
+{% endcall %}
+{% endif %}
+</section>
 {% endblock %}

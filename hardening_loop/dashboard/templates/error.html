@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ error_status }} · Superset hardening loop{% endblock %}
+{% block content %}
+{{ ui.page_header(
+  "Page not found" if error_status == 404 else ("Invalid request" if error_status == 422 else "Something went wrong"),
+  "HTTP " ~ error_status ~ ". " ~ error_detail
+) }}
+<p><a href="/">Back to the overview</a> · <a href="/issues">Work items</a> · <a href="/runs">Scans</a></p>
+{% endblock %}

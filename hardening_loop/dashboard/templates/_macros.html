@@ -1,0 +1,66 @@
+{# Reusable presentation macros. Status text always accompanies colour. #}
+
+{% macro badge(label, title=None) -%}
+<span class="badge badge-{{ label.tone.value }}"{% if title or label.hint %} title="{{ title or label.hint }}"{% endif %}>{{ label.text }}</span>
+{%- endmacro %}
+
+{% macro plain(label, title=None) -%}
+<span class="label-text"{% if title or label.hint %} title="{{ title or label.hint }}"{% endif %}>{{ label.text }}</span>
+{%- endmacro %}
+
+{% macro state_badge(state) -%}{{ badge(state|wi_state) }}{%- endmacro %}
+{% macro finding_state_badge(state) -%}{{ badge(state|finding_state) }}{%- endmacro %}
+{% macro severity_badge(sev) -%}{{ badge(sev|severity_label) }}{%- endmacro %}
+{% macro kind_badge(kind) -%}{{ plain(kind|kind_label) }}{%- endmacro %}
+{% macro level_badge(level) -%}{{ plain(level|level_label, title=level|level) }}{%- endmacro %}
+{% macro run_status_badge(status) -%}{{ badge(status|run_status) }}{%- endmacro %}
+{% macro pr_state_badge(state) -%}{{ badge(state|pr_state) }}{%- endmacro %}
+{% macro check_badge(conclusion) -%}{{ badge(conclusion|check_label) }}{%- endmacro %}
+{% macro yes_no_badge(value, title=None) -%}{{ plain(value|yes_no, title=title) }}{%- endmacro %}
+{% macro gate_badge(passed, mode) -%}{{ badge(gate_label(passed, mode)) }}{%- endmacro %}
+
+{% macro sha(value, length=12) -%}
+{% if value %}<code class="mono" title="{{ value }}">{{ value[:length] }}</code>{% else %}<span class="muted">—</span>{% endif %}
+{%- endmacro %}
+
+{% macro delta(value) -%}
+{% if value is none %}<span class="muted">n/a</span>{% elif value < 0 %}<span class="delta-neg">{{ value|delta }}</span>{% elif value > 0 %}<span class="delta-pos">{{ value|delta }}</span>{% else %}<span class="delta-zero">0</span>{% endif %}
+{%- endmacro %}
+
+{% macro empty(title, hint=None, compact=False) -%}
+<div class="empty{% if compact %} compact{% endif %}" role="status">
+  <p class="title">{{ title }}</p>
+  {% if hint %}<p class="hint">{{ hint }}</p>{% endif %}
+  {{ caller() if caller is defined }}
+</div>
+{%- endmacro %}
+
+{% macro page_header(title, lede, crumbs=None) -%}
+<header class="page-header">
+  <div>
+    {% if crumbs %}<nav class="breadcrumb" aria-label="Breadcrumb">{% for text, href in crumbs %}{% if loop.last %}<span aria-current="page">{{ text }}</span>{% else %}<a href="{{ href }}">{{ text }}</a><span aria-hidden="true">/</span>{% endif %}{% endfor %}</nav>{% endif %}
+    <h1>{{ title }}</h1>
+    <p class="lede">{{ lede }}</p>
+  </div>
+  {% if caller is defined %}<div class="page-actions">{{ caller() }}</div>{% endif %}
+</header>
+{%- endmacro %}
+
+{% macro section_head(title, id=None, count=None, more_href=None, more_text=None, level=2) -%}
+<div class="section-head">
+  <h{{ level }}{% if id %} id="{{ id }}"{% endif %}>{{ title }}{% if count is not none %} <span class="count">{{ count }}</span>{% endif %}</h{{ level }}>
+  {% if more_href %}<a class="more" href="{{ more_href }}">{{ more_text or 'View all' }}</a>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro stat(label, value, note=None, tone=None, href=None) -%}
+<div class="stat">
+  <div class="label">{{ label }}</div>
+  <div class="value{% if tone %} is-{{ tone }}{% endif %}">{% if href %}<a href="{{ href }}">{{ value }}</a>{% else %}{{ value }}{% endif %}</div>
+  {% if note %}<div class="note">{{ note }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{% macro external_link(href, text) -%}
+<a href="{{ href }}" rel="noopener">{{ text }}<span class="sr-only"> (opens GitHub or Devin)</span></a>
+{%- endmacro %}

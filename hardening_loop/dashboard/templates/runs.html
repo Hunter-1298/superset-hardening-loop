@@ -1,6 +1,50 @@
 {% extends "base.html" %}
-{% block title %}Runs · Superset hardening loop{% endblock %}
+{% block title %}Scans · Superset hardening loop{% endblock %}
 {% block content %}
-<h1>Scan runs</h1>
-{% include "_runs_table.html" %}
+{{ ui.page_header("Scans", runs|length ~ " ingested security-scan run" ~ ("" if runs|length == 1 else "s") ~ ". Raw counts are never suppressed; policy counts apply approved OpenVEX and decide the gate.") }}
+
+{% if baseline and latest and baseline.id != latest.id %}
+{% set b_hc = baseline.policy_by_severity.get("HIGH", 0) + baseline.policy_by_severity.get("CRITICAL", 0) %}
+{% set l_hc = latest.policy_by_severity.get("HIGH", 0) + latest.policy_by_severity.get("CRITICAL", 0) %}
+{% set b_rhc = baseline.raw_by_severity.get("HIGH", 0) + baseline.raw_by_severity.get("CRITICAL", 0) %}
+{% set l_rhc = latest.raw_by_severity.get("HIGH", 0) + latest.raw_by_severity.get("CRITICAL", 0) %}
+<section class="section" aria-labelledby="compare-heading">
+  {{ ui.section_head("Baseline versus latest " ~ latest.source_branch ~ " scan", id="compare-heading") }}
+  <div class="card compare">
+    <div class="col">
+      <h3>Baseline</h3>
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ b_hc }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ b_rhc }}</span></div>
+      <div class="row"><span class="k">All policy findings</span><span>{{ baseline.policy_total }}</span></div>
+      <div class="row"><span class="k">Scan</span><a href="/runs/{{ baseline.id }}">{{ baseline.external_run_id }}</a></div>
+      <div class="row"><span class="k">Commit</span>{{ ui.sha(baseline.source_sha) }}</div>
+    </div>
+    <div class="col">
+      <h3>Change</h3>
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ ui.delta(l_hc - b_hc) }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ ui.delta(l_rhc - b_rhc) }}</span></div>
+      <div class="row"><span class="k">All policy findings</span><span>{{ ui.delta(latest.policy_total - baseline.policy_total) }}</span></div>
+      <div class="row"><span class="k">Gate readiness</span><span>{% if m.gate_ready_for_enforce is none %}<span class="muted">unknown</span>{% elif m.gate_ready_for_enforce %}{{ ui.badge(gate_label(True, "enforce")) }}{% else %}{{ ui.badge(gate_label(latest.gate.get("passed"), latest.scan_gate_mode)) }}{% endif %}</span></div>
+    </div>
+    <div class="col">
+      <h3>Latest</h3>
+      <div class="caption">Policy HIGH + CRITICAL</div>
+      <div class="big">{{ l_hc }}</div>
+      <div class="row"><span class="k">Raw HIGH + CRITICAL</span><span>{{ l_rhc }}</span></div>
+      <div class="row"><span class="k">All policy findings</span><span>{{ latest.policy_total }}</span></div>
+      <div class="row"><span class="k">Scan</span><a href="/runs/{{ latest.id }}">{{ latest.external_run_id }}</a></div>
+      <div class="row"><span class="k">Commit</span>{{ ui.sha(latest.source_sha) }}</div>
+    </div>
+  </div>
+</section>
+{% elif baseline and not latest %}
+<div class="notice notice-info"><p><strong>Baseline only.</strong> The comparison appears after the first later scan of the remediation branch.</p></div>
+{% endif %}
+
+<section class="section" aria-labelledby="runs-heading">
+  {{ ui.section_head("All scan runs", id="runs-heading", count=runs|length) }}
+  {% include "_runs_table.html" %}
+</section>
 {% endblock %}
