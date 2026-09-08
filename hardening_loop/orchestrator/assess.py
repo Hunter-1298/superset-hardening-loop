@@ -92,7 +92,7 @@ def assess(
     if snapshot.is_waiting_for_approval:
         return Assessment(Decision.needs_human, "devin_action_approval_required")
 
-    if snapshot.is_waiting_for_user:
+    if snapshot.is_waiting_for_user and not snapshot.is_final_report:
         reply = whitelisted_reply(pending_question)
         if reply is None:
             return Assessment(
@@ -101,7 +101,7 @@ def assess(
             )
         return Assessment(Decision.answer_question, "whitelisted_question", reply=reply)
 
-    if snapshot.is_done:
+    if snapshot.is_final_report:
         if not facts.schema_valid:
             return Assessment(Decision.needs_human, "final_output_missing_or_invalid")
         outcome = snapshot.outcome

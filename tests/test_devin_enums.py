@@ -132,9 +132,8 @@ def test_every_status_combination_has_a_decision(status: str, detail: str | None
     assert isinstance(a.decision, Decision)
     if s.is_budget_stop or s.is_error or s.is_waiting_for_approval:
         assert a.decision is Decision.needs_human
-    elif s.is_waiting_for_user:
-        assert a.decision is Decision.needs_human  # no whitelisted question supplied
-    elif s.is_done:
+    elif s.is_done or s.is_waiting_for_user:
+        # a finished session, or one idling after posting its verified `pr_opened` report
         assert a.decision is Decision.ready_for_verification
     else:
         assert a.decision is Decision.continue_polling
@@ -205,6 +204,25 @@ def test_waiting_for_user_whitelist() -> None:
     assert a.decision is Decision.answer_question and a.reply and "main" in a.reply
     a = assess(s, FACTS_OK, pending_question="Should I delete the production database?")
     assert a.is_needs_human and a.reason.startswith("devin_question_not_whitelisted")
+
+
+def test_waiting_for_user_with_verified_pr_report_is_completion() -> None:
+    s = snap("running", "waiting_for_user", output=PR_OUT, prs=[PR_OUT["pr_url"]])
+    assert s.is_final_report and not s.is_done
+    a = assess(s, FACTS_OK, pending_question="PR opened: " + PR_OUT["pr_url"])
+    assert a.decision is Decision.ready_for_verification and a.reason == "pr_opened"
+    # The report is still held to the same standard as a finished session's.
+    facts = SessionFacts(acu_cap=5, schema_valid=True, pr_verified=False, diff_policy_ok=True)
+    assert assess(s, facts).reason == "pull_request_failed_verification"
+    assert assess(s, FACTS_NO_OUTPUT).reason == "final_output_missing_or_invalid"
+    # Any other outcome while waiting is still a question for a human.
+    blocked = snap(
+        "running", "waiting_for_user", output={"outcome": "blocked", "blocked_reason": "x"}
+    )
+    assert not blocked.is_final_report
+    assert assess(blocked, FACTS_OK, pending_question="May I?").reason.startswith(
+        "devin_question_not_whitelisted"
+    )
 
 
 def test_waiting_for_approval_is_needs_human() -> None:

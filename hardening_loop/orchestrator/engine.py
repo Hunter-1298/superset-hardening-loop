@@ -1126,8 +1126,9 @@ class Orchestrator:
         diff_ok = False
         diff_violations: list[str] = []
         problems: list[str] = []
-        schema_errors = validate_output(wi.kind, snap.structured_output) if snap.is_done else []
-        if snap.is_done and not schema_errors and snap.outcome is Outcome.pr_opened:
+        final = snap.is_final_report
+        schema_errors = validate_output(wi.kind, snap.structured_output) if final else []
+        if final and not schema_errors and snap.outcome is Outcome.pr_opened:
             pr_info, problems = self._resolve_pr(snap)
             pr_verified = pr_info is not None and not problems
             if pr_info is not None and pr_verified:
@@ -1136,7 +1137,7 @@ class Orchestrator:
                 diff_ok = not diff_violations
         facts = SessionFacts(
             acu_cap=wi.acu_cap,
-            schema_valid=snap.is_done and not schema_errors,
+            schema_valid=final and not schema_errors,
             pr_verified=pr_verified,
             diff_policy_ok=diff_ok,
             wall_clock_exceeded=(now - row.created_at)
@@ -1369,6 +1370,7 @@ class Orchestrator:
                 self._raise_level(db, wi, row, LifecycleLevel.merged, "merged")
                 for f in db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all():
                     self._finding(db, f, FindingEvent.pr_merged, pr.merge_commit_sha or "")
+                self._close_from_applied_runs(db, wi)
             return
         if pr.state == "closed":
             row.state = "closed"
@@ -1891,6 +1893,30 @@ class Orchestrator:
             run.closure_applied_at = self.clock.now()
             db.add(run)
         return dict(counts)
+
+    def _close_from_applied_runs(self, db: DbSession, wi: WorkItem) -> None:
+        """Weigh a freshly merged item against scans that were already evaluated before its merge
+        was observed (the PR was recorded late, or the merge was seen after the scan came in).
+        Those runs will not be applied again, so they are replayed for this item alone, oldest
+        first, until one of them settles it."""
+        if wi.merged_at is None:
+            return
+        runs = db.exec(
+            select(ScanRun)
+            .where(
+                col(ScanRun.closure_applied_at).is_not(None),
+                col(ScanRun.finished_at).is_not(None),
+                col(ScanRun.finished_at) >= wi.merged_at,
+            )
+            .order_by(col(ScanRun.finished_at), col(ScanRun.id))
+        ).all()
+        for run in runs:
+            if wi.state not in (WorkItemState.merged, WorkItemState.awaiting_rescan):
+                return
+            jobs = list(db.exec(select(ScanJob).where(ScanJob.scan_run_id == run.id)).all())
+            sightings = list(db.exec(select(Sighting).where(Sighting.scan_run_id == run.id)).all())
+            counts: dict[str, int] = defaultdict(int)
+            self._close_work_item(db, wi, run, jobs, sightings, counts)
 
     def _later_run_saw(self, db: DbSession, run: ScanRun, f: Finding) -> ScanRun | None:
         """The latest run that already spoke for `f` (last reported it, or closed it) when that
