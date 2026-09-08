@@ -1469,8 +1469,12 @@ class Orchestrator:
             self._review_timeout(db, wi, head, f"devin review API error: {exc}")
             return
         if snap.commit_sha != head:
-            # The PR moved between our GitHub read and Devin's; next tick sees the new head.
+            # Usually the PR moved between our GitHub read and Devin's and the next tick sees the
+            # new head; if the mismatch persists, the head never gets its own review.
             log.info("review names %s, PR head is %s; waiting", snap.commit_sha[:12], head[:12])
+            self._review_timeout(
+                db, wi, head, f"devin review names different commit {snap.commit_sha[:12]}"
+            )
             return
         row.review_id = f"{snap.repo_path}#{snap.pr_number}@{snap.commit_sha}"
         row.review_head_sha = snap.commit_sha

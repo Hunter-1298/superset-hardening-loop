@@ -16,7 +16,9 @@ Fail-closed rules (any one rejects the bundle; the raw files stay on disk under 
 * no `manifest.json`, wrong schema, or any file whose sha256 differs from the manifest/SHA256SUMS
   (`load_baseline` also re-verifies each job directory and the image each job scanned);
 * `source_repo` outside the allowlist or not the expected fork; `source_branch` not the expected
-  branch; `source_sha` (or the recorded PR head) not the commit GitHub says the run was for;
+  branch; the run's GitHub-reported `head_branch` not the expected branch or its `event` not the
+  manifest's trigger; `source_sha` (or the recorded PR head) not the commit GitHub says the run
+  was for;
 * the manifest's own `run.run_id`/`run_attempt` not matching the run the artifact was downloaded
   from;
 * `source_sha` not a descendant of the 6.1.0 baseline commit (ancestry is asked of GitHub);
@@ -34,7 +36,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -131,6 +133,14 @@ def validate_bundle(
         reasons.append(f"source_repo {manifest.source_repo!r} != {expect.source_repo!r}")
     if manifest.source_branch != expect.source_branch:
         reasons.append(f"source_branch {manifest.source_branch!r} != {expect.source_branch!r}")
+    # The manifest is written by the workflow under scan, so a feature branch could claim to be
+    # `main`; the run's own branch and event come from GitHub and must agree.
+    if run.head_branch != expect.source_branch:
+        reasons.append(
+            f"workflow run is for branch {run.head_branch!r}, expected {expect.source_branch!r}"
+        )
+    if manifest.trigger != run.event:
+        reasons.append(f"manifest trigger {manifest.trigger!r} != workflow event {run.event!r}")
 
     recorded_head = str(run_meta.get("head_sha") or manifest.source_sha)
     if run.head_sha not in (manifest.source_sha, recorded_head):
@@ -231,20 +241,35 @@ class ScanIntakeService:
 
     # ------------------------------------------------------------------ discovery
 
-    def completed_runs(self, *, branch: str | None = None) -> list[WorkflowRunInfo]:
+    def completed_runs(self, *, branch: str | None = None) -> Iterator[WorkflowRunInfo]:
+        """Newest first, paginated lazily by the client; consume only as far as needed."""
         runs = self.gh.list_workflow_runs(
             self.expect.source_repo,
             self.workflow_file,
             branch=branch or self.expect.source_branch,
             status="completed",
         )
-        return [r for r in runs if r.status == "completed"]
+        return (r for r in runs if r.status == "completed")
 
     def find_run(self, run_id: int) -> WorkflowRunInfo | None:
+        """Walk the workflow's run listing (every branch and event) until `run_id` shows up."""
         for run in self.gh.list_workflow_runs(self.expect.source_repo, self.workflow_file):
             if run.id == run_id:
                 return run
         return None
+
+    def unseen_runs(self, *, limit: int) -> list[WorkflowRunInfo]:
+        """The newest `limit` completed run attempts with no `ScanIntake` row yet. Seen attempts
+        are skipped before counting, so a backlog older than one page is still reached."""
+        repo = self.expect.source_repo
+        out: list[WorkflowRunInfo] = []
+        with Session(self.engine) as db:
+            for run in self.completed_runs():
+                if len(out) >= limit:
+                    break
+                if self.seen(db, external_run_id(repo, run)) is None:
+                    out.append(run)
+        return out
 
     def seen(self, db: Session, ext_id: str) -> ScanIntake | None:
         return db.exec(select(ScanIntake).where(ScanIntake.external_run_id == ext_id)).first()
@@ -252,13 +277,9 @@ class ScanIntakeService:
     # ------------------------------------------------------------------ intake
 
     def poll(self, *, limit: int = 10) -> list[IntakeOutcome]:
-        """Ingest every completed run of the expected branch not seen before (newest first)."""
-        outcomes: list[IntakeOutcome] = []
-        for run in self.completed_runs()[:limit]:
-            outcome = self.ingest_workflow_run(run)
-            if not outcome.seen_before:
-                outcomes.append(outcome)
-        return outcomes
+        """Ingest up to `limit` completed runs of the expected branch not seen before, newest
+        first. Older unseen runs are picked up by later polls until none remain."""
+        return [self.ingest_workflow_run(run) for run in self.unseen_runs(limit=limit)]
 
     def ingest_workflow_run(self, run: WorkflowRunInfo) -> IntakeOutcome:
         repo = self.expect.source_repo

@@ -6,9 +6,12 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
+from hardening_loop import db as dbmod
 from hardening_loop import verification
 from hardening_loop.db import SCHEMA_VERSION, migrate, open_database
 from hardening_loop.domain.enums import (
@@ -111,9 +114,21 @@ def test_skipped_or_neutral_runs_are_not_evidence() -> None:
     assert ev.rungs[D.requirements_pip] is S.unavailable
     rec = next(r for r in ev.records if r.name == "pip-install")
     assert "no evidence" in rec.detail
-    # A skipped matrix leg beside a successful one still counts as passed for that component.
-    mixed = verification.evaluate([run("unit-tests (a)"), run("unit-tests (b)", "skipped")])
-    assert mixed.rungs[D.targeted_unit] is S.passed
+
+
+def test_matrix_with_skipped_or_neutral_legs_is_partial_not_passed() -> None:
+    """Every expected matrix entry must succeed; a leg the change detector skipped is missing
+    evidence, so the component (and its rung) is `partial` and never raises `highest_passed`."""
+    for conclusion in ("skipped", "neutral"):
+        mixed = verification.evaluate([run("unit-tests (a)"), run("unit-tests (b)", conclusion)])
+        assert mixed.rungs[D.targeted_unit] is S.partial
+        assert mixed.highest_passed is None
+        rec = next(r for r in mixed.records if r.name == "python-unit-tests")
+        assert rec.status is S.partial
+        assert "1/2 runs succeeded" in rec.detail and f"unit-tests (b)={conclusion}" in rec.detail
+    complete = verification.evaluate([run("unit-tests (a)"), run("unit-tests (b)")])
+    assert complete.rungs[D.targeted_unit] is S.passed
+    assert complete.highest_passed is D.targeted_unit
 
 
 def test_failure_beats_pending_and_partial() -> None:
@@ -316,6 +331,32 @@ def test_opening_a_v2_database_migrates_it_in_place(tmp_path: Path) -> None:
     assert "workflow" in _columns(path, "scan_runs")
     assert "scan_intakes" in _tables(path)
     assert {"devin_assets", "metrics_snapshots"} <= _tables(path)
+
+
+def test_failed_migration_step_rolls_back_ddl_and_version_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crash mid-step must leave the file exactly as it was: no half-applied ALTERs and no
+    version row, so the next start retries the step instead of failing on repeated DDL."""
+    path = tmp_path / "old.sqlite3"
+    _downgrade_to_v2(path)
+    broken = dict(dbmod._MIGRATIONS)
+    broken[3] = (*dbmod._MIGRATIONS[3], "ALTER TABLE no_such_table ADD COLUMN x INTEGER")
+    monkeypatch.setattr(dbmod, "_MIGRATIONS", broken)
+    with pytest.raises(OperationalError):
+        open_database(path)
+    assert "verification_level" in _columns(path, "work_items")
+    assert "lifecycle_level" not in _columns(path, "work_items")
+    with sqlite3.connect(path) as conn:
+        assert [r[0] for r in conn.execute("SELECT version FROM schema_version")] == [2]
+
+    monkeypatch.setattr(dbmod, "_MIGRATIONS", dict(dbmod._MIGRATIONS) | {3: broken[3][:-1]})
+    engine = open_database(path)
+    with Session(engine) as db:
+        versions = [v.version for v in db.exec(select(SchemaVersion).order_by(SchemaVersion.id))]  # type: ignore[arg-type]
+    engine.dispose()
+    assert versions == [2, 3, 4, 5]
+    assert "lifecycle_level" in _columns(path, "work_items")
 
 
 def test_fresh_database_starts_at_current_version_without_migrating(tmp_path: Path) -> None:

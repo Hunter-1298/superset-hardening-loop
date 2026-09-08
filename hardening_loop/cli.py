@@ -352,11 +352,20 @@ def cmd_evidence_verify(args: argparse.Namespace) -> int:
     """Run intake's fail-closed bundle checks against an already-downloaded evidence tree, with no
     GitHub access: checksums, manifest schema, source repo/branch/sha, run id/attempt, platform,
     baseline ancestry (asked of the local git checkout), required scan jobs, scanner set, runtime
-    results. Exit 0 only when the bundle would be accepted; every rejection reason is printed."""
+    results. Exit 0 only when the bundle would be accepted; every rejection reason is printed.
+
+    `--head-sha`, `--source-branch` and `--event` stand in for what GitHub reports about the run;
+    without `--event` the manifest's own trigger is taken at face value."""
+    event = args.event
+    if event is None:
+        try:
+            event = json.loads(Path(args.bundle, "manifest.json").read_text())["run"]["event"]
+        except (OSError, ValueError, KeyError, TypeError):
+            event = ""
     run = WorkflowRunInfo(
         id=args.run_id,
         run_attempt=args.run_attempt,
-        event=args.event,
+        event=str(event),
         status="completed",
         conclusion="success",
         head_branch=args.source_branch,
@@ -675,7 +684,11 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--source-branch", default=REMEDIATION_BRANCH)
     ev.add_argument("--baseline-sha", default=BASELINE_SHA)
     ev.add_argument("--platform", default="linux/amd64")
-    ev.add_argument("--event", default="push")
+    ev.add_argument(
+        "--event",
+        default=None,
+        help="github.event_name of the run; cross-checked against the manifest when given",
+    )
     ev.add_argument("--git", default=".", help="fork checkout used to answer baseline ancestry")
     ev.add_argument("--out", help="also write the verdict JSON here")
     ev.set_defaults(fn=cmd_evidence_verify)

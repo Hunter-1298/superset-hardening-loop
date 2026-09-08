@@ -3,6 +3,7 @@ never knows which one it talks to."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
@@ -154,6 +155,9 @@ class GitHubClient(Protocol):
         head_sha: str | None = None,
         branch: str | None = None,
         status: str | None = None,
-    ) -> list[WorkflowRunInfo]: ...
+    ) -> Iterator[WorkflowRunInfo]:
+        """Newest first; pages are fetched lazily as the iterator is consumed."""
+        ...
+
     def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]: ...
     def download_artifact(self, repo: str, artifact_id: int, dest: Path) -> Path: ...

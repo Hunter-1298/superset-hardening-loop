@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import base64
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -298,19 +298,25 @@ class GitHubRest:
         head_sha: str | None = None,
         branch: str | None = None,
         status: str | None = None,
-    ) -> list[WorkflowRunInfo]:
+    ) -> Iterator[WorkflowRunInfo]:
         _assert_allowed(repo)
-        params: dict[str, Any] = {"per_page": 20}
+        params: dict[str, Any] = {}
         if head_sha:
             params["head_sha"] = head_sha
         if branch:
             params["branch"] = branch
         if status:
             params["status"] = status
-        data = self._request(
-            "GET", f"/repos/{repo}/actions/workflows/{workflow_file}/runs", params=params
-        ).json()
-        return [_workflow_run(r) for r in data.get("workflow_runs", [])]
+        path = f"/repos/{repo}/actions/workflows/{workflow_file}/runs"
+        for page in range(1, MAX_PAGES + 1):
+            data = self._request(
+                "GET", path, params={**params, "per_page": PER_PAGE, "page": page}
+            ).json()
+            batch = data.get("workflow_runs", [])
+            yield from (_workflow_run(r) for r in batch)
+            if len(batch) < PER_PAGE:
+                return
+        raise GitHubError(f"GET {path}: more than {MAX_PAGES} pages")
 
     def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]:
         _assert_allowed(repo)

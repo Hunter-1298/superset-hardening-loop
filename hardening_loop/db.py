@@ -7,11 +7,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import event, text
-from sqlalchemy.engine import Engine
+from sqlalchemy import event, insert, text
+from sqlalchemy.engine import Connection, Engine
 from sqlmodel import Session, SQLModel, create_engine, select
 
 from hardening_loop.models import tables
+from hardening_loop.models.tables import utcnow
 
 SCHEMA_VERSION = 5
 
@@ -35,6 +36,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 
 
 def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
+    # pysqlite's implicit transactions skip DDL; with isolation_level=None nothing is implicit and
+    # `_begin_transaction` opens every transaction explicitly, so ALTER TABLE takes part in it.
+    dbapi_connection.isolation_level = None  # type: ignore[attr-defined]
     cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
@@ -49,10 +53,15 @@ def _set_readonly_pragmas(dbapi_connection: object, _record: object) -> None:
     cursor.close()
 
 
+def _begin_transaction(conn: Connection) -> None:
+    conn.exec_driver_sql("BEGIN")
+
+
 def make_engine(path: Path | str) -> Engine:
     url = "sqlite://" if str(path) == ":memory:" else f"sqlite:///{path}"
     engine = create_engine(url, connect_args={"check_same_thread": False})
     event.listen(engine, "connect", _set_sqlite_pragmas)
+    event.listen(engine, "begin", _begin_transaction)
     return engine
 
 
@@ -92,9 +101,7 @@ def migrate(engine: Engine) -> list[int]:
         with engine.begin() as conn:
             for statement in _MIGRATIONS[version]:
                 conn.execute(text(statement))
-        with Session(engine) as session:
-            session.add(tables.SchemaVersion(version=version))
-            session.commit()
+            conn.execute(insert(tables.SchemaVersion).values(version=version, applied_at=utcnow()))
         applied.append(version)
     return applied
 

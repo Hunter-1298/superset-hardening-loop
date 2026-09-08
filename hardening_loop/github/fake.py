@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +86,7 @@ class FakeGitHub:
         self._next_pr = 500
         self.fail_next: dict[str, Exception] = {}
         self.workflow_runs: dict[int, _WorkflowRun] = {}
+        self.workflow_runs_yielded = 0  # how far consumers actually read into the listing
         self._next_artifact = 9000
 
     # ------------------------------------------------------------- scripting API (scenarios)
@@ -376,7 +378,7 @@ class FakeGitHub:
         head_sha: str | None = None,
         branch: str | None = None,
         status: str | None = None,
-    ) -> list[WorkflowRunInfo]:
+    ) -> Iterator[WorkflowRunInfo]:
         self._touch("list_workflow_runs", repo, workflow_file)
         out = [
             r.info
@@ -386,7 +388,9 @@ class FakeGitHub:
             and (branch is None or r.info.head_branch == branch)
             and (status is None or r.info.status == status)
         ]
-        return sorted(out, key=lambda r: r.id, reverse=True)
+        for info in sorted(out, key=lambda r: r.id, reverse=True):
+            self.workflow_runs_yielded += 1
+            yield info
 
     def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]:
         self._touch("list_run_artifacts", repo, str(run_id))

@@ -8,6 +8,7 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 from sqlalchemy import Engine
 from sqlmodel import Session, col, select
@@ -242,6 +243,40 @@ def test_bundle_from_other_branch_is_rejected(
     _assert_rejected(engine, [svc.ingest_workflow_run(run)], "source_branch 'devin/1-fix'")
 
 
+def test_feature_branch_run_claiming_main_is_rejected(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """The manifest is produced by the workflow under test, so a PR branch can write `main` /
+    `schedule` into it; GitHub's own record of the run says otherwise and wins."""
+    tree = _bundle(tmp_path / "tree", source_branch="main", event="schedule")
+    _publish(gh, tree, head_sha=BASELINE_SHA, head_branch="devin/1-fix", event="pull_request")
+    svc = _service(engine, gh, tmp_path)
+    assert svc.poll() == [], "poller only looks at the remediation branch"
+    run = svc.find_run(RUN_ID)
+    assert run is not None
+    out = svc.ingest_workflow_run(run)
+    _assert_rejected(engine, [out], "workflow run is for branch 'devin/1-fix'")
+    assert any(
+        "manifest trigger 'schedule' != workflow event 'pull_request'" in r for r in out.reasons
+    )
+    with Session(engine) as db:
+        assert db.exec(select(ScanRun)).first() is None
+
+
+def test_pull_request_run_on_main_with_synthetic_merge_head_is_accepted(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """`pull_request` runs check out a synthetic merge commit: `source_sha` is that merge and
+    `head_sha` the PR head GitHub reports. Both identities recorded truthfully still verify."""
+    merge = "a" * 40
+    gh.add_commit(merge, BASELINE_SHA)
+    gh.put_file("pyproject.toml", merge, load_source_pyproject(ROOT, BASELINE_SHA))
+    tree = _bundle(tmp_path / "tree", source_sha=merge, event="pull_request", head_sha=SHA_MAIN2)
+    _publish(gh, tree, head_sha=SHA_MAIN2, head_branch="main", event="pull_request")
+    out = _service(engine, gh, tmp_path).poll()
+    assert [o.status for o in out] == [IntakeStatus.ingested], out[0].reasons
+
+
 def test_bundle_from_other_repo_is_rejected(engine: Engine, gh: FakeGitHub, tmp_path: Path) -> None:
     tree = _bundle(tmp_path / "tree", source_repo="apache/superset")
     _publish(gh, tree, head_sha=BASELINE_SHA)
@@ -331,6 +366,34 @@ def test_second_attempt_of_same_run_is_a_distinct_intake(
     assert [o.status for o in out] == [IntakeStatus.ingested] and out[0].created
     ids = {i.external_run_id for i in _intakes(engine)}
     assert ids == {external_run_id(FORK_REPO, info), f"gha:{FORK_REPO}:{RUN_ID}:1"}
+
+
+def test_backlog_deeper_than_one_poll_is_drained_exactly_once(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """Seen attempts are skipped before `limit` is applied, so older never-seen runs are reached
+    on later polls instead of being shadowed forever by the newest already-ingested ones."""
+    run_ids = [RUN_ID + i for i in range(12)]
+    for rid in run_ids:
+        _publish(
+            gh, _bundle(tmp_path / f"tree-{rid}", run_id=rid), run_id=rid, head_sha=BASELINE_SHA
+        )
+    svc = _service(engine, gh, tmp_path)
+
+    seen: list[str] = []
+    for expected in (5, 5, 2, 0):
+        gh.workflow_runs_yielded = 0
+        out = svc.poll(limit=5)
+        assert len(out) == expected
+        assert all(o.status is IntakeStatus.ingested and not o.seen_before for o in out)
+        seen.extend(o.external_run_id for o in out)
+    # Newest first; the listing is only read as far as needed to find `limit` unseen runs.
+    assert seen == [f"gha:{FORK_REPO}:{rid}:1" for rid in reversed(run_ids)]
+    assert len(seen) == len(set(seen)) == 12
+    assert gh.workflow_runs_yielded == 12, "the empty poll had to walk the whole listing"
+    with Session(engine) as db:
+        assert len(db.exec(select(ScanRun)).all()) == 12
+    assert len(_intakes(engine)) == 12
 
 
 # ------------------------------------------------------------------------ orchestrator + CLI
@@ -439,6 +502,11 @@ def test_evidence_verify_cli_accepts_matching_bundle_and_rejects_offline(
     assert rc == 1
     assert "does not descend from baseline" in capsys.readouterr().out
 
+    # The run GitHub reports was a pull_request, the manifest says schedule.
+    assert main(["evidence-verify", str(good), *common, "--event", "pull_request"]) == 1
+    assert "manifest trigger 'schedule' != workflow event 'pull_request'" in capsys.readouterr().out
+    assert main(["evidence-verify", str(good), *common, "--event", "schedule"]) == 0
+
     # Another repository, even a real one.
     foreign = _bundle(tmp_path / "foreign", source_sha=head, source_repo="apache/superset")
     assert main(["evidence-verify", str(foreign), *common]) == 1
@@ -448,3 +516,51 @@ def test_evidence_verify_cli_accepts_matching_bundle_and_rejects_offline(
     (good / "manifest.json").unlink()
     assert main(["evidence-verify", str(good), *common]) == 1
     assert "no manifest.json" in capsys.readouterr().out
+
+
+def test_rest_list_workflow_runs_pages_until_short_page() -> None:
+    """The REST client walks `page=1,2,...` at `per_page=100` and stops at the first short page,
+    so a backlog longer than one page is fully enumerated; a run listing must not stop at 100."""
+    from pydantic import SecretStr
+
+    from hardening_loop.github.rest import PER_PAGE, GitHubRest
+
+    total = PER_PAGE * 2 + 7
+    pages_seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/repos/{FORK_REPO}/actions/workflows/security-scan.yml/runs"
+        assert request.url.params["per_page"] == str(PER_PAGE)
+        assert request.url.params["branch"] == "main"
+        assert request.url.params["status"] == "completed"
+        page = int(request.url.params["page"])
+        pages_seen.append(page)
+        start = (page - 1) * PER_PAGE
+        ids = range(total - start, max(total - start - PER_PAGE, 0), -1)
+        return httpx.Response(
+            200,
+            json={
+                "total_count": total,
+                "workflow_runs": [
+                    {
+                        "id": i,
+                        "run_attempt": 1,
+                        "event": "schedule",
+                        "status": "completed",
+                        "conclusion": "success",
+                        "head_branch": "main",
+                        "head_sha": "a" * 40,
+                        "html_url": f"https://example/{i}",
+                    }
+                    for i in ids
+                ],
+            },
+        )
+
+    gh = GitHubRest(SecretStr("t"), transport=httpx.MockTransport(handler))
+    runs = gh.list_workflow_runs(FORK_REPO, "security-scan.yml", branch="main", status="completed")
+    first = next(runs)
+    assert first.id == total and pages_seen == [1]  # lazy: one page fetched so far
+    rest = list(runs)
+    assert [first.id, *(r.id for r in rest)] == list(range(total, 0, -1))
+    assert pages_seen == [1, 2, 3]

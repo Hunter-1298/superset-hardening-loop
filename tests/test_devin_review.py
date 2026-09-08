@@ -231,6 +231,41 @@ def test_review_api_error_waits_then_times_out(tmp_path: Path) -> None:
     assert "sk-" not in (wi.blocked_reason or "")
 
 
+def test_review_naming_another_commit_waits_then_times_out(tmp_path: Path) -> None:
+    """Devin keeps reviewing a commit that is not the PR head we verified (a lagging head on its
+    side, or a review it will not re-run). One or two ticks of that is a race; past the timeout the
+    head has no review of its own and the item goes to a human instead of polling forever."""
+    w = World(tmp_path / "r.sqlite3", review_timeout_minutes=30)
+    w.baseline("cryptography")
+    w.tick()
+    wi = w.only_wi()
+    pr_url, number = w.devin_opens_pr(
+        wi, _dep_output("cryptography", "42.0.2", "42.0.4"), files=DEP_FILES, acus=2.0
+    )
+    wi_id = wi.id or 0
+    w.tick()
+    stale = w.gh.prs[number].head_sha
+    head = sha("cryptography-push-2")
+    w.gh.push(number, head)
+    w.devin.set_pr_head(pr_url, stale)
+    w.ci(head)
+    w.tick(minutes=5)
+    assert w.state_of(wi_id) is WorkItemState.review_pending
+    assert _review_calls(w, "trigger_review") == [pr_url]
+    row = w.pr_row(wi_id)
+    assert row is not None and row.review_head_sha is None, "a review of another commit is not ours"
+    for _ in range(4):
+        w.tick(minutes=5)
+    assert w.state_of(wi_id) is WorkItemState.review_pending
+    w.tick(minutes=15)
+    wi = w.wi(wi_id)
+    assert wi.state is WorkItemState.needs_human
+    assert wi.blocked_reason and f"names different commit {stale[:12]}" in wi.blocked_reason
+    assert head[:12] in wi.blocked_reason
+    row = w.pr_row(wi_id)
+    assert row is not None and row.review_head_sha is None and row.review_status is None
+
+
 def test_new_push_gets_its_own_review_and_old_one_is_ignored(tmp_path: Path) -> None:
     w = World(tmp_path / "r.sqlite3")
     wi_id, number, head1 = _to_review_pending(w)

@@ -4,9 +4,10 @@ The ladder maps every rung to the GitHub check runs on the fork that prove it. A
 `passed` only when every one of its components has a completed, successful check run on the
 exact head; `failed` when any completed one failed; `pending` while any is still running;
 `unavailable` when nothing on this head produced evidence for it (no such check run, or the run
-was skipped by the fork's change detector); `partial` when every component that can exist here
-passed but the rung also has components with no check on this repository (recorded so the gap
-is visible instead of silently counting as passed).
+was skipped by the fork's change detector); `partial` when some but not all of the evidence is
+there: a component with no check on this repository beside passing ones, or a matrix where some
+entries succeeded and others were skipped (recorded so the gap is visible instead of silently
+counting as passed).
 
 Check-run names are the job names GitHub reports for the fork's workflows; matrix jobs appear
 as `name (matrix, values)`, so components match on the exact name or on `name (` as a prefix.
@@ -126,9 +127,15 @@ def _component_status(check: str, runs: Sequence[CheckRun]) -> tuple[CheckStatus
     if not succeeded:
         conclusions = ", ".join(sorted({str(r.conclusion) for r in matched}))
         return CheckStatus.unavailable, f"all runs concluded {conclusions}; no evidence", url
-    skipped = len(matched) - len(succeeded)
-    detail = f"{len(succeeded)} run(s) succeeded" + (f", {skipped} skipped" if skipped else "")
-    return CheckStatus.passed, detail, url
+    skipped = [r for r in matched if r not in succeeded]
+    if skipped:
+        names = ", ".join(f"{r.name}={r.conclusion}" for r in skipped)
+        return (
+            CheckStatus.partial,
+            f"{len(succeeded)}/{len(matched)} runs succeeded; no evidence from {names}",
+            url,
+        )
+    return CheckStatus.passed, f"{len(succeeded)} run(s) succeeded", url
 
 
 def _rung_status(statuses: Sequence[CheckStatus]) -> CheckStatus:
