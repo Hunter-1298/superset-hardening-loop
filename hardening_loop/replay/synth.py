@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy.engine import Engine
 
 from hardening_loop.config import GRYPE_VERSION, SYFT_VERSION, TRIVY_VERSION
-from hardening_loop.db import session_scope
+from hardening_loop.db import write_scope
 from hardening_loop.domain.enums import (
     Ecosystem,
     GateMode,
@@ -315,7 +315,7 @@ class SyntheticRun:
 
 
 def ingest_synthetic(engine: Engine, run: SyntheticRun, external_run_id: str) -> IngestResult:
-    with session_scope(engine) as db:
+    with write_scope(engine) as db:
         return ingest_run(db, run.meta(external_run_id), run.jobs(), upper_bounds={}, now=run.at)
 
 

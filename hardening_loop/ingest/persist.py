@@ -18,7 +18,7 @@ from sqlalchemy import Engine
 from sqlmodel import Session, select
 
 from hardening_loop.classify.rules import Classification, ClassificationContext, classify
-from hardening_loop.db import session_scope
+from hardening_loop.db import write_scope
 from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
@@ -111,7 +111,7 @@ def ingest_baseline(
         job_results=dict(manifest.run.get("job_results") or {}),
         workflow=manifest.run or None,
     )
-    with session_scope(engine) as db:
+    with write_scope(engine) as db:
         return ingest_run(db, meta, manifest.jobs, upper_bounds=upper_bounds or {})
 
 

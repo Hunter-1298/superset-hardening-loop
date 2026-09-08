@@ -5,17 +5,20 @@ writes a run without evaluating it."""
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
 
 from hardening_loop.config import BASELINE_SHA
+from hardening_loop.db import open_database
 from hardening_loop.domain.enums import FindingState, WorkItemState
 from hardening_loop.github.fake import FakeGitHubError
 from hardening_loop.metrics import metrics_history
 from hardening_loop.models.tables import WorkItem
 from hardening_loop.operator import OperatorContext
 from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.replay.synth import ingest_synthetic
 from hardening_loop.replay.world import APPROVER, World, sha
 
 CVE = "CVE-2024-26130"  # cryptography seed
@@ -254,6 +257,53 @@ def test_a_launch_becomes_eligible_once_the_pending_scan_is_applied(w: World) ->
     res = ctx.launch(wi.id or 0)
     assert res.outcome == "created" and len(w.devin.sessions) == 1
     assert w.state_of(wi.id or 0) is WorkItemState.session_active
+
+
+def test_a_scan_ingested_while_an_operator_launch_is_filing_its_issue_waits_for_the_launch(
+    tmp_path: Path,
+) -> None:
+    """The launch checks for pending scans and then creates the GitHub issue before it has written
+    a row. A CLI `ingest` (another process, its own connections) that lands in that window must
+    not commit ahead of the launch: either it would have been pending when the launch looked, or
+    it waits until the launch has durably reserved the item and bound the issue. Otherwise the
+    launch's late write could fail against a stale snapshot and leave the issue orphaned."""
+    w = World(tmp_path / "replay.sqlite3", auto_open_issues=False)
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+    w.baseline("cryptography")
+    ctx.tick()
+    wi = w.only_wi()
+    assert wi.state is WorkItemState.queued and wi.issue_number is None
+    assert ctx.preview(wi.id or 0).eligible
+
+    cli_engine = open_database(w.db_path)
+    w.clock.advance(minutes=30)
+    closing = w.closing_run(BASELINE_SHA)  # cryptography gone from main
+    closing.at = w.clock.now()
+    cli = threading.Thread(target=ingest_synthetic, args=(cli_engine, closing, "cli-race"))
+
+    def intake_arrives_mid_launch() -> None:
+        cli.start()
+        cli.join(timeout=1.0)
+        assert cli.is_alive(), "the CLI ingest must wait for the launch's write transaction"
+
+    w.gh.before_next["create_issue"] = intake_arrives_mid_launch
+    res = ctx.launch(wi.id or 0)
+    cli.join(timeout=30)
+    assert not cli.is_alive(), "the CLI ingest completes once the launch has committed"
+
+    assert res.outcome == "created", res
+    wi = w.wi(wi.id or 0)
+    assert wi.state is WorkItemState.session_active and wi.issue_number is not None
+    bound = {i.issue_number for i in w.work_items()}
+    assert set(w.gh.issues) == bound, "every issue the launch created belongs to a work item"
+    runs = w.scan_runs()
+    assert [r.external_run_id for r in runs][-1] == "cli-race"
+    assert _applied(w) == [True, False], "the run landed after the launch and is still owed"
+
+    report = ctx.tick()  # the run is spent against the reserved item, never around it
+    assert report.scan_apply_error is None and report.scans_applied == 1
+    assert _applied(w) == [True, True]
+    assert set(w.gh.issues) == {i.issue_number for i in w.work_items()}
 
 
 def _merged_item_awaiting_its_closing_scan(w: World) -> WorkItem:

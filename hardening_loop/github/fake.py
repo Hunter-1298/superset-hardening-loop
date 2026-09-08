@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -85,6 +85,9 @@ class FakeGitHub:
         self._next_issue = 100
         self._next_pr = 500
         self.fail_next: dict[str, Exception] = {}
+        # method -> callback run once, before that method's next call (scenarios use it to make
+        # something happen "while" the controller is talking to GitHub).
+        self.before_next: dict[str, Callable[[], None]] = {}
         self.workflow_runs: dict[int, _WorkflowRun] = {}
         self.workflow_runs_yielded = 0  # how far consumers actually read into the listing
         self._next_artifact = 9000
@@ -238,6 +241,9 @@ class FakeGitHub:
         if repo != self.repo:
             raise FakeGitHubError(f"fake only serves {self.repo}, got {repo}")
         self.calls.append((method, target))
+        hook = self.before_next.pop(method, None)
+        if hook is not None:
+            hook()
         exc = self.fail_next.pop(method, None)
         if exc is not None:
             raise exc

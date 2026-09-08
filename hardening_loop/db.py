@@ -1,4 +1,14 @@
-"""Persistent SQLite via SQLModel. Single-process controller; WAL + foreign keys on."""
+"""Persistent SQLite via SQLModel. One controller process plus the occasional `ingest` CLI write to
+the same file; WAL + foreign keys on.
+
+Two transaction shapes. `session_scope` opens a deferred transaction: readers never wait, and a
+write that follows a read is refused (`SQLITE_BUSY_SNAPSHOT`, no busy handler) if another
+connection committed in between. `write_scope` opens with `BEGIN IMMEDIATE` and so holds the single
+write lock from its first statement: what it read is what it commits against, and a concurrent
+writer (another process' `ingest`) either committed before it began and is visible to it, or waits
+at its own `BEGIN` until it commits. Any transaction that talks to GitHub or Devin between a read
+and a write must use `write_scope`, otherwise the external effect can outlive a rolled-back
+transaction that never recorded it."""
 
 from __future__ import annotations
 
@@ -15,6 +25,12 @@ from hardening_loop.models import tables
 from hardening_loop.models.tables import utcnow
 
 SCHEMA_VERSION = 6
+
+# A write transaction may span a few GitHub or Devin calls (dispatch, operator launch, closure), so
+# a concurrent `ingest` waits this long for the lock before it fails with "database is locked".
+WRITER_BUSY_TIMEOUT_MS = 30_000
+
+_WRITE_OPTION = "hl_write"
 
 # version -> SQL that brings a database at version-1 up to `version`. Only additive or renaming
 # statements; `create_all` afterwards adds any brand-new table.
@@ -45,7 +61,7 @@ def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
     cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute(f"PRAGMA busy_timeout={WRITER_BUSY_TIMEOUT_MS}")
     cursor.close()
 
 
@@ -57,7 +73,8 @@ def _set_readonly_pragmas(dbapi_connection: object, _record: object) -> None:
 
 
 def _begin_transaction(conn: Connection) -> None:
-    conn.exec_driver_sql("BEGIN")
+    immediate = conn.get_execution_options().get(_WRITE_OPTION, False)
+    conn.exec_driver_sql("BEGIN IMMEDIATE" if immediate else "BEGIN")
 
 
 def make_engine(path: Path | str) -> Engine:
@@ -168,6 +185,22 @@ def session_scope(engine: Engine) -> Iterator[Session]:
         raise
     finally:
         session.close()
+
+
+@contextmanager
+def write_scope(engine: Engine) -> Iterator[Session]:
+    """A session whose every transaction (including those after an explicit `commit()`) starts
+    with `BEGIN IMMEDIATE`, for work that mutates GitHub or Devin before its first row write."""
+    with engine.connect().execution_options(**{_WRITE_OPTION: True}) as conn:
+        session = Session(bind=conn)
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
 
 def integrity_ok(engine: Engine) -> bool:

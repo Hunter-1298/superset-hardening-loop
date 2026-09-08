@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -68,6 +71,74 @@ def test_round_trip_enums(tmp_path: Path) -> None:
     with dbmod.session_scope(engine) as s:
         wi2 = s.exec(select(tables.WorkItem)).one()
         assert wi2.kind is Kind.dependency_upgrade and wi2.kind.acu_cap == 5
+
+
+def _other_writer_can_begin(path: Path) -> bool:
+    """Whether a second connection (another process, in effect) can take SQLite's write lock."""
+    other = sqlite3.connect(path, timeout=0.2)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.rollback()
+        return True
+    except sqlite3.OperationalError as exc:
+        assert "locked" in str(exc), exc
+        return False
+    finally:
+        other.close()
+
+
+def test_write_scope_holds_the_write_lock_from_its_first_read(tmp_path: Path) -> None:
+    """`write_scope` reserves the database before reading, so nothing the transaction later
+    decides on (a pending-scan count, a work item's state) can be changed underneath it by a
+    concurrent `ingest`; `session_scope` stays a plain reader that blocks nobody."""
+    path = tmp_path / "c.sqlite3"
+    engine = dbmod.open_database(path)
+    with dbmod.session_scope(engine) as s:
+        s.exec(select(tables.SchemaVersion)).one()
+        assert _other_writer_can_begin(path), "deferred readers never hold the write lock"
+    with dbmod.write_scope(engine) as s:
+        s.exec(select(tables.SchemaVersion)).one()  # a read, no row written yet
+        assert not _other_writer_can_begin(path)
+        s.commit()  # a mid-scope commit releases the lock ...
+        assert _other_writer_can_begin(path)
+        s.exec(select(tables.SchemaVersion)).one()  # ... and the next statement retakes it
+        assert not _other_writer_can_begin(path)
+    assert _other_writer_can_begin(path)
+
+
+def test_write_scope_waits_for_a_concurrent_writer_and_then_sees_its_rows(tmp_path: Path) -> None:
+    """A concurrent writer that got there first is waited for (busy timeout), and what it
+    committed is visible to the write transaction that follows; it never reads a stale snapshot
+    it would later fail to write against."""
+    path = tmp_path / "c.sqlite3"
+    engine = dbmod.open_database(path)
+    other_engine = dbmod.open_database(path)  # the `ingest` CLI: its own connection pool
+    holding = threading.Event()
+
+    def other_writer() -> None:
+        with dbmod.write_scope(other_engine) as s:
+            s.add(
+                tables.ScanRun(
+                    external_run_id="r-other",
+                    trigger=Trigger.fixture,
+                    source_repo="Hunter-1298/superset",
+                    source_branch="main",
+                    source_sha="c83fb2bb",
+                )
+            )
+            s.flush()
+            holding.set()
+            time.sleep(0.5)  # commit happens on scope exit
+
+    thread = threading.Thread(target=other_writer)
+    thread.start()
+    assert holding.wait(5)
+    started = time.monotonic()
+    with dbmod.write_scope(engine) as s:
+        seen = [r.external_run_id for r in s.exec(select(tables.ScanRun)).all()]
+    assert time.monotonic() - started >= 0.4, "BEGIN IMMEDIATE waited for the other writer"
+    assert seen == ["r-other"]
+    thread.join()
 
 
 def test_redaction() -> None:

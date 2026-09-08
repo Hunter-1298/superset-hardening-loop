@@ -23,7 +23,7 @@ from sqlmodel import col, select
 from hardening_loop import verification
 from hardening_loop.classify.group import group_key_for, title_for
 from hardening_loop.config import FORK_REPO, REMEDIATION_BRANCH, Settings, assert_repo_allowed
-from hardening_loop.db import session_scope
+from hardening_loop.db import session_scope, write_scope
 from hardening_loop.devin.enums import Outcome, SessionSnapshot
 from hardening_loop.devin.protocol import CreateSessionRequest, DevinClient, ReviewStatus
 from hardening_loop.devin.schemas import schema_for, validate_output
@@ -193,7 +193,7 @@ class Orchestrator:
         else:
             if self.settings.auto_open_issues and not recover_only:
                 issues = self.open_issues()
-            with session_scope(self.engine) as db:
+            with write_scope(self.engine) as db:
                 adopted = self._recover_dispatching(db)
         report.sessions_created, report.sessions_adopted, report.issues_created = (
             created,
@@ -500,7 +500,7 @@ class Orchestrator:
         adopted, and the number of issues opened."""
         issues = self.open_issues()
         created = 0
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             adopted = self._recover_dispatching(db)
             active = self._active_session_count(db)
             budget = self._acu_budget_position(db)
@@ -571,7 +571,7 @@ class Orchestrator:
 
     def open_issues(self) -> int:
         n = 0
-        with session_scope(self.engine) as db:
+        with write_scope(self.engine) as db:
             queued = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.queued)).all()
             if not queued:
                 return 0
@@ -678,8 +678,14 @@ class Orchestrator:
     def launch(self, work_item_id: int, *, operator: str) -> LaunchResult:
         """Explicit operator dispatch of one work item. Records the decision as an event and as a
         `dispatch:approved` label plus comment on the tracking issue (GitHub stays the audit
-        trail), then runs the ordinary `_dispatch_one` path with every safeguard it has."""
-        with session_scope(self.engine) as db:
+        trail), then runs the ordinary `_dispatch_one` path with every safeguard it has.
+
+        The whole launch runs in a write transaction that holds SQLite's write lock from its
+        first read: the eligibility check (pending scans, state, capacity, budget) and the row
+        writes that bind the issue and reserve the item cannot be separated by a concurrent
+        `ingest`, which either committed before this transaction began (and is seen as pending)
+        or waits until it commits."""
+        with write_scope(self.engine) as db:
             wi = db.get(WorkItem, work_item_id)
             if wi is None:
                 raise LookupError(f"work item {work_item_id} not found")

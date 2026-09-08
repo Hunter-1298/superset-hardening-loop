@@ -50,7 +50,7 @@ from sqlmodel import Session, select
 from hardening_loop.ci import DEFAULT_EXPECTED_JOBS, REQUIRED_RUNTIME_JOBS
 from hardening_loop.classify.rules import parse_upper_bounds
 from hardening_loop.config import BASELINE_SHA, FORK_REPO, REMEDIATION_BRANCH, REPO_ALLOWLIST
-from hardening_loop.db import session_scope
+from hardening_loop.db import session_scope, write_scope
 from hardening_loop.domain.enums import GateMode, IntakeStatus, Scanner, Trigger
 from hardening_loop.github.artifacts import ArtifactError
 from hardening_loop.github.protocol import ArtifactInfo, GitHubClient, WorkflowRunInfo
@@ -410,7 +410,10 @@ class ScanIntakeService:
             return self._record(intake, outcome)
 
         meta = run_meta_for(manifest, run, repo=repo)
-        with session_scope(self.engine) as db:
+        # The run's rows land in one write transaction that holds the lock from its first read, so
+        # an operator launch in the service either sees this run pending or has already reserved
+        # its work item (and bound its issue) before the run exists.
+        with write_scope(self.engine) as db:
             result = ingest_run(db, meta, manifest.jobs, upper_bounds=bounds)
         outcome.status = IntakeStatus.ingested
         outcome.scan_run_id = result.scan_run_id
