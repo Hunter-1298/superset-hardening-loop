@@ -1577,7 +1577,7 @@ class Orchestrator:
                 snap.status.is_terminal and snap.status is not ReviewStatus.completed
             ):
                 if snap is not None and snap.status is ReviewStatus.errored:
-                    if self._review_retriggered(db, head):
+                    if self._review_retriggered(db, row, head):
                         self._wi(
                             db,
                             wi,
@@ -1627,10 +1627,13 @@ class Orchestrator:
             return
         self._review_timeout(db, wi, head, f"devin review still {snap.status.value}")
 
-    def _review_retriggered(self, db: DbSession, head: str) -> bool:
+    def _review_retriggered(self, db: DbSession, row: PullRequest, head: str) -> bool:
+        """Whether this PR's review of `head` has already been re-triggered after an error. Scoped
+        to the PR row: two PRs sharing a head commit each get their own retry."""
         rows = db.exec(
             select(Event).where(
                 Event.entity_type == "pull_request",
+                Event.entity_id == (row.id or 0),
                 Event.event == "review_triggered",
                 Event.to_state == head,
             )

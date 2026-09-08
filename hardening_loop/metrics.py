@@ -159,21 +159,21 @@ class Metrics(BaseModel):
 
 
 def _counts_by_severity(engine: Engine, run_id: int, mode: ScanMode) -> dict[str, int]:
-    """Findings present in `run_id` for `mode`, counted once per finding (not per scanner)."""
+    """Findings present in `run_id` for `mode`, counted once per finding (not per scanner) at the
+    highest severity any scanner recorded for it in that run. The sightings' own severities are
+    used, not the finding's, so a run's totals do not change when a later run rescores it."""
     with session_scope(engine) as db:
-        ids = set(
-            db.exec(
-                select(Sighting.finding_id).where(
-                    Sighting.scan_run_id == run_id, Sighting.mode == mode, col(Sighting.present)
-                )
-            ).all()
-        )
-        severities = (
-            db.exec(select(Finding.severity).where(col(Finding.id).in_(list(ids)))).all()
-            if ids
-            else []
-        )
-    c: Counter[str] = Counter(str(Severity(s).value) for s in severities)
+        rows = db.exec(
+            select(Sighting.finding_id, Sighting.severity).where(
+                Sighting.scan_run_id == run_id, Sighting.mode == mode, col(Sighting.present)
+            )
+        ).all()
+    highest: dict[int, Severity] = {}
+    for fid, sev in rows:
+        severity = Severity(sev) if sev is not None else Severity.unknown
+        if fid not in highest or severity.rank > highest[fid].rank:
+            highest[fid] = severity
+    c: Counter[str] = Counter(s.value for s in highest.values())
     return {s.value: c.get(s.value, 0) for s in Severity}
 
 

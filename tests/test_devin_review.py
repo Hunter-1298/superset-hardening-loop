@@ -12,10 +12,12 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
+from hardening_loop.db import session_scope
 from hardening_loop.devin.fake import FakeDevin, FakeDevinError
 from hardening_loop.devin.protocol import ReviewStatus
 from hardening_loop.devin.rest import DevinError, DevinRest
 from hardening_loop.domain.enums import LifecycleLevel, WorkItemState
+from hardening_loop.models.tables import Event, PullRequest
 from hardening_loop.replay.scenarios import DEP_FILES, _dep_output
 from hardening_loop.replay.world import World, sha
 
@@ -186,6 +188,50 @@ def test_review_errored_is_retriggered_once_then_needs_human(tmp_path: Path) -> 
     assert w.state_of(wi_id) is WorkItemState.review_pending
     reasons = [e.reason or "" for e in w.events("pull_request") if e.event == "review_triggered"]
     assert any(r.startswith("review errored") for r in reasons)
+    w.review_done(head, ReviewStatus.errored)
+    w.tick()
+    wi = w.wi(wi_id)
+    assert wi.state is WorkItemState.needs_human
+    assert wi.blocked_reason and "errored twice" in wi.blocked_reason
+    assert len(_review_calls(w, "trigger_review")) == 2, "no third attempt"
+
+
+def test_review_retry_is_scoped_to_the_pull_request(tmp_path: Path) -> None:
+    """Two tracked PRs can share a head commit (a session re-opens a PR from the same branch).
+    Another PR's errored-and-retriggered review of that commit must not consume this PR's retry."""
+    w = World(tmp_path / "r.sqlite3")
+    wi_id, number, head = _to_review_pending(w)
+    ours = w.pr_row(wi_id)
+    assert ours is not None and ours.id is not None
+    with session_scope(w.engine) as db:
+        other = PullRequest(
+            work_item_id=wi_id,
+            repo=ours.repo,
+            number=number + 1,
+            url=ours.url.replace(f"/{number}", f"/{number + 1}"),
+            base_branch=ours.base_branch,
+            head_branch=ours.head_branch,
+            head_sha=head,
+            state="closed",
+        )
+        db.add(other)
+        db.flush()
+        assert other.id is not None and other.id != ours.id
+        db.add(
+            Event(
+                actor="controller",
+                entity_type="pull_request",
+                entity_id=other.id,
+                event="review_triggered",
+                from_state=None,
+                to_state=head,
+                reason=f"review errored on {head[:12]}, re-triggered",
+            )
+        )
+    w.review_done(head, ReviewStatus.errored)
+    w.tick()
+    assert len(_review_calls(w, "trigger_review")) == 2, "our PR still gets its own retry"
+    assert w.state_of(wi_id) is WorkItemState.review_pending
     w.review_done(head, ReviewStatus.errored)
     w.tick()
     wi = w.wi(wi_id)

@@ -10,11 +10,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlmodel import select
 
 from hardening_loop.config import BASELINE_SHA, FORK_REPO
 from hardening_loop.dashboard.app import header_context
-from hardening_loop.domain.enums import FindingState, Kind, Scanner, Severity
-from hardening_loop.metrics import compute_metrics
+from hardening_loop.db import session_scope
+from hardening_loop.domain.enums import FindingState, Kind, ScanMode, Scanner, Severity
+from hardening_loop.metrics import compute_metrics, raw_counts_by_severity, snapshot_metrics
+from hardening_loop.models.tables import Sighting
 from hardening_loop.replay.synth import SEEDS
 from hardening_loop.replay.world import World
 from hardening_loop.report.run_report import select_runs
@@ -63,6 +66,52 @@ def test_older_scan_ingested_later_does_not_overwrite_severity_or_fix_versions(w
     assert f.state is FindingState.open
     # The older run's evidence is still recorded, it just does not describe the present.
     assert older in {s.scan_run_id for s in w.sightings(f.id)}
+
+
+def test_a_rescore_does_not_rewrite_an_earlier_runs_severity_totals(w: World) -> None:
+    """Per-run severity counts come from that run's own sightings (highest across scanners), so
+    a later scan that rescores a finding changes the later run's totals, not history's, and a
+    metrics snapshot taken before the rescore still matches what the run reported."""
+    base = w.baseline("cryptography")
+    before = raw_counts_by_severity(w.engine, base)
+    assert before["HIGH"] == 1 and before["CRITICAL"] == 0
+    snap = snapshot_metrics(w.engine, trigger="test", acu_cost_usd=None, now=w.clock.now())
+    assert snap.body["findings_by_run"]["replay-baseline"] == before
+
+    w.clock.advance(minutes=60)
+    rescored = w.closing_run(BASELINE_SHA)
+    rescored.seeds = [
+        replace(SEEDS["cryptography"], vulns=((CVE, Severity.critical, ("42.0.4", "42.0.5")),))
+    ]
+    newer = w.ingest(rescored, "newer")
+    assert w.finding_by_vuln(CVE).severity is Severity.critical
+
+    assert raw_counts_by_severity(w.engine, base) == before, "history is stable"
+    after = raw_counts_by_severity(w.engine, newer)
+    assert after["CRITICAL"] == 1 and after["HIGH"] == 0
+    by_run = compute_metrics(w.engine, acu_cost_usd=None, now=w.clock.now()).findings_by_run
+    assert by_run["replay-baseline"] == before and by_run["newer"] == after
+
+
+def test_run_counts_dedupe_scanners_at_the_highest_severity_they_recorded(w: World) -> None:
+    """Two scanners that disagree on severity are still one finding in the run's totals, counted
+    at the higher of the two."""
+    base = w.baseline("cryptography")
+    f = w.finding_by_vuln(CVE)
+    assert f.id is not None
+    with session_scope(w.engine) as db:
+        rows = db.exec(
+            select(Sighting).where(Sighting.finding_id == f.id, Sighting.scan_run_id == base)
+        ).all()
+        assert {r.scanner for r in rows if r.mode is ScanMode.raw} == {Scanner.trivy, Scanner.grype}
+        for r in rows:
+            if r.mode is ScanMode.raw:
+                r.severity = Severity.medium if r.scanner is Scanner.trivy else Severity.critical
+                db.add(r)
+        db.commit()
+    counts = raw_counts_by_severity(w.engine, base)
+    assert counts["CRITICAL"] == 1 and counts["MEDIUM"] == 0 and counts["HIGH"] == 0
+    assert sum(counts.values()) == 1
 
 
 def test_older_scan_that_predates_first_sighting_becomes_first_seen(w: World) -> None:
