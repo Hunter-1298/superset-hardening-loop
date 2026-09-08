@@ -13,7 +13,7 @@ import pytest
 
 from hardening_loop.config import BASELINE_SHA
 from hardening_loop.devin.enums import DevinStatus, DevinStatusDetail
-from hardening_loop.domain.enums import FindingState, WorkItemState
+from hardening_loop.domain.enums import FindingState, HumanLabel, WorkItemState
 from hardening_loop.models.tables import WorkItem
 from hardening_loop.replay.world import World, sha
 
@@ -146,6 +146,50 @@ def test_merge_observed_after_the_closing_scan_was_applied_still_closes(w: World
     assert w.issue_state(wi) == "closed"
     assert w.gh.never_merged_or_approved()
     assert len(w.devin.sessions) == 1
+
+
+def test_report_read_late_from_a_suspended_session_after_human_retry(w: World) -> None:
+    """The live sequence: the report was first mistaken for a question (item parked in
+    `needs_human`), the human merged the PR, the closing scan came in, and Devin suspended the
+    idle session for inactivity long after the wall-clock bound. A `retry` label re-adopts that
+    same session; its verdict is verified and the item closes against the scan already applied."""
+    wi = _launch(w)
+    sid = wi.active_session_id
+    assert sid is not None
+    w.devin.set_state(sid, DevinStatus.running, DevinStatusDetail.waiting_for_user, question="?")
+    w.tick()
+    assert w.state_of(wi.id or 0) is WorkItemState.needs_human
+
+    url, number = _report_without_finishing(w, wi)
+    w.devin.set_state(
+        sid, DevinStatus.suspended, DevinStatusDetail.inactivity, acus=1.2, pull_requests=[url]
+    )
+    merge_sha = sha("merged-while-parked")
+    w.gh.merge(number, merge_sha, at=w.clock.now())
+    w.clock.advance(minutes=30)
+    rid = w.ingest(w.closing_run(merge_sha))
+    assert w.apply_run(rid) == {}
+    w.clock.advance(hours=4)
+
+    w.gh.label(wi.issue_number or 0, HumanLabel.retry.value)
+    w.tick()
+    w.tick()
+    w.tick()
+
+    wi = w.wi(wi.id or 0)
+    assert wi.state is WorkItemState.verified, (wi.state, wi.blocked_reason)
+    assert wi.pr_number == number and wi.merge_sha == merge_sha
+    names = w.event_names(wi.id or 0)
+    assert "session_adopted" in names
+    assert names.index("human_retry") < names.index("pr_opened") < names.index("human_merged")
+    assert (
+        names.index("human_merged") < names.index("rescan_started") < names.index("rescan_verified")
+    )
+    assert len(w.devin.sessions) == 1 and len(w.devin.created_requests()) == 1
+    assert not any(m == "send_message" for m, _ in w.devin.calls)
+    assert w.finding_by_vuln(CVE).state is FindingState.fixed
+    assert w.issue_state(wi) == "closed"
+    assert w.gh.never_merged_or_approved()
 
 
 def test_a_scan_that_predates_the_merge_is_not_replayed_for_it(w: World) -> None:

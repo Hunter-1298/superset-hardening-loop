@@ -87,7 +87,9 @@ def assess(
             Decision.needs_human,
             f"acu_cap_exceeded:{snapshot.acus_consumed:.2f}>{facts.acu_cap:.2f}",
         )
-    if facts.wall_clock_exceeded:
+    # The wall clock bounds how long a verdict is waited for; a delivered report is judged on
+    # its own merits below however late it is read.
+    if facts.wall_clock_exceeded and not snapshot.is_final_report:
         return Assessment(Decision.needs_human, "session_wall_clock_exceeded")
     if snapshot.is_waiting_for_approval:
         return Assessment(Decision.needs_human, "devin_action_approval_required")

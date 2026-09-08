@@ -132,8 +132,10 @@ def test_every_status_combination_has_a_decision(status: str, detail: str | None
     assert isinstance(a.decision, Decision)
     if s.is_budget_stop or s.is_error or s.is_waiting_for_approval:
         assert a.decision is Decision.needs_human
-    elif s.is_done or s.is_waiting_for_user:
-        # a finished session, or one idling after posting its verified `pr_opened` report
+    elif s.is_done or s.is_waiting_for_user or (status, detail) == ("suspended", "inactivity"):
+        # a finished session, or one idle (or suspended for idling) after posting its verified
+        # `pr_opened` report
+        assert s.is_final_report
         assert a.decision is Decision.ready_for_verification
     else:
         assert a.decision is Decision.continue_polling
@@ -223,6 +225,40 @@ def test_waiting_for_user_with_verified_pr_report_is_completion() -> None:
     assert assess(blocked, FACTS_OK, pending_question="May I?").reason.startswith(
         "devin_question_not_whitelisted"
     )
+
+
+def test_inactivity_suspension_after_pr_report_is_completion() -> None:
+    s = snap("suspended", "inactivity", output=PR_OUT, prs=[PR_OUT["pr_url"]])
+    assert s.is_final_report and s.is_active and not s.is_done
+    assert assess(s, FACTS_OK).decision is Decision.ready_for_verification
+    facts = SessionFacts(acu_cap=5, schema_valid=True, pr_verified=False, diff_policy_ok=True)
+    assert assess(s, facts).reason == "pull_request_failed_verification"
+    # Suspended without a PR verdict: still a session that may resume, kept polling.
+    idle = snap("suspended", "inactivity", acus=2.0)
+    assert not idle.is_final_report
+    assert assess(idle, FACTS_OK).decision is Decision.continue_polling
+    assert not snap("suspended", "user_request", output=PR_OUT, prs=["u"]).is_final_report
+
+
+def test_wall_clock_does_not_discard_a_delivered_report() -> None:
+    late = SessionFacts(
+        acu_cap=5,
+        schema_valid=True,
+        pr_verified=True,
+        diff_policy_ok=True,
+        wall_clock_exceeded=True,
+    )
+    for status, detail in (
+        ("exit", None),
+        ("running", "waiting_for_user"),
+        ("suspended", "inactivity"),
+    ):
+        s = snap(status, detail, output=PR_OUT, prs=[PR_OUT["pr_url"]])
+        assert assess(s, late).decision is Decision.ready_for_verification
+    # ...but the ACU cap still does, and an undelivered verdict still times out.
+    over = snap("exit", None, output=PR_OUT, prs=["u"], acus=5.5)
+    assert assess(over, late).reason.startswith("acu_cap_exceeded")
+    assert assess(snap("suspended", "inactivity"), late).reason == "session_wall_clock_exceeded"
 
 
 def test_waiting_for_approval_is_needs_human() -> None:

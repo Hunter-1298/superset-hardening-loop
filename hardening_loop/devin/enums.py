@@ -103,9 +103,13 @@ class SessionSnapshot(BaseModel):
     @property
     def is_final_report(self) -> bool:
         """The session has delivered its verdict: it finished, or it declared `pr_opened` in its
-        structured output and is idling in `waiting_for_user` after posting the report. Only the
-        PR outcome counts here because it is checked against GitHub rather than trusted."""
-        return self.is_done or (self.is_waiting_for_user and self.outcome is Outcome.pr_opened)
+        structured output and is idle after posting the report (`waiting_for_user`, or suspended
+        for inactivity once that idling outlasted Devin's timeout). Only the PR outcome counts
+        here because it is checked against GitHub rather than trusted."""
+        return self.is_done or (
+            (self.is_waiting_for_user or self.is_inactivity_suspension)
+            and self.outcome is Outcome.pr_opened
+        )
 
     @property
     def is_budget_stop(self) -> bool:
@@ -116,6 +120,13 @@ class SessionSnapshot(BaseModel):
         return (
             self.status is DevinStatus.suspended
             and self.status_detail in RESUMABLE_SUSPENSION_DETAILS
+        )
+
+    @property
+    def is_inactivity_suspension(self) -> bool:
+        return (
+            self.status is DevinStatus.suspended
+            and self.status_detail is DevinStatusDetail.inactivity
         )
 
     @property
