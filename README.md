@@ -17,7 +17,7 @@ Baseline: Superset `6.1.0` = `c83fb2bb1dcfac41ac51bcebd82471f4a7180d18` (`fixtur
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 
-hardening-loop replay --out data/replay      # R0-R20, N1-N5, OP1, DEMO; outbound network blocked
+hardening-loop replay --out data/replay      # R0-R21, N1-N5, OP1, DEMO; outbound network blocked
 hardening-loop serve --replay --db data/replay/replay.sqlite3
 # open http://127.0.0.1:8080
 ```
@@ -67,12 +67,16 @@ prints the baseline/latest/upstream-master Markdown report.
 | `hardening_loop/dashboard/`, `hardening_loop/report/`, `hardening_loop/metrics.py` | FastAPI UI/JSON (read-only unless `--operator`), CVE pages, DB-backed report, metric queries |
 | `scripts/` | pinned scanner install (checksum-verified), image scan, baseline capture |
 | `fixtures/` | committed baseline evidence and source pin snapshots |
+| `playbooks/`, `knowledge/`, `blueprint/` | Devin playbooks + exported structured-output schemas, knowledge note, fork environment blueprint (`assets sync`) |
+| `docs/` | [runbook](docs/runbook.md), [settings](docs/settings.md), [first live run](docs/live-run.md), [Loom script](docs/loom-script.md) |
 
 ## Configuration
 
 All settings are `HL_`-prefixed environment variables (`hardening_loop/config.py`). Secrets
 (`HL_DEVIN_API_KEY`, `HL_GITHUB_TOKEN`) are `SecretStr` and never logged. `HL_ACU_COST_USD`
 has no default: cost is reported as `n/a` until it is set. `HL_SCAN_GATE_MODE=report|enforce`.
+The full list, the bounded first-live-run profile and the GitHub settings a repository admin
+must apply are in [docs/settings.md](docs/settings.md).
 
 ## Checks
 

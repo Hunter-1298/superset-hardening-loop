@@ -24,6 +24,8 @@ from hardening_loop.models.tables import (
     Event,
     Finding,
     PullRequest,
+    ScanIntake,
+    ScanRun,
     Session,
     WorkItem,
 )
@@ -190,6 +192,20 @@ class World:
     def sessions(self) -> list[Session]:
         with session_scope(self.engine) as db:
             rows = list(db.exec(select(Session).order_by(col(Session.id))).all())
+            for r in rows:
+                db.expunge(r)
+            return rows
+
+    def scan_runs(self) -> list[ScanRun]:
+        with session_scope(self.engine) as db:
+            rows = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+            for r in rows:
+                db.expunge(r)
+            return rows
+
+    def scan_intakes(self) -> list[ScanIntake]:
+        with session_scope(self.engine) as db:
+            rows = list(db.exec(select(ScanIntake).order_by(col(ScanIntake.id))).all())
             for r in rows:
                 db.expunge(r)
             return rows

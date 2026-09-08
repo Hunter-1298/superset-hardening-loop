@@ -1,11 +1,14 @@
-"""Replay scenarios R0-R20 and N1-N5. Every scenario drives the real orchestrator against the
+"""Replay scenarios R0-R21 and N1-N5. Every scenario drives the real orchestrator against the
 in-memory doubles and records checks; the runner asserts zero outbound network for all of them."""
 
 from __future__ import annotations
 
+import json
+import shutil
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from hardening_loop.classify.rules import parse_upper_bounds
@@ -15,6 +18,7 @@ from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
     HumanLabel,
+    IntakeStatus,
     Kind,
     LifecycleLevel,
     Scanner,
@@ -28,6 +32,7 @@ from hardening_loop.ingest.persist import ingest_baseline
 from hardening_loop.models.tables import NegativeRun, WorkItem
 from hardening_loop.orchestrator.engine import AWAITING_DISPATCH_LABEL
 from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.replay.bundle import stage_evidence_bundle
 from hardening_loop.replay.synth import (
     BASELINE_SHA,
     CONFIG_SEEDS,
@@ -1091,6 +1096,81 @@ def r20(w: World, r: ScenarioResult) -> None:
     counts = w.apply_run(w.ingest(w.closing_run(merge)))
     r.eq("a dated rescan closes it", counts.get("fixed"), 1)
     r.eq("work item verified", w.state_of(wi.id or 0), WorkItemState.verified)
+
+
+# ----------------------------------------------------------------------------- R21
+
+
+@scenario(
+    "R21",
+    "Scan intake from Actions artifacts: verified bundle ingested once, repeat poll is a no-op, "
+    "tampered and source-mismatched bundles are rejected but kept on record",
+)
+def r21(w: World, r: ScenarioResult) -> None:
+    root = w.settings.repo_root
+    if not (root / "fixtures" / "baseline" / BASELINE_SHA).exists():
+        r.expect("baseline fixture present", False, str(root))
+        return
+    w.gh.put_file("pyproject.toml", BASELINE_SHA, load_source_pyproject(root, BASELINE_SHA))
+    staging = w.db_path.parent / "r21-bundles"
+    good_id, tampered_id, foreign_id = 34_200_000_021, 34_200_000_022, 34_200_000_023
+    shutil.rmtree(staging, ignore_errors=True)
+    for run_id in (good_id, tampered_id, foreign_id):
+        shutil.rmtree(w.settings.evidence_dir / "runs" / str(run_id), ignore_errors=True)
+
+    good = stage_evidence_bundle(staging / "good", repo_root=root, run_id=good_id)
+    tampered = stage_evidence_bundle(staging / "tampered", repo_root=root, run_id=tampered_id)
+    vuln = tampered / "lean" / "raw" / "trivy-vuln.json"
+    doc = json.loads(vuln.read_text())
+    doc["Results"] = []
+    vuln.write_text(json.dumps(doc))
+    foreign = stage_evidence_bundle(
+        staging / "foreign", repo_root=root, run_id=foreign_id, source_repo="apache/superset"
+    )
+    for run_id, tree in ((good_id, good), (tampered_id, tampered), (foreign_id, foreign)):
+        info = w.gh.add_workflow_run(run_id=run_id, head_sha=BASELINE_SHA)
+        w.gh.add_artifact(info.id, f"scan-evidence-{BASELINE_SHA}", tree)
+
+    first = w.tick()
+    r.eq("one bundle ingested", first.scans_ingested, 1)
+    r.eq("two bundles rejected", first.scans_rejected, 2)
+    r.expect("ingested baseline seeds work items", first.work_items_created > 50, first)
+    runs = w.scan_runs()
+    r.eq("exactly one scan run persisted", len(runs), 1)
+    r.eq(
+        "scan run carries the Actions identity",
+        runs[0].external_run_id,
+        f"gha:{w.settings.fork_repo}:{good_id}:1",
+    )
+    intakes = w.scan_intakes()
+    r.eq("every polled run has an intake row", len(intakes), 3)
+    by_run = {i.workflow_run_id: i for i in intakes}
+    r.eq("good run ingested", by_run[good_id].status, IntakeStatus.ingested)
+    r.eq("tampered run rejected", by_run[tampered_id].status, IntakeStatus.rejected)
+    r.expect(
+        "tampered rejection names the checksum failure",
+        any("failed verification" in x for x in by_run[tampered_id].reasons),
+        by_run[tampered_id].reasons,
+    )
+    r.eq("foreign-repo run rejected", by_run[foreign_id].status, IntakeStatus.rejected)
+    r.expect(
+        "rejected bundles stay on disk for inspection",
+        all(Path(by_run[i].bundle_path or "").is_dir() for i in (tampered_id, foreign_id)),
+        [by_run[i].bundle_path for i in (tampered_id, foreign_id)],
+    )
+    evidence = w.settings.evidence_dir / "runs" / str(good_id) / "1"
+    r.expect("verified evidence kept at runs/<id>/<attempt>", evidence.is_dir(), evidence)
+    files_before = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*"))
+    items_before = len(w.work_items())
+
+    second = w.tick()
+    r.eq("repeat poll ingests nothing", second.scans_ingested, 0)
+    r.eq("repeat poll rejects nothing", second.scans_rejected, 0)
+    r.eq("no second scan run", len(w.scan_runs()), 1)
+    r.eq("no new intake rows", len(w.scan_intakes()), 3)
+    r.eq("no new work items", len(w.work_items()), items_before)
+    files_after = sorted(p.relative_to(evidence).as_posix() for p in evidence.rglob("*"))
+    r.eq("evidence directory untouched", files_after, files_before)
 
 
 # ----------------------------------------------------------------------------- N1-N5

@@ -38,7 +38,7 @@ from hardening_loop.domain.enums import (
     Severity,
     WorkItemState,
 )
-from hardening_loop.github.protocol import CheckRun, GitHubClient, PullRequestInfo
+from hardening_loop.github.protocol import CheckRun, GitHubClient, Issue, PullRequestInfo
 from hardening_loop.ingest.intake import IntakeExpectation, ScanIntakeService
 from hardening_loop.models.tables import (
     Event,
@@ -151,16 +151,17 @@ class Orchestrator:
     # ------------------------------------------------------------------ tick
 
     def tick(self, *, auto_dispatch: bool = True) -> TickReport:
-        """One control-loop iteration. With `auto_dispatch=False` (operator mode) issues are still
-        opened and crashed dispatches recovered, but no new session is created unless an operator
-        launches one explicitly."""
+        """One control-loop iteration. With `auto_dispatch=False` (operator mode) crashed
+        dispatches are still recovered but no new session is created unless an operator launches
+        one explicitly; issues for queued items are opened only while `auto_open_issues` is on,
+        otherwise a work item gets its issue when it is launched."""
         report = TickReport()
         report.scans_ingested, report.scans_rejected = self.poll_scans()
         report.work_items_created = len(self.create_work_items())
         if auto_dispatch:
             created, adopted, issues = self.dispatch()
         else:
-            issues = self.open_issues()
+            issues = self.open_issues() if self.settings.auto_open_issues else 0
             created = 0
             with session_scope(self.engine) as db:
                 adopted = self._recover_dispatching(db)
@@ -531,13 +532,54 @@ class Orchestrator:
         n = 0
         with session_scope(self.engine) as db:
             queued = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.queued)).all()
+            if not queued:
+                return 0
+            existing = self._open_controller_issues(db)
             for wi in queued:
-                if self._open_issue(db, wi):
+                if self._open_issue(db, wi, existing=existing):
                     n += 1
         return n
 
-    def _open_issue(self, db: DbSession, wi: WorkItem) -> bool:
+    @staticmethod
+    def _issue_title(wi: WorkItem) -> str:
+        return f"[hardening-loop] {wi.title}"
+
+    def _open_controller_issues(self, db: DbSession) -> dict[str, Issue] | None:
+        """Open fork issues carrying the controller label and not bound to any work item, by
+        exact title, so a work item whose issue exists (created before a crash, or by an earlier
+        database) is adopted rather than duplicated. `None` when GitHub cannot be asked; the
+        caller then creates as usual."""
+        try:
+            issues = self.gh.find_issues(self.repo, label=CONTROLLER_LABEL, state="open")
+        except Exception as exc:
+            log.warning("could not list open %s issues: %s", CONTROLLER_LABEL, exc)
+            return None
+        bound = {
+            n
+            for n in db.exec(
+                select(WorkItem.issue_number).where(col(WorkItem.issue_number).is_not(None))
+            ).all()
+        }
+        by_title: dict[str, Issue] = {}
+        for issue in sorted(issues, key=lambda i: i.number):
+            if issue.number not in bound:
+                by_title.setdefault(issue.title, issue)
+        return by_title
+
+    def _open_issue(
+        self, db: DbSession, wi: WorkItem, *, existing: dict[str, Issue] | None = None
+    ) -> bool:
         assert wi.id is not None
+        title = self._issue_title(wi)
+        if existing is None:
+            existing = self._open_controller_issues(db)
+        found = existing.get(title) if existing else None
+        if found is not None:
+            wi.issue_number = found.number
+            wi.issue_url = found.url
+            wi.issue_opened_at = self.clock.now()
+            self._wi(db, wi, WorkItemEvent.issue_created, f"adopted existing {found.url}")
+            return True
         members = db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all()
         labels = [CONTROLLER_LABEL, KIND_LABELS[wi.kind], f"severity:{wi.severity.value}"]
         if wi.risk is Risk.high:
@@ -545,12 +587,7 @@ class Orchestrator:
         if not dispatch_allowed(wi.severity, []):
             labels.append(AWAITING_DISPATCH_LABEL)
         try:
-            issue = self.gh.create_issue(
-                self.repo,
-                f"[hardening-loop] {wi.title}",
-                self._issue_body(wi, members),
-                labels,
-            )
+            issue = self.gh.create_issue(self.repo, title, self._issue_body(wi, members), labels)
         except Exception as exc:
             self._event(
                 db,

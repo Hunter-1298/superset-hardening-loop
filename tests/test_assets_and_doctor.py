@@ -417,7 +417,7 @@ def test_doctor_without_database_is_advisory(tmp_path: Path) -> None:
     assert {"HL_GITHUB_TOKEN", "HL_DEVIN_API_KEY", "HL_OPERATOR_LOGIN", "database"} <= _names(
         r, "warn"
     )
-    assert "baseline fixtures" in _names(r, "ok")
+    assert {"baseline fixtures", "fork blueprint"} <= _names(r, "ok")
     rendered = r.render()
     assert "all checks passed" in rendered
     live = run_doctor(s, live=True)
@@ -425,6 +425,20 @@ def test_doctor_without_database_is_advisory(tmp_path: Path) -> None:
     assert {"HL_GITHUB_TOKEN", "HL_DEVIN_API_KEY", "HL_OPERATOR_LOGIN", "database"} <= _names(
         live, "fail"
     )
+
+
+def test_doctor_requires_committed_fork_blueprint(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "playbooks", root / "playbooks")
+    shutil.copytree(REPO_ROOT / "knowledge", root / "knowledge")
+    shutil.copytree(REPO_ROOT / "fixtures", root / "fixtures")
+    s = _settings(tmp_path / "x.sqlite3", repo_root=root)
+    assert "fork blueprint" in _names(run_doctor(s), "fail")
+    (root / "blueprint").mkdir()
+    (root / "blueprint" / "superset.yaml").write_text("# empty\n", encoding="utf-8")
+    assert "fork blueprint" in _names(run_doctor(s), "fail")
+    shutil.copy(REPO_ROOT / "blueprint" / "superset.yaml", root / "blueprint" / "superset.yaml")
+    assert "fork blueprint" in _names(run_doctor(s), "ok")
 
 
 def test_doctor_never_prints_secret_values(tmp_path: Path) -> None:
@@ -447,6 +461,7 @@ def test_doctor_live_profile_enforced(tmp_path: Path) -> None:
         "devin_api_key": SecretStr("k"),
         "operator_login": "Hunter-1298",
         "auto_dispatch": False,
+        "auto_open_issues": False,
         "max_concurrent_sessions": 1,
         "global_acu_budget": 5.0,
     }
@@ -457,6 +472,7 @@ def test_doctor_live_profile_enforced(tmp_path: Path) -> None:
     for bad in (
         {"operator_login": "someone-else"},
         {"auto_dispatch": True},
+        {"auto_open_issues": True},
         {"max_concurrent_sessions": 2},
         {"global_acu_budget": 6.0},
         {"replay_mode": True},

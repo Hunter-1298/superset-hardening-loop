@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     operator_mode: bool = False
     operator_login: str | None = None
     auto_dispatch: bool = False
+    # With auto-dispatch off, `auto_open_issues=False` also stops the loop from opening a tracking
+    # issue for every queued work item; the issue is opened when the item is launched instead.
+    auto_open_issues: bool = True
 
     # Location of the committed `fixtures/` tree (baseline scan evidence, source snapshots).
     # Defaults to the checkout root for an editable install; the image sets HL_REPO_ROOT=/app.

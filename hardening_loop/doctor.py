@@ -112,6 +112,12 @@ def _profile(r: DoctorReport, s: Settings, live: bool) -> None:
         "fail" if (live and s.auto_dispatch) else "ok",
         str(s.auto_dispatch).lower() + (" (live runs require false)" if live else ""),
     )
+    r.add(
+        "HL_AUTO_OPEN_ISSUES",
+        "fail" if (live and s.auto_open_issues) else "ok",
+        str(s.auto_open_issues).lower()
+        + (" (live runs require false: one issue per explicit launch)" if live else ""),
+    )
     conc_ok = not live or s.max_concurrent_sessions == LIVE_MAX_CONCURRENT
     r.add(
         "HL_MAX_CONCURRENT_SESSIONS",
@@ -185,6 +191,13 @@ def _assets(r: DoctorReport, s: Settings, live: bool) -> None:
         "committed assets",
         "ok",
         f"{len(bundle.playbooks)} playbooks, {len(bundle.knowledge)} knowledge note(s)",
+    )
+    blueprint = s.repo_root / "blueprint" / "superset.yaml"
+    blueprint_ok = blueprint.is_file() and "initialize:" in blueprint.read_text(encoding="utf-8")
+    r.add(
+        "fork blueprint",
+        "ok" if blueprint_ok else "fail",
+        "blueprint/superset.yaml present" if blueprint_ok else f"{blueprint} missing or empty",
     )
     exported = export_schemas(s.repo_root / "playbooks" / "schemas", write=False)
     r.add(
