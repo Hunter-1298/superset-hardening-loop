@@ -33,10 +33,17 @@
     </select>
   </div>
   <div class="field">
-    <label for="f-level">Verification</label>
+    <label for="f-level">Lifecycle</label>
     <select id="f-level" name="level">
       <option value="">Any</option>
-      {% for lv in verification_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|level_label).text }}</option>{% endfor %}
+      {% for lv in lifecycle_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|lifecycle_label).text }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="field">
+    <label for="f-depth">Verified depth</label>
+    <select id="f-depth" name="depth">
+      <option value="">Any</option>
+      {% for d in depth_levels %}<option value="{{ d.name }}"{% if filters.depth in (d.name, d.value|string, "L" ~ d.value) %} selected{% endif %}>{{ (d|depth_label).text }}</option>{% endfor %}
     </select>
   </div>
   <div class="field check">
@@ -57,7 +64,8 @@
   {% if filters.state %}<span class="pill">State: <strong>{{ (filters.state|wi_state).text }}</strong></span>{% endif %}
   {% if filters.severity %}<span class="pill">Severity: <strong>{{ (filters.severity|severity_label).text }}</strong></span>{% endif %}
   {% if filters.kind %}<span class="pill">Kind: <strong>{{ filters.kind|kind }}</strong></span>{% endif %}
-  {% if filters.level %}<span class="pill">Verification: <strong>{{ (filters.level|level_label).text }}</strong></span>{% endif %}
+  {% if filters.level %}<span class="pill">Lifecycle: <strong>{{ (filters.level|lifecycle_label).text }}</strong></span>{% endif %}
+  {% if filters.depth %}<span class="pill">Depth: <strong>{{ (filters.depth|depth_label).text }}</strong></span>{% endif %}
 </div>
 {% endif %}
 
@@ -69,7 +77,8 @@
     <th scope="col">Severity</th>
     <th scope="col">State</th>
     <th scope="col">Kind</th>
-    <th scope="col">Verification</th>
+    <th scope="col">Lifecycle</th>
+    <th scope="col">Depth</th>
     <th scope="col" class="num">ACU</th>
     {% if acu_cost_usd %}<th scope="col" class="num">Est. cost</th>{% endif %}
     <th scope="col" class="w-links">GitHub</th>
@@ -85,7 +94,8 @@
     <td>{{ ui.severity_badge(w.severity) }}</td>
     <td>{{ ui.state_badge(w.state) }}</td>
     <td>{{ ui.kind_badge(w.kind) }}</td>
-    <td>{{ ui.level_badge(w.verification_level) }}</td>
+    <td>{{ ui.level_badge(w.lifecycle_level) }}</td>
+    <td>{{ w.verification_depth|depth_code }}</td>
     <td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }}<span class="secondary">of {{ w.acu_cap|num(0) }}</span></td>
     {% if acu_cost_usd %}<td class="num">{{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money }}</td>{% endif %}
     <td class="w-links">

@@ -15,12 +15,14 @@ from sqlmodel import col, select
 from hardening_loop.db import session_scope
 from hardening_loop.domain.enums import (
     ACTIVE_WORK_ITEM_STATES,
+    CheckStatus,
     FindingState,
     Kind,
+    LifecycleLevel,
     ScanMode,
     ScanRunStatus,
     Severity,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 from hardening_loop.gate import GateVerdict, gate_verdict
@@ -93,14 +95,32 @@ class Cost(BaseModel):
 
 
 class PRLevel(BaseModel):
+    """Lifecycle progress and verification depth of one work item's PR. `level` is how far the
+    fix travelled (PR -> CI -> review -> approval -> merge -> rescan); `depth` is the highest
+    L0-L6 rung its current head proved with complete check evidence, None when nothing has."""
+
     work_item_id: int
     kind: str
     pr_url: str
     level: int
     level_name: str
+    depth: int | None
+    depth_name: str | None
+    depth_rungs: dict[str, str]
     first_head_checks_green: bool | None
     retries_used: int
     state: str
+
+
+class DepthSummary(BaseModel):
+    """Verification depth across PRs: how many PR heads hold each rung as their highest, and
+    how many rungs are only `partial` or `unavailable` (evidence gaps, never counted as passed)."""
+
+    highest_by_depth: dict[str, int]
+    prs_without_depth: int
+    partial_rungs: int
+    unavailable_rungs: int
+    failed_rungs: int
 
 
 class Throughput(BaseModel):
@@ -125,6 +145,7 @@ class Metrics(BaseModel):
     timing_by_kind: dict[str, Timing]
     cost: Cost
     pr_levels: list[PRLevel]
+    depth: DepthSummary
     throughput: Throughput
     retries_total: int
     active_sessions: int
@@ -313,8 +334,11 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
             work_item_id=w.id or 0,
             kind=w.kind.slug,
             pr_url=w.pr_url or "",
-            level=int(w.verification_level),
-            level_name=VerificationLevel(w.verification_level).name,
+            level=int(w.lifecycle_level),
+            level_name=LifecycleLevel(w.lifecycle_level).name,
+            depth=None if w.verification_depth is None else int(w.verification_depth),
+            depth_name=None if w.verification_depth is None else w.verification_depth.name,
+            depth_rungs=dict(pr_by_wi[w.id or -1].depth_rungs),
             first_head_checks_green=pr_by_wi[w.id or -1].first_head_checks_green,
             retries_used=w.retries_used,
             state=w.state.value,
@@ -322,6 +346,16 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         for w in items
         if (w.id or -1) in pr_by_wi
     ]
+    rung_values = [v for lv in pr_levels for v in lv.depth_rungs.values()]
+    depth = DepthSummary(
+        highest_by_depth={
+            d.name: sum(1 for lv in pr_levels if lv.depth_name == d.name) for d in VerificationDepth
+        },
+        prs_without_depth=sum(1 for lv in pr_levels if lv.depth is None),
+        partial_rungs=rung_values.count(CheckStatus.partial.value),
+        unavailable_rungs=rung_values.count(CheckStatus.unavailable.value),
+        failed_rungs=rung_values.count(CheckStatus.failed.value),
+    )
 
     throughput = Throughput(
         verified_per_day=dict(
@@ -363,6 +397,7 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         timing_by_kind={k.slug: _timing(verified_by_kind.get(k.slug, [])) for k in Kind},
         cost=cost,
         pr_levels=pr_levels,
+        depth=depth,
         throughput=throughput,
         retries_total=sum(w.retries_used for w in items),
         active_sessions=sum(1 for w in items if w.state in ACTIVE_WORK_ITEM_STATES),

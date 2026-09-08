@@ -20,6 +20,7 @@ from sqlalchemy import Engine
 from sqlmodel import Session as DbSession
 from sqlmodel import col, select
 
+from hardening_loop import verification
 from hardening_loop.classify.group import group_key_for, title_for
 from hardening_loop.config import FORK_REPO, REMEDIATION_BRANCH, Settings, assert_repo_allowed
 from hardening_loop.db import session_scope
@@ -31,9 +32,9 @@ from hardening_loop.domain.enums import (
     FindingState,
     HumanLabel,
     Kind,
+    LifecycleLevel,
     Risk,
     Severity,
-    VerificationLevel,
     WorkItemState,
 )
 from hardening_loop.github.protocol import CheckRun, CommitStatus, GitHubClient, PullRequestInfo
@@ -47,6 +48,7 @@ from hardening_loop.models.tables import (
     Session,
     SessionPoll,
     Sighting,
+    VerificationCheck,
     WorkItem,
     utcnow,
 )
@@ -1090,7 +1092,7 @@ class Orchestrator:
         wi.pr_url = pr.url
         wi.pr_head_sha = pr.head_sha
         wi.pr_opened_at = wi.pr_opened_at or self.clock.now()
-        self._raise_level(db, wi, row, VerificationLevel.pr_opened, "pr_opened")
+        self._raise_level(db, wi, row, LifecycleLevel.pr_opened, "pr_opened")
         db.add(wi)
         return row
 
@@ -1179,7 +1181,7 @@ class Orchestrator:
                 self._wi(
                     db, wi, WorkItemEvent.human_merged, pr.merge_commit_sha or "", actor="human"
                 )
-                self._raise_level(db, wi, row, VerificationLevel.merged, "merged")
+                self._raise_level(db, wi, row, LifecycleLevel.merged, "merged")
                 for f in db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all():
                     self._finding(db, f, FindingEvent.pr_merged, pr.merge_commit_sha or "")
             return
@@ -1194,6 +1196,7 @@ class Orchestrator:
         checks = self.gh.list_check_runs(self.repo, pr.head_sha)
         statuses = self.gh.list_commit_statuses(self.repo, pr.head_sha)
         self._record_checks(db, row, pr.head_sha, checks)
+        self._record_depth(db, wi, row, pr.head_sha, checks)
         verdict = self._checks_verdict(checks)
 
         if wi.state is WorkItemState.pr_open:
@@ -1216,7 +1219,7 @@ class Orchestrator:
             if row.first_head_checks_green is None and pr.head_sha == row.first_head_sha:
                 row.first_head_checks_green = True
             self._wi(db, wi, WorkItemEvent.checks_green, pr.head_sha, actor="ci")
-            self._raise_level(db, wi, row, VerificationLevel.ci_green, "ci_green")
+            self._raise_level(db, wi, row, LifecycleLevel.ci_green, "ci_green")
         if wi.state is WorkItemState.review_pending:
             self._check_review(db, wi, row, pr, statuses)
         if wi.state is WorkItemState.ready_for_human:
@@ -1229,7 +1232,10 @@ class Orchestrator:
         commit, so the item goes back to `checks_running` and earns every level again."""
         if wi.state in (WorkItemState.review_pending, WorkItemState.ready_for_human):
             self._wi(db, wi, WorkItemEvent.new_head_pushed, f"new head {head_sha[:12]}")
-        self._reset_level(db, wi, row, VerificationLevel.pr_opened, f"new head {head_sha[:12]}")
+        self._reset_level(db, wi, row, LifecycleLevel.pr_opened, f"new head {head_sha[:12]}")
+        row.verification_depth = None
+        row.depth_rungs = {}
+        wi.verification_depth = None
 
     def _record_checks(
         self, db: DbSession, row: PullRequest, head_sha: str, checks: Iterable[CheckRun]
@@ -1252,6 +1258,64 @@ class Orchestrator:
             existing.url = c.url
             existing.observed_at = self.clock.now()
             db.add(existing)
+
+    def _record_depth(
+        self, db: DbSession, wi: WorkItem, row: PullRequest, head_sha: str, checks: list[CheckRun]
+    ) -> None:
+        """Evaluate the L0-L6 ladder for this head from the check runs just observed. Every
+        component is persisted, including `unavailable` ones; the work item's depth is the
+        highest rung whose components all passed. Devin's own `tests_run` claims are stored as
+        informational rows and never move the rung."""
+        assert wi.id is not None and row.id is not None
+        ev = verification.evaluate(checks)
+        sess = (
+            db.exec(select(Session).where(Session.devin_id == wi.active_session_id)).first()
+            if wi.active_session_id
+            else None
+        )
+        records = ev.records + verification.claims_from_output(
+            sess.structured_output if sess is not None else None
+        )
+        for rec in records:
+            existing = db.exec(
+                select(VerificationCheck).where(
+                    VerificationCheck.pull_request_id == row.id,
+                    VerificationCheck.head_sha == head_sha,
+                    VerificationCheck.source == rec.source,
+                    VerificationCheck.name == rec.name,
+                )
+            ).first()
+            if existing is None:
+                existing = VerificationCheck(
+                    pull_request_id=row.id,
+                    head_sha=head_sha,
+                    depth=rec.depth,
+                    name=rec.name,
+                    source=rec.source,
+                    status=rec.status,
+                )
+            existing.status = rec.status
+            existing.detail = rec.detail
+            existing.url = rec.url
+            existing.observed_at = self.clock.now()
+            db.add(existing)
+        row.depth_rungs = ev.rung_summary()
+        highest = ev.highest_passed
+        if highest != row.verification_depth:
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=wi.id,
+                event="verification_depth",
+                from_state=None if row.verification_depth is None else row.verification_depth.name,
+                to_state=None if highest is None else highest.name,
+                reason=f"head {head_sha[:12]}: "
+                + ", ".join(f"L{int(d)}={s.value}" for d, s in ev.rungs.items()),
+            )
+        row.verification_depth = highest
+        wi.verification_depth = highest
+        db.add(row)
+        db.add(wi)
 
     def _checks_verdict(self, checks: list[CheckRun]) -> str:
         required = set(self.settings.required_check_names)
@@ -1327,7 +1391,7 @@ class Orchestrator:
             self._wi(
                 db, wi, WorkItemEvent.review_completed, f"{ctx}={done[0].state}", actor="devin"
             )
-            self._raise_level(db, wi, row, VerificationLevel.review_completed, "review_completed")
+            self._raise_level(db, wi, row, LifecycleLevel.review_completed, "review_completed")
             return
         green_at = self._last_event_ts(db, wi, WorkItemEvent.checks_green)
         if green_at is not None and self.clock.now() - green_at > timedelta(
@@ -1349,46 +1413,46 @@ class Orchestrator:
                 if row.approved_by != r.author:
                     row.approved_by = r.author
                     self._raise_level(
-                        db, wi, row, VerificationLevel.human_approved, f"approved_by:{r.author}"
+                        db, wi, row, LifecycleLevel.human_approved, f"approved_by:{r.author}"
                     )
                 return
 
     def _raise_level(
-        self, db: DbSession, wi: WorkItem, row: PullRequest, level: VerificationLevel, why: str
+        self, db: DbSession, wi: WorkItem, row: PullRequest, level: LifecycleLevel, why: str
     ) -> None:
         assert wi.id is not None
-        if level > wi.verification_level:
+        if level > wi.lifecycle_level:
             self._event(
                 db,
                 entity_type="work_item",
                 entity_id=wi.id,
-                event="verification_level",
-                from_state=wi.verification_level.name,
+                event="lifecycle_level",
+                from_state=wi.lifecycle_level.name,
                 to_state=level.name,
                 reason=why,
             )
-            wi.verification_level = level
-        if level > row.verification_level:
-            row.verification_level = level
+            wi.lifecycle_level = level
+        if level > row.lifecycle_level:
+            row.lifecycle_level = level
         db.add(wi)
         db.add(row)
 
     def _reset_level(
-        self, db: DbSession, wi: WorkItem, row: PullRequest, level: VerificationLevel, why: str
+        self, db: DbSession, wi: WorkItem, row: PullRequest, level: LifecycleLevel, why: str
     ) -> None:
         assert wi.id is not None
-        if level < wi.verification_level:
+        if level < wi.lifecycle_level:
             self._event(
                 db,
                 entity_type="work_item",
                 entity_id=wi.id,
-                event="verification_level",
-                from_state=wi.verification_level.name,
+                event="lifecycle_level",
+                from_state=wi.lifecycle_level.name,
                 to_state=level.name,
                 reason=why,
             )
-            wi.verification_level = level
-        row.verification_level = min(row.verification_level, level)
+            wi.lifecycle_level = level
+        row.lifecycle_level = min(row.lifecycle_level, level)
         db.add(wi)
         db.add(row)
 
@@ -1631,12 +1695,10 @@ class Orchestrator:
             pr_row = db.exec(select(PullRequest).where(PullRequest.work_item_id == wi.id)).first()
             if pr_row is not None:
                 self._raise_level(
-                    db, wi, pr_row, VerificationLevel.rescan_verified, run.external_run_id
+                    db, wi, pr_row, LifecycleLevel.rescan_verified, run.external_run_id
                 )
             else:
-                wi.verification_level = max(
-                    wi.verification_level, VerificationLevel.rescan_verified
-                )
+                wi.lifecycle_level = max(wi.lifecycle_level, LifecycleLevel.rescan_verified)
             if wi.issue_number is not None:
                 by_state: dict[str, int] = defaultdict(int)
                 for s in states:

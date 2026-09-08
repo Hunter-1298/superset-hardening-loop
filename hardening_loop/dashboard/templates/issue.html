@@ -13,7 +13,8 @@
 
 <section class="stats compact" aria-label="Status">
   {{ ui.stat("State", ui.state_badge(wi.state)) }}
-  {{ ui.stat("Verification", (wi.verification_level|level_label).text) }}
+  {{ ui.stat("Lifecycle", (wi.lifecycle_level|lifecycle_label).text) }}
+  {{ ui.stat("Verified depth", (wi.verification_depth|depth_label).text) }}
   {{ ui.stat("ACU used", (acus|num) ~ " of " ~ (wi.acu_cap|num(0))) }}
   {{ ui.stat("Estimated cost", cost|money) }}
   {{ ui.stat("Retries", wi.retries_used) }}
@@ -31,7 +32,7 @@
 
 {% if origin %}
 <div class="notice notice-warning">
-  <p><strong>Regression.</strong> These findings were first fixed by <a href="/issues/{{ origin.id }}">#{{ origin.id }} {{ origin.title }}</a> ({{ (origin.state|wi_state).text }}, {{ (origin.verification_level|level_label).text }}).</p>
+  <p><strong>Regression.</strong> These findings were first fixed by <a href="/issues/{{ origin.id }}">#{{ origin.id }} {{ origin.title }}</a> ({{ (origin.state|wi_state).text }}, {{ (origin.lifecycle_level|lifecycle_label).text }}).</p>
 </div>
 {% endif %}
 {% if regressions %}
@@ -53,7 +54,8 @@
           <div class="what">{{ lab.text }}</div>
           {% if e.from_state or e.to_state %}
           <div class="transition">
-            {% if e.event == "verification_level" %}{{ (e.from_state|level_label).text }} → {{ (e.to_state|level_label).text }}
+            {% if e.event == "lifecycle_level" %}{{ (e.from_state|lifecycle_label).text }} → {{ (e.to_state|lifecycle_label).text }}
+            {% elif e.event == "verification_depth" %}{{ (e.from_state|depth_label).text }} → {{ (e.to_state|depth_label).text }}
             {% else %}{{ (e.from_state|wi_state).text if e.from_state else "—" }} → {{ (e.to_state|wi_state).text }}{% endif %}
           </div>
           {% endif %}
@@ -87,6 +89,34 @@
           <dt>Verified</dt><dd>{{ wi.verified_at|dt }}</dd>
           <dt>Last updated</dt><dd>{{ wi.updated_at|dt }}</dd>
         </dl>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="depth-heading">
+      {{ ui.section_head("Verification depth", id="depth-heading") }}
+      <div class="card-body">
+        {% if current_pr %}
+        <p class="small muted">Rungs proven by complete CI evidence on head {{ ui.sha(current_pr.head_sha) }} of <a href="{{ current_pr.url }}" rel="noopener">#{{ current_pr.number }}</a>. Devin's own test claims are listed but never raise the depth.</p>
+        <ol class="ladder">
+          {% for d in depth_levels %}
+          {% set rung = current_pr.depth_rungs.get(d.name) %}
+          <li class="ladder-{{ rung or 'unavailable' }}">
+            <span class="ladder-rung">{{ (d|depth_label).text }}</span>
+            <span class="ladder-status">{{ ui.plain(rung|check_status) if rung else "—" }}</span>
+            {% set recs = depth_checks|selectattr("depth", "equalto", d)|list %}
+            {% if recs %}
+            <ul class="list-plain small">
+              {% for c in recs %}
+              <li>{% if c.url %}<a href="{{ c.url }}" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %} · {{ (c.status|check_status).text }}{% if c.source.value == "devin_claim" %} <span class="muted">(Devin claim)</span>{% endif %}{% if c.detail %} <span class="mono muted">{{ c.detail }}</span>{% endif %}</li>
+              {% endfor %}
+            </ul>
+            {% endif %}
+          </li>
+          {% endfor %}
+        </ol>
+        {% else %}
+        {{ ui.empty("No pull request yet, so no depth has been proven", compact=True) }}
+        {% endif %}
       </div>
     </section>
 
@@ -165,7 +195,8 @@
     <thead><tr>
       <th scope="col">Pull request</th>
       <th scope="col">State</th>
-      <th scope="col">Verification</th>
+      <th scope="col">Lifecycle</th>
+      <th scope="col">Depth</th>
       <th scope="col">Head</th>
       <th scope="col">First head green</th>
       <th scope="col">Diff policy</th>
@@ -177,7 +208,8 @@
     <tr>
       <td><a class="primary" href="{{ p.url }}" rel="noopener">#{{ p.number }}</a><span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
       <td>{{ ui.pr_state_badge(p.state) }}</td>
-      <td>{{ ui.level_badge(p.verification_level) }}</td>
+      <td>{{ ui.level_badge(p.lifecycle_level) }}</td>
+      <td>{{ ui.depth_badge(p.verification_depth) }}</td>
       <td>{{ ui.sha(p.head_sha) }}{% if p.merge_sha %}<span class="secondary">merge {{ ui.sha(p.merge_sha) }}</span>{% endif %}</td>
       <td>{{ ui.yes_no_badge(p.first_head_checks_green, title="Did the first pushed head pass CI without a retry?") }}</td>
       <td>{{ ui.yes_no_badge(p.diff_policy_ok, title="Does the diff stay inside the playbook's allowed paths?") }}{% if p.diff_policy_violations %}<span class="secondary mono">{{ p.diff_policy_violations|join("; ") }}</span>{% endif %}</td>

@@ -10,19 +10,22 @@ from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
 from hardening_loop.domain.enums import (
+    CheckSource,
+    CheckStatus,
     Ecosystem,
     FindingState,
     GateMode,
     ImageTarget,
     Kind,
     Layer,
+    LifecycleLevel,
     Risk,
     ScanMode,
     Scanner,
     ScanRunStatus,
     Severity,
     Trigger,
-    VerificationLevel,
+    VerificationDepth,
     WorkItemState,
 )
 
@@ -200,7 +203,9 @@ class WorkItem(SQLModel, table=True):
     pr_url: str | None = None
     pr_head_sha: str | None = None
     merge_sha: str | None = None
-    verification_level: VerificationLevel = VerificationLevel.none
+    lifecycle_level: LifecycleLevel = LifecycleLevel.none
+    # highest depth rung fully passed on the current PR head; None until CI proves one
+    verification_depth: VerificationDepth | None = None
     blocked_reason: str | None = None
     human_resolution: str | None = None  # disposition:approved | disagreement:resolved
     dispatch_failures: int = 0
@@ -260,8 +265,13 @@ class PullRequest(SQLModel, table=True):
     first_head_checks_green: bool | None = None
     diff_policy_ok: bool | None = None
     diff_policy_violations: list[str] = Field(default_factory=list, sa_column=Column(JSON))
-    verification_level: VerificationLevel = VerificationLevel.pr_opened
+    lifecycle_level: LifecycleLevel = LifecycleLevel.pr_opened
+    verification_depth: VerificationDepth | None = None
+    # rung name -> CheckStatus value for the current head, so `partial`/`unavailable` are visible
+    depth_rungs: dict[str, str] = Field(default_factory=dict, sa_column=Column(JSON))
     review_status: str | None = None
+    review_id: str | None = None
+    review_head_sha: str | None = None
     review_comment_count: int = 0
     approved_by: str | None = None
     opened_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
@@ -278,6 +288,28 @@ class PRCheck(SQLModel, table=True):
     name: str
     status: str  # queued | in_progress | completed
     conclusion: str | None = None
+    url: str | None = None
+    observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+
+
+class VerificationCheck(SQLModel, table=True):
+    """One ladder component evaluated on one PR head. Unavailable components are stored too,
+    so a rung can never look passed because its evidence was simply missing."""
+
+    __tablename__ = "verification_checks"
+    __table_args__ = (
+        UniqueConstraint(
+            "pull_request_id", "head_sha", "source", "name", name="uq_verification_check"
+        ),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    pull_request_id: int = Field(foreign_key="pull_requests.id", index=True)
+    head_sha: str
+    depth: VerificationDepth
+    name: str
+    source: CheckSource
+    status: CheckStatus
+    detail: str = ""
     url: str | None = None
     observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 

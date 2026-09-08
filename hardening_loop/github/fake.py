@@ -111,7 +111,7 @@ class FakeGitHub:
         pr.head_sha = new_sha
 
     def set_checks(self, sha: str, results: dict[str, str | None]) -> None:
-        """`{"security-scan": "success", "app-runs": None}` (None = still running)."""
+        """`{"build-image": "success", "app-runs": None}` (None = still running)."""
         self.checks[sha] = [
             CheckRun(
                 name=name,

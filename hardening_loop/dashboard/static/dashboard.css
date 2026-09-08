@@ -288,6 +288,16 @@ table.data td.mono:not(.nowrap) { overflow-wrap: anywhere; }
 .timeline li.is-danger::before { border-color: var(--danger); }
 .timeline li.is-warning::before { border-color: var(--warning); }
 .timeline li.is-info::before { border-color: var(--info); }
+
+.ladder { list-style: none; padding: 0; margin: 0; }
+.ladder li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 12px; padding: 8px 0; border-top: 1px solid var(--line); }
+.ladder li:first-child { border-top: 0; }
+.ladder .ladder-rung { font-weight: 500; }
+.ladder .ladder-status { color: var(--ink-2); text-align: right; }
+.ladder li.ladder-passed .ladder-status { color: var(--accent); }
+.ladder li.ladder-failed .ladder-status { color: var(--danger); }
+.ladder li.ladder-partial .ladder-status { color: var(--warning); }
+.ladder li > ul { grid-column: 1 / -1; margin: 0; }
 .timeline .when { font-size: 12px; color: var(--ink-3); }
 .timeline .what { font-weight: 500; }
 .timeline .transition { font-size: 12.5px; color: var(--ink-2); }

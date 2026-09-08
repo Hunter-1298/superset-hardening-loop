@@ -13,7 +13,22 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from hardening_loop.models import tables
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# version -> SQL that brings a database at version-1 up to `version`. Only additive or renaming
+# statements; `create_all` afterwards adds any brand-new table.
+_MIGRATIONS: dict[int, tuple[str, ...]] = {
+    3: (
+        "ALTER TABLE work_items RENAME COLUMN verification_level TO lifecycle_level",
+        "ALTER TABLE work_items ADD COLUMN verification_depth INTEGER",
+        "ALTER TABLE pull_requests RENAME COLUMN verification_level TO lifecycle_level",
+        "ALTER TABLE pull_requests ADD COLUMN verification_depth INTEGER",
+        "ALTER TABLE pull_requests ADD COLUMN depth_rungs JSON NOT NULL DEFAULT '{}'",
+        "ALTER TABLE pull_requests ADD COLUMN review_id VARCHAR",
+        "ALTER TABLE pull_requests ADD COLUMN review_head_sha VARCHAR",
+        "UPDATE events SET event = 'lifecycle_level' WHERE event = 'verification_level'",
+    ),
+}
 
 
 def _set_sqlite_pragmas(dbapi_connection: object, _record: object) -> None:
@@ -38,26 +53,63 @@ def make_engine(path: Path | str) -> Engine:
     return engine
 
 
-def _check_schema_version(engine: Engine, *, create_missing: bool) -> None:
+def _current_version(engine: Engine) -> int | None:
     with Session(engine) as session:
         current = session.exec(
             select(tables.SchemaVersion).order_by(tables.SchemaVersion.id.desc())  # type: ignore[union-attr]
         ).first()
-        if current is None:
-            if not create_missing:
-                raise RuntimeError("database has no schema_version row; not a controller database")
+        return None if current is None else current.version
+
+
+def _check_schema_version(engine: Engine, *, create_missing: bool) -> None:
+    current = _current_version(engine)
+    if current is None:
+        if not create_missing:
+            raise RuntimeError("database has no schema_version row; not a controller database")
+        with Session(engine) as session:
             session.add(tables.SchemaVersion(version=SCHEMA_VERSION))
             session.commit()
-        elif current.version != SCHEMA_VERSION:
-            raise RuntimeError(
-                f"database schema version {current.version} != code {SCHEMA_VERSION}; "
-                "migrate or start from a fresh data dir"
-            )
+    elif current != SCHEMA_VERSION:
+        raise RuntimeError(
+            f"database schema version {current} != code {SCHEMA_VERSION}; "
+            "migrate or start from a fresh data dir"
+        )
+
+
+def migrate(engine: Engine) -> list[int]:
+    """Apply every pending `_MIGRATIONS` step in order and record each version. Returns the
+    versions applied. Refuses a database newer than the code."""
+    current = _current_version(engine)
+    if current is None:
+        return []
+    if current > SCHEMA_VERSION:
+        raise RuntimeError(f"database schema version {current} is newer than code {SCHEMA_VERSION}")
+    applied: list[int] = []
+    for version in range(current + 1, SCHEMA_VERSION + 1):
+        with engine.begin() as conn:
+            for statement in _MIGRATIONS[version]:
+                conn.execute(text(statement))
+        with Session(engine) as session:
+            session.add(tables.SchemaVersion(version=version))
+            session.commit()
+        applied.append(version)
+    return applied
 
 
 def init_db(engine: Engine) -> None:
+    current = _current_version(engine) if _has_schema_table(engine) else None
+    if current is not None and current < SCHEMA_VERSION:
+        migrate(engine)
     SQLModel.metadata.create_all(engine)
     _check_schema_version(engine, create_missing=True)
+
+
+def _has_schema_table(engine: Engine) -> bool:
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table' AND name='schema_version'")
+        ).first()
+        return row is not None
 
 
 def open_database(path: Path | str) -> Engine:

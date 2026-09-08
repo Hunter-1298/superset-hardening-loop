@@ -31,7 +31,21 @@ from hardening_loop.replay.synth import BASELINE_SHA, T0, SyntheticRun, ingest_s
 
 REVIEW_CONTEXT = "devin-review"
 APPROVER = "Hunter-1298"
-DEFAULT_CHECKS = ("security-scan", "lean-smoke", "app-runs")
+# Check-run names as the fork's workflows report them (job names; matrix jobs carry their
+# values in parentheses). They cover the ladder rungs the fork can prove: L0 (check-python-deps,
+# build-image), L1 (lean-smoke), L2 (unit-tests), L3 (app-runs) and L4 (test-*).
+DEFAULT_CHECKS = (
+    "check-python-deps",
+    "build-image",
+    "scan-lean-raw",
+    "scan-lean-policy",
+    "lean-smoke",
+    "unit-tests (current)",
+    "app-runs",
+    "test-postgres",
+    "test-mysql",
+    "test-sqlite",
+)
 
 
 class ManualClock:

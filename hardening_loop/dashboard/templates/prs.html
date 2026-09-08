@@ -17,14 +17,15 @@
 {% endif %}
 
 <section class="section" aria-labelledby="levels-heading">
-  {{ ui.section_head("Highest verification level per pull request", id="levels-heading", count=levels|length) }}
+  {{ ui.section_head("Lifecycle and verified depth per pull request", id="levels-heading", count=levels|length) }}
   {% if levels %}
   <div class="table-wrap allow-sticky">
   <table class="data">
     <thead><tr>
       <th scope="col" class="w-title">Work item</th>
       <th scope="col">Pull request</th>
-      <th scope="col">Verification</th>
+      <th scope="col">Lifecycle</th>
+      <th scope="col">Verified depth</th>
       <th scope="col">Kind</th>
       <th scope="col">First head green</th>
       <th scope="col" class="num">Retries</th>
@@ -36,6 +37,7 @@
       <td class="w-title"><a class="primary" href="/issues/{{ l.work_item_id }}">{{ titles.get(l.work_item_id) or "Work item #" ~ l.work_item_id }}</a><span class="secondary mono">#{{ l.work_item_id }}</span></td>
       <td>{{ ui.external_link(l.pr_url, l.pr_url|replace("https://github.com/", "")) }}</td>
       <td>{{ ui.level_badge(l.level) }}</td>
+      <td>{{ ui.depth_badge(l.depth) }}{% set gaps = l.depth_rungs.values()|select("in", ["partial", "unavailable"])|list|length %}{% if gaps %}<span class="secondary">{{ gaps }} rung{{ "" if gaps == 1 else "s" }} without full evidence</span>{% endif %}</td>
       <td>{{ ui.kind_badge(l.kind) }}</td>
       <td>{% if l.first_head_checks_green is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(l.first_head_checks_green, title="CI on the first pushed head") }}{% endif %}</td>
       <td class="num">{{ l.retries_used }}</td>
@@ -59,7 +61,8 @@
         <th scope="col">Pull request</th>
         <th scope="col">Work item</th>
         <th scope="col">State</th>
-        <th scope="col">Verification</th>
+        <th scope="col">Lifecycle</th>
+        <th scope="col">Depth</th>
         <th scope="col">Head</th>
         <th scope="col">Merge commit</th>
         <th scope="col">Diff policy</th>
@@ -74,7 +77,8 @@
         <td>{{ ui.external_link(p.url, p.repo ~ "#" ~ p.number) }}<span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
         <td><a href="/issues/{{ p.work_item_id }}">#{{ p.work_item_id }}</a></td>
         <td>{{ ui.pr_state_badge(p.state) }}</td>
-        <td>{{ ui.level_badge(p.verification_level) }}</td>
+        <td>{{ ui.level_badge(p.lifecycle_level) }}</td>
+        <td>{{ p.verification_depth|depth_code }}</td>
         <td>{{ ui.sha(p.head_sha) }}</td>
         <td>{{ ui.sha(p.merge_sha) }}</td>
         <td>{% if p.diff_policy_ok is none %}{{ ui.plain(None|check_label) }}{% else %}{{ ui.yes_no_badge(p.diff_policy_ok, title=(p.diff_policy_violations|join("; ") if p.diff_policy_violations else "Only allowed files changed")) }}{% endif %}</td>

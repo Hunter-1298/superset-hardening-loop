@@ -16,10 +16,10 @@ from hardening_loop.domain.enums import (
     GateMode,
     HumanLabel,
     Kind,
+    LifecycleLevel,
     Scanner,
     Severity,
     Trigger,
-    VerificationLevel,
     WorkItemState,
 )
 from hardening_loop.gate import gate_verdict
@@ -75,18 +75,18 @@ def _to_ready_for_human(
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("PR verified -> checks_running", wi.state, WorkItemState.checks_running)
-    r.eq("verification level L1", wi.verification_level, VerificationLevel.pr_opened)
+    r.eq("verification level L1", wi.lifecycle_level, LifecycleLevel.pr_opened)
     head = w.gh.prs[number].head_sha
     w.ci(head)
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("CI green -> review_pending", wi.state, WorkItemState.review_pending)
-    r.eq("verification level L2", wi.verification_level, VerificationLevel.ci_green)
+    r.eq("verification level L2", wi.lifecycle_level, LifecycleLevel.ci_green)
     w.review_done(head)
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("Devin Review status observed -> ready_for_human", wi.state, WorkItemState.ready_for_human)
-    r.eq("verification level L3", wi.verification_level, VerificationLevel.review_completed)
+    r.eq("verification level L3", wi.lifecycle_level, LifecycleLevel.review_completed)
     return wi, head
 
 
@@ -94,7 +94,7 @@ def _merge(w: World, r: ScenarioResult, wi: WorkItem) -> tuple[WorkItem, str]:
     merge_sha = w.human_approves_and_merges(wi)
     wi = w.wi(wi.id or 0)
     r.eq("human merge -> merged", wi.state, WorkItemState.merged)
-    r.eq("verification level L5 after merge", wi.verification_level, VerificationLevel.merged)
+    r.eq("verification level L5 after merge", wi.lifecycle_level, LifecycleLevel.merged)
     r.expect("controller never approved or merged", w.gh.never_merged_or_approved())
     return wi, merge_sha
 
@@ -143,14 +143,14 @@ def r0(w: World, r: ScenarioResult) -> None:
 # ----------------------------------------------------------------------------- R1
 
 
-@scenario("R1", "Dependency upgrade: first-try success through L6 rescan_verified")
+@scenario("R1", "Dependency upgrade: first-try success through rescan_verified")
 def r1(w: World, r: ScenarioResult) -> None:
     wi = _dispatch(w, r, "cryptography")
     r.eq("kind is dependency_upgrade", wi.kind, Kind.dependency_upgrade)
     wi, _ = _to_ready_for_human(
         w, r, wi, _dep_output("cryptography", "42.0.2", "42.0.4"), DEP_FILES, acus=2.1
     )
-    r.eq("verification level L4 after approval", w.wi(wi.id or 0).verification_level >= 3, True)
+    r.eq("verification level L4 after approval", w.wi(wi.id or 0).lifecycle_level >= 3, True)
     wi, merge_sha = _merge(w, r, wi)
     # Closing run of main at the merge commit, without cryptography.
     rid = w.ingest(w.closing_run(merge_sha))
@@ -158,7 +158,7 @@ def r1(w: World, r: ScenarioResult) -> None:
     wi = w.wi(wi.id or 0)
     r.eq("rescan outcome fixed", counts.get("fixed"), 1)
     r.eq("work item verified", wi.state, WorkItemState.verified)
-    r.eq("verification level L6", wi.verification_level, VerificationLevel.rescan_verified)
+    r.eq("verification level L6", wi.lifecycle_level, LifecycleLevel.rescan_verified)
     r.eq("issue closed", w.issue_state(wi), "closed")
     r.eq("finding fixed", w.finding_by_vuln("CVE-2024-26130").state, FindingState.fixed)
     row = w.pr_row(wi.id or 0)
@@ -228,7 +228,7 @@ def r3(w: World, r: ScenarioResult) -> None:
     w.tick()
     for attempt in range(3):
         head = w.gh.prs[number].head_sha
-        w.ci(head, failing=["security-scan"])
+        w.ci(head, failing=["build-image"])
         w.tick()
         wi = w.wi(wi.id or 0)
         if attempt < 2:
@@ -788,7 +788,7 @@ def r14(w: World, r: ScenarioResult) -> None:
     r.eq("issue stays open", w2.issue_state(wi2), "open")
     st = sorted(f.state.value for f in w2.findings(wi2.id))
     r.eq("members: fixed + human_blocked", st, ["fixed", "human_blocked"])
-    r.expect("verification level stays L5", wi2.verification_level == VerificationLevel.merged)
+    r.expect("verification level stays L5", wi2.lifecycle_level == LifecycleLevel.merged)
 
 
 # ----------------------------------------------------------------------------- R15
@@ -1029,7 +1029,7 @@ def r19(w: World, r: ScenarioResult) -> None:
     w.tick()
     wi = w.wi(wi.id or 0)
     r.eq("push sends the item back to checks_running", wi.state, WorkItemState.checks_running)
-    r.eq("verification level back to L1", wi.verification_level, VerificationLevel.pr_opened)
+    r.eq("verification level back to L1", wi.lifecycle_level, LifecycleLevel.pr_opened)
     row = w.pr_row(wi.id or 0)
     r.eq("review status of the old head discarded", row.review_status if row else "?", None)
     w.ci(head2)
@@ -1132,7 +1132,7 @@ def n1(w: World, r: ScenarioResult) -> None:
     _, number = w.devin_opens_pr(wi, out, files=["Dockerfile"], acus=1.0)
     w.tick()
     head = w.gh.prs[number].head_sha
-    w.ci(head, failing=["security-scan"], pending=["lean-smoke", "app-runs"])
+    w.ci(head, failing=["build-image"], pending=["lean-smoke", "app-runs"])
     w.tick()
     wi = w.wi(wi.id or 0)
     _record_negative(
@@ -1165,13 +1165,13 @@ def n2(w: World, r: ScenarioResult) -> None:
         expected={"lean_smoke": "failure", "advanced_past_checks": False},
         observed={
             "lean_smoke": "failure",
-            "advanced_past_checks": wi.verification_level > VerificationLevel.pr_opened,
+            "advanced_past_checks": wi.lifecycle_level > LifecycleLevel.pr_opened,
         },
         pr_url=wi.pr_url,
     )
     r.expect(
         "Devin's claimed lean_smoke_local=True did not override CI",
-        wi.verification_level == VerificationLevel.pr_opened,
+        wi.lifecycle_level == LifecycleLevel.pr_opened,
     )
 
 

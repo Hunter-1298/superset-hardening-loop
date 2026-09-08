@@ -59,13 +59,20 @@
     </section>
 
     <section class="card" aria-labelledby="prlevel-title">
-      {{ ui.section_head("Verification level per PR", id="prlevel-title", more_href="/prs", more_text="All") }}
+      {{ ui.section_head("Pull requests by lifecycle and depth", id="prlevel-title", more_href="/prs", more_text="All") }}
       {% if m.pr_levels %}
       <ul class="stat-list">
-        {% for lv in verification_levels|reverse %}{% set n = m.pr_levels|selectattr("level", "equalto", lv.value)|list|length %}{% if n %}
+        {% for lv in lifecycle_levels|reverse %}{% set n = m.pr_levels|selectattr("level", "equalto", lv.value)|list|length %}{% if n %}
         <li>{{ ui.level_badge(lv) }}<span class="n">{{ n }}</span></li>
         {% endif %}{% endfor %}
       </ul>
+      <ul class="stat-list mt" aria-label="Highest verified depth per pull request">
+        {% for d in depth_levels|reverse %}{% set n = m.depth.highest_by_depth.get(d.name, 0) %}{% if n %}
+        <li>{{ ui.depth_badge(d) }}<span class="n">{{ n }}</span></li>
+        {% endif %}{% endfor %}
+        {% if m.depth.prs_without_depth %}<li>{{ ui.depth_badge(None) }}<span class="n">{{ m.depth.prs_without_depth }}</span></li>{% endif %}
+      </ul>
+      {% if m.depth.unavailable_rungs or m.depth.partial_rungs %}<p class="small muted mt">{{ m.depth.unavailable_rungs }} rung{{ "" if m.depth.unavailable_rungs == 1 else "s" }} without evidence and {{ m.depth.partial_rungs }} partial across current PR heads.</p>{% endif %}
       {% else %}
       {{ ui.empty("No pull requests yet", compact=True) }}
       {% endif %}

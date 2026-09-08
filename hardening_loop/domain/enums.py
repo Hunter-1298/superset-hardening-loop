@@ -188,7 +188,10 @@ TERMINAL_WORK_ITEM_STATES: frozenset[WorkItemState] = frozenset(
 )
 
 
-class VerificationLevel(IntEnum):
+class LifecycleLevel(IntEnum):
+    """How far a work item's fix has travelled: PR -> CI -> review -> approval -> merge -> rescan.
+    This is workflow progress, not test depth; see `VerificationDepth` for the latter."""
+
     none = 0
     pr_opened = 1
     ci_green = 2
@@ -199,7 +202,57 @@ class VerificationLevel(IntEnum):
 
     @property
     def label(self) -> str:
-        return f"L{int(self)} {self.name}"
+        return self.name
+
+
+class VerificationDepth(IntEnum):
+    """How deeply a PR head has been exercised. Each rung is earned only by complete, passing
+    evidence for that head (GitHub check runs on the fork); Devin's own test claims never raise
+    it. Rungs are independent: a head may hold L4 while L3 is `partial` because one of its
+    components has no check on this repo."""
+
+    requirements_pip = 0
+    import_migrations = 1
+    targeted_unit = 2
+    immutable_image_runtime = 3
+    db_subset = 4
+    playwright = 5
+    canary = 6
+
+    @property
+    def label(self) -> str:
+        return f"L{int(self)} {_DEPTH_TITLES[self]}"
+
+    @property
+    def title(self) -> str:
+        return _DEPTH_TITLES[self]
+
+
+_DEPTH_TITLES: dict[VerificationDepth, str] = {
+    VerificationDepth.requirements_pip: "requirements + pip",
+    VerificationDepth.import_migrations: "import + migrations",
+    VerificationDepth.targeted_unit: "targeted + unit tests",
+    VerificationDepth.immutable_image_runtime: "immutable-image runtime",
+    VerificationDepth.db_subset: "database subset",
+    VerificationDepth.playwright: "Playwright",
+    VerificationDepth.canary: "canary",
+}
+
+
+class CheckStatus(StrEnum):
+    """Status of one verification check (or of one whole depth rung) on one PR head."""
+
+    pending = "pending"  # a matching check run exists and has not completed
+    passed = "passed"
+    failed = "failed"
+    partial = "partial"  # rung only: every available component passed, some are unavailable
+    unavailable = "unavailable"  # no check produced evidence on this head (missing or skipped)
+
+
+class CheckSource(StrEnum):
+    github_check = "github_check"  # GitHub check run on the fork; the only source that counts
+    ladder = "ladder"  # a rung component with no check on this repo, recorded as unavailable
+    devin_claim = "devin_claim"  # `tests_run` from Devin's structured output; informational
 
 
 class ScanRunStatus(StrEnum):
