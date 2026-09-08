@@ -14,6 +14,8 @@
 #   grype-vuln.json          grype sbom: (vulnerabilities from the Syft SBOM of the SAME image)
 #   trivy-image-config.json  trivy image --scanners misconfig --image-config-scanners misconfig
 #   trivy-config.json        trivy config on Dockerfile, docker-compose*.yml, docker/, helm/superset
+#   trivy-vuln.sarif         SARIF rendering of trivy-vuln.json (for code scanning; never replaces JSON)
+#   grype-vuln.sarif         SARIF rendering of the same grype run
 #   tools.json               tool versions + vulnerability DB timestamps
 set -euo pipefail
 
@@ -26,6 +28,11 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 
 case "$MODE" in raw|policy) ;; *) echo "mode must be raw|policy" >&2; exit 2;; esac
 mkdir -p "$OUT"
+# Several steps below run inside other directories (the source tree, a staging dir). Resolve both
+# user-supplied paths to absolute ones first so a relative <out-dir> or <src-dir> keeps meaning
+# the caller's directory everywhere.
+OUT="$(cd "$OUT" && pwd -P)"
+SRC="$(cd "$SRC" && pwd -P)"
 
 # Only immutable references are accepted: a local image ID ("docker:sha256:...") or a registry
 # digest ("repo@sha256:..."). A tag alone could change between SBOM, scan and smoke test.
@@ -109,8 +116,10 @@ syft scan "$IMAGE_REF" --platform "$PLATFORM" -o "cyclonedx-json=$OUT/sbom.cdx.j
 trivy image --skip-version-check --scanners vuln --list-all-pkgs --format json --exit-code 0 \
   --platform "$PLATFORM" "${VEX_ARGS_TRIVY[@]+"${VEX_ARGS_TRIVY[@]}"}" \
   --output "$OUT/trivy-vuln.json" "$TRIVY_IMAGE_REF"
-grype "sbom:$OUT/sbom.cdx.json" -o json --file "$OUT/grype-vuln.json" -q \
+grype "sbom:$OUT/sbom.cdx.json" -o "json=$OUT/grype-vuln.json" -o "sarif=$OUT/grype-vuln.sarif" -q \
   "${VEX_ARGS_GRYPE[@]+"${VEX_ARGS_GRYPE[@]}"}"
+# SARIF is derived from the JSON report already written, so both describe one scan.
+trivy convert --format sarif --ignorefile /dev/null --output "$OUT/trivy-vuln.sarif" "$OUT/trivy-vuln.json"
 
 # 3. Image configuration (runtime hardening: USER, HEALTHCHECK, exposed ports, ...)
 trivy image --skip-version-check --scanners misconfig --image-config-scanners misconfig --format json --exit-code 0 \
@@ -193,7 +202,8 @@ def sha(p):
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
-files = ["sbom.cdx.json", "trivy-vuln.json", "grype-vuln.json", "trivy-image-config.json", "trivy-config.json"]
+files = ["sbom.cdx.json", "trivy-vuln.json", "grype-vuln.json", "trivy-image-config.json", "trivy-config.json",
+         "trivy-vuln.sarif", "grype-vuln.sarif"]
 json.dump(tools, open(os.path.join(out, "tools.json"), "w"), indent=2, sort_keys=True)
 files.append("tools.json")
 vex_docs = []
