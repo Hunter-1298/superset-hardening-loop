@@ -1,5 +1,5 @@
 # No-spend demo:
-#   docker compose run --rm replay      # replay R0-R16, N1-N5, DEMO into the hl-data volume, zero network
+#   docker compose run --rm replay      # replay R0-R20, N1-N5, OP1, DEMO into the hl-data volume, zero network
 #   docker compose up dashboard         # read-only dashboard on http://localhost:8080
 #   docker compose cp dashboard:/data/replay/replay-report.md .
 # `network_mode: none` is an OS-level guard on top of the in-process NetworkGuard. The data volume
