@@ -42,6 +42,7 @@ import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from packaging.specifiers import SpecifierSet
 from sqlalchemy import Engine
@@ -124,13 +125,20 @@ def validate_bundle(
         return None, ["bundle has no manifest.json (scan-manifest job did not complete)"]
     try:
         manifest = load_baseline(root)
-    except (EvidenceError, KeyError, ValueError, OSError) as exc:
-        return None, [f"evidence failed verification: {exc}"]
+        raw = json.loads((root / "manifest.json").read_text())
+    except (EvidenceError, KeyError, ValueError, TypeError, AttributeError, OSError) as exc:
+        return None, [f"evidence failed verification: {exc!r}"]
 
     run_meta = manifest.run
-    schema = json.loads((root / "manifest.json").read_text()).get("schema")
+    schema = raw.get("schema") if isinstance(raw, dict) else None
     if schema != SCAN_MANIFEST_SCHEMA:
         reasons.append(f"manifest schema {schema!r} is not a workflow scan manifest")
+    # Everything under `run` is written by the workflow and read back below and in `run_meta_for`;
+    # a value of the wrong shape is a rejection reason, never an exception out of the poll.
+    shape = run_metadata_shape_problems(run_meta)
+    if shape:
+        reasons.extend(shape)
+        return manifest, reasons
 
     if manifest.source_repo not in REPO_ALLOWLIST:
         reasons.append(f"source_repo {manifest.source_repo!r} is outside the allowlist")
@@ -159,6 +167,9 @@ def validate_bundle(
         reasons.append(
             f"manifest run_attempt {run_meta.get('run_attempt')!r} != attempt {run.run_attempt}"
         )
+    gate_mode = run_meta.get("scan_gate_mode")
+    if gate_mode is not None and gate_mode not in {m.value for m in GateMode}:
+        reasons.append(f"unknown scan_gate_mode {gate_mode!r}")
     try:
         Trigger(manifest.trigger)
     except ValueError:
@@ -197,6 +208,32 @@ def validate_bundle(
         reasons.extend(runtime_record_problems(manifest, record, claimed))
 
     return manifest, reasons
+
+
+def run_metadata_shape_problems(run_meta: dict[str, Any]) -> list[str]:
+    """Type problems in a manifest's `run` block that would otherwise surface as exceptions when
+    the values are converted: `run_attempt` must be a whole number (or its decimal string),
+    `job_results` a mapping of job name to result string, and the scalar fields scalars."""
+    problems: list[str] = []
+    attempt = run_meta.get("run_attempt")
+    if attempt is not None and not (
+        (isinstance(attempt, int) and not isinstance(attempt, bool))
+        or (isinstance(attempt, str) and attempt.isdigit())
+    ):
+        problems.append(f"run.run_attempt {attempt!r} is not a whole number")
+    results = run_meta.get("job_results")
+    if results is not None:
+        if not isinstance(results, dict):
+            problems.append(f"run.job_results is {type(results).__name__}, expected an object")
+        else:
+            bad = {k: v for k, v in results.items() if not isinstance(v, str)}
+            if bad:
+                problems.append(f"run.job_results has non-string results: {bad!r}")
+    for key in ("run_id", "head_sha", "scan_gate_mode", "url"):
+        value = run_meta.get(key)
+        if value is not None and not isinstance(value, str | int):
+            problems.append(f"run.{key} is {type(value).__name__}, expected a scalar")
+    return problems
 
 
 def runtime_record_problems(
@@ -396,20 +433,30 @@ class ScanIntakeService:
                 )
                 return self._record(intake, outcome)
 
-        manifest, reasons = validate_bundle(root, run, self.expect, is_ancestor=self._is_ancestor)
-        if reasons or manifest is None:
-            outcome.reasons.extend(reasons)
-            return self._record(intake, outcome)
-
-        bounds = self._upper_bounds(manifest.source_sha)
-        if bounds is None:
-            outcome.reasons.append(
-                f"pyproject.toml at {manifest.source_sha[:12]} unavailable; cannot classify "
-                "upper-bound-blocked dependencies"
+        # Whatever shape the bundle turns out to have, the run gets its intake row: a bundle the
+        # validator did not anticipate is rejected with the error as its reason instead of
+        # escaping the poll and being retried, ahead of every newer run, on each tick.
+        try:
+            manifest, reasons = validate_bundle(
+                root, run, self.expect, is_ancestor=self._is_ancestor
             )
-            return self._record(intake, outcome)
+            if reasons or manifest is None:
+                outcome.reasons.extend(reasons)
+                return self._record(intake, outcome)
 
-        meta = run_meta_for(manifest, run, repo=repo)
+            bounds = self._upper_bounds(manifest.source_sha)
+            if bounds is None:
+                outcome.reasons.append(
+                    f"pyproject.toml at {manifest.source_sha[:12]} unavailable; cannot classify "
+                    "upper-bound-blocked dependencies"
+                )
+                return self._record(intake, outcome)
+
+            meta = run_meta_for(manifest, run, repo=repo)
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            log.warning("scan run %s: bundle rejected on malformed evidence: %r", ext_id, exc)
+            outcome.reasons.append(f"malformed evidence bundle: {exc!r}")
+            return self._record(intake, outcome)
         # The run's rows land in one write transaction that holds the lock from its first read, so
         # an operator launch in the service either sees this run pending or has already reserved
         # its work item (and bound its issue) before the run exists.

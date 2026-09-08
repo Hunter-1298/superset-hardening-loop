@@ -290,6 +290,80 @@ def test_malformed_runtime_record_is_rejected(
     )
 
 
+def _rewrite_manifest(tree: Path, edit: dict[str, object]) -> None:
+    """Edit top-level manifest keys and re-sign, as a producer writing a bad value would."""
+    manifest = json.loads((tree / "manifest.json").read_text())
+    manifest.update(edit)
+    (tree / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    _resign(tree)
+
+
+@pytest.mark.parametrize(
+    ("run_edit", "needle"),
+    [
+        ({"job_results": "success"}, "run.job_results is str"),
+        ({"job_results": ["lean-smoke", "app-runs"]}, "run.job_results is list"),
+        ({"job_results": {"lean-smoke": True, "app-runs": "success"}}, "non-string results"),
+        ({"run_attempt": "first"}, "run.run_attempt 'first' is not a whole number"),
+        ({"run_attempt": 1.5}, "run.run_attempt 1.5 is not a whole number"),
+        ({"scan_gate_mode": "audit"}, "unknown scan_gate_mode 'audit'"),
+        ({"scan_gate_mode": {"mode": "report"}}, "run.scan_gate_mode is dict"),
+    ],
+)
+def test_malformed_run_metadata_is_rejected_not_raised(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path, run_edit: dict[str, object], needle: str
+) -> None:
+    """Every value under the manifest's `run` block is producer-written and converted at intake
+    (`int(...)`, `dict(...)`, `GateMode(...)`); a wrong shape must become a recorded rejection with
+    the reason, never an exception that leaves the run without an intake row."""
+    tree = _bundle(tmp_path / "tree")
+    manifest = json.loads((tree / "manifest.json").read_text())
+    _rewrite_manifest(tree, {"run": {**manifest["run"], **run_edit}})
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    _assert_rejected(engine, _service(engine, gh, tmp_path).poll(), needle)
+
+
+def test_manifest_of_the_wrong_shape_is_rejected_not_raised(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """A manifest whose nested objects are not objects (`images` as a list here) fails inside the
+    loader with a TypeError rather than a verification error; it is still a rejection."""
+    tree = _bundle(tmp_path / "tree")
+    _rewrite_manifest(tree, {"images": ["lean", "ci"]})
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    _assert_rejected(engine, _service(engine, gh, tmp_path).poll(), "failed verification")
+
+
+def test_a_malformed_oldest_run_does_not_block_later_runs(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """The poll works oldest-unseen first; a run that is rejected gets its intake row and is never
+    retried, so the runs after it are ingested on the same poll and it stays out of later polls."""
+    bad = _bundle(tmp_path / "bad", run_id=RUN_ID)
+    manifest = json.loads((bad / "manifest.json").read_text())
+    _rewrite_manifest(bad, {"run": {**manifest["run"], "job_results": "success"}})
+    _publish(gh, bad, run_id=RUN_ID, head_sha=BASELINE_SHA)
+    good = _bundle(
+        tmp_path / "good",
+        run_id=RUN_ID + 1,
+        source_sha=SHA_MAIN2,
+        captured_at=datetime(2026, 9, 8, 4, tzinfo=UTC),
+    )
+    _publish(gh, good, run_id=RUN_ID + 1, head_sha=SHA_MAIN2)
+
+    svc = _service(engine, gh, tmp_path)
+    out = svc.poll()
+    assert [(o.external_run_id.rsplit(":", 2)[1], o.status) for o in out] == [
+        (str(RUN_ID), IntakeStatus.rejected),
+        (str(RUN_ID + 1), IntakeStatus.ingested),
+    ]
+    assert svc.poll() == [], "neither run is looked at again"
+    intakes = _intakes(engine)
+    assert [i.status for i in intakes] == [IntakeStatus.rejected, IntakeStatus.ingested]
+    with Session(engine) as db:
+        assert len(db.exec(select(ScanRun)).all()) == 1
+
+
 def test_runtime_record_for_other_image_is_rejected(
     engine: Engine, gh: FakeGitHub, tmp_path: Path
 ) -> None:
