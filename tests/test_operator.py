@@ -375,6 +375,12 @@ def test_capacity_and_budget_refusals(
     assert len(_devin(orch).created_requests()) == 2
     assert "budget" in _text(client.get(f"/issues/{c_.id}"))
 
+    # the lists never offer a Launch button the launch page would refuse
+    for path in ("/", "/issues?stage=ready"):
+        html = client.get(path).text
+        assert f'href="/operator/launch/{c_.id}">Launch blocked · Over ACU budget' in html
+        assert f'class="btn btn-launch btn-sm" href="/operator/launch/{c_.id}"' not in html
+
 
 def test_launch_creates_a_missing_issue_first(
     client: TestClient, world: tuple[Settings, Orchestrator, OperatorContext]

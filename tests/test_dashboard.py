@@ -261,7 +261,7 @@ def test_issue_page_shows_blocked_reason_and_events(client: TestClient, engine: 
     assert reason not in listing
     detail = client.get(f"/issues/{blocked_id}").text
     assert reason in detail and "Next human action" in detail
-    assert "Retries and blockers" in detail
+    assert "Blocked now" in detail and "card card-danger" in detail
     html = client.get("/issues/2").text
     for section in ("Lifecycle", "Findings", "Devin sessions", "Pull requests and CI checks"):
         assert section in html
@@ -346,7 +346,17 @@ def test_layout_navigation_and_header(client: TestClient) -> None:
     assert '<nav id="primary-nav" aria-label="Primary">' in html
     nav = html[html.index('<nav id="primary-nav"') : html.index("</nav>")]
     labels = re.findall(r"<span>([^<]+)</span></a>", nav)
-    assert labels == ["Overview", "CVEs", "Work items", "Scans", "Pull requests", "Report"]
+    assert labels == [
+        "Overview",
+        "Vulnerabilities",
+        "Work items",
+        "Scans",
+        "Pull requests",
+        "Report",
+    ]
+    # the operating pages come first; pull requests and the report are a quieter secondary group
+    secondary = re.findall(r'class="nav-link is-secondary"[^>]*><span>([^<]+)</span>', nav)
+    assert secondary == ["Pull requests", "Report"]
     assert 'href="/runs" aria-current="page"' in nav
     assert nav.count('aria-current="page"') == 1
     # compact context header: repository, branch, latest scan status, last updated
@@ -368,7 +378,7 @@ def test_layout_navigation_and_header(client: TestClient) -> None:
         ("/", "Overview"),
         ("/issues", "Work items"),
         ("/runs", "Scans"),
-        ("/findings", "CVEs"),
+        ("/findings", "Vulnerabilities"),
         ("/prs", "Pull requests"),
         ("/report", "Run report"),
     ],

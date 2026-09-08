@@ -4,34 +4,53 @@
 {% set scanners = "both" if f.reported_by_trivy and f.reported_by_grype else ("trivy_only" if f.reported_by_trivy else ("grype_only" if f.reported_by_grype else "config")) %}
 {% set subject = f.pkg_name or f.resource or "unknown resource" %}
 
-{% call ui.page_header(f.vuln_id, (detail.title or f.title or "No title recorded by either scanner.") ~ " " ~ (f.severity|severity_label).text ~ " in " ~ subject ~ (" " ~ f.pkg_version if f.pkg_version else "") ~ ", " ~ (f.layer|layer_label|lower) ~ " layer.", crumbs=[("CVEs", "/findings"), (f.vuln_id, None)]) %}
+{% set fixes = [] %}
+{% for s, v in f.fix_versions_by_scanner.items() %}{% for x in v if x not in fixes %}{% set _ = fixes.append(x) %}{% endfor %}{% endfor %}
+{% set top = detail.best_cvss %}
+{% call ui.page_header(f.vuln_id, detail.title or f.title or "No title recorded by either scanner.", crumbs=[("Vulnerabilities", "/findings"), (f.vuln_id, None)]) %}
   {% if detail.primary_url %}<a href="{{ detail.primary_url }}" rel="noopener">Advisory</a>{% endif %}
-  {% if wi %}<a href="/issues/{{ wi.id }}">Work item #{{ wi.id }}</a>{% endif %}
-  {% if wi and wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a>{% endif %}
-  {% if wi and wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a>{% endif %}
 {% endcall %}
 
-<section class="stats compact" aria-label="Status">
-  {{ ui.stat("Severity", ui.severity_badge(f.severity)) }}
-  {{ ui.stat("State", ui.finding_state_badge(f.state)) }}
-  {{ ui.stat("Kind", ui.kind_badge(f.kind)) }}
-  {{ ui.stat("Reported by", (scanners|scanner_label)) }}
-  {% if detail.epss %}{{ ui.stat("EPSS", (detail.epss.score * 100)|num(1) ~ "%", note=("p" ~ (detail.epss.percentile * 100)|num(0)) if detail.epss.percentile is not none else none) }}{% endif %}
-  {% set top = detail.best_cvss %}
-  {% if top %}{{ ui.stat("CVSS " ~ top.version, top.base_score|num(1), note=top.source ~ " via " ~ top.scanner) }}{% endif %}
-  {% if wi %}{{ ui.stat("Work item", ui.state_badge(wi.state), href="/issues/" ~ wi.id) }}{% endif %}
-</section>
+<div class="fact-row" aria-label="Status">
+  {{ ui.severity_badge(f.severity) }}
+  {{ ui.finding_state_badge(f.state) }}
+  {{ ui.kind_badge(f.kind) }}
+  <span class="fact">{{ scanners|scanner_label }}</span>
+  {% if top %}<span class="fact">CVSS {{ top.version }} <strong>{{ top.base_score|num(1) }}</strong> <span class="muted">{{ top.source }} via {{ top.scanner }}</span></span>{% endif %}
+  {% if detail.epss %}<span class="fact">EPSS <strong>{{ (detail.epss.score * 100)|num(1) }}%</strong>{% if detail.epss.percentile is not none %} <span class="muted">p{{ (detail.epss.percentile * 100)|num(0) }}</span>{% endif %}</span>{% endif %}
+  <span class="fact mono">{{ subject }}{% if f.pkg_version %} {{ f.pkg_version }}{% endif %}{% if fixes %} <span class="fix">→ {{ fixes|join(", ") }}</span>{% endif %}</span>
+</div>
 
 {% if wi %}
-{% with launch=launch, wi=wi %}{% include "_launch_panel.html" %}{% endwith %}
+{% set stage_lab = wi.state|stage_label %}
+<section class="action-card tone-{{ stage_lab.tone.value }}" aria-label="Remediation">
+  <div class="action-main">
+    {{ ui.stepper(wi.state) }}
+    <div class="action-now">
+      <span class="action-stage">{{ ui.badge(stage_lab) }} <a href="/issues/{{ wi.id }}">Work item #{{ wi.id }} {{ wi.title }}</a></span>
+      {% if next_action %}
+      <p class="action-next" role="status"><strong>Next human action.</strong> {{ next_action }}</p>
+      {% elif (wi.state|stage_of).value == "ready" %}
+      <p class="action-next">{% if launch and launch.eligible %}Launch Devin to open the GitHub issue, start one session and get a pull request against <span class="mono">{{ wi.source_branch }}</span>.{% elif launch %}Queued and waiting.{% else %}Queued and waiting for an operator to launch Devin.{% endif %}</p>
+      {% else %}
+      <p class="action-next">{{ stage_lab.hint }}.</p>
+      {% endif %}
+    </div>
+  </div>
+  <div class="action-side">
+    {% with launch=launch, wi=wi %}{% include "_launch_panel.html" %}{% endwith %}
+    <ul class="action-links" aria-label="GitHub and Devin">
+      <li><a href="/issues/{{ wi.id }}">Work item #{{ wi.id }}</a></li>
+      {% if wi.issue_url %}<li><a href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a></li>{% endif %}
+      {% if wi.pr_url %}<li><a href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a></li>{% endif %}
+      {% for s in sessions if s.url %}<li><a href="{{ s.url }}" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a></li>{% endfor %}
+    </ul>
+  </div>
+</section>
 {% elif f.kind is none %}
 <div class="notice" role="note"><p><strong>Unclassified.</strong> {{ f.unclassified_reason or "No classification rule matched." }} Unclassified findings stay visible and are never dispatched.</p></div>
-{% endif %}
-
-{% if next_action %}
-<div class="notice notice-{{ 'danger' if wi.state.value in ('needs_human', 'failed') else 'warning' }}" role="status">
-  <p><strong>Next human action.</strong> {{ next_action }}</p>
-</div>
+{% else %}
+<div class="notice" role="note"><p><strong>Not grouped yet.</strong> The next controller tick groups this finding into a work item; Devin is launched from there.</p></div>
 {% endif %}
 
 <div class="grid grid-main">
@@ -162,7 +181,7 @@
           <dt>Verified depth</dt><dd>{{ (wi.verification_depth|depth_label).text }}</dd>
           <dt>ACU cap</dt><dd>{{ wi.acu_cap|num(0) }}</dd>
           <dt>Issue</dt><dd>{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>{% else %}<span class="muted">not opened yet</span>{% endif %}</dd>
-          {% if wi.blocked_reason %}<dt>Blocked</dt><dd>{{ wi.blocked_reason|blocked_reason }}</dd>{% endif %}
+          {% if wi.blocked_reason and (wi.state|stage_of).value == "attention" %}<dt>Blocked</dt><dd>{{ wi.blocked_reason|blocked_reason }}</dd>{% endif %}
         </dl>
         {% if sessions %}
         <h3 class="sub mt">Devin sessions</h3>
@@ -182,30 +201,6 @@
       </div>
     </section>
 
-    <section class="card" aria-labelledby="history-heading">
-      {{ ui.section_head("Sighting history", id="history-heading", count=history|length) }}
-      {% if history %}
-      <div class="table-wrap">
-      <table class="data">
-        <thead><tr><th scope="col">Scan</th><th scope="col">Branch</th><th scope="col">Trivy</th><th scope="col">Grype</th></tr></thead>
-        <tbody>
-        {% for run, rows in history %}
-        <tr>
-          <td>{% if run %}<a class="primary mono" href="/runs/{{ run.id }}">{{ run.external_run_id }}</a><span class="secondary">{{ run.ingested_at|dt }} · {{ (run.status|run_status).text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
-          <td class="mono">{% if run %}{{ run.source_branch }} <span class="secondary">{{ run.source_sha|short }}</span>{% endif %}</td>
-          {% for scanner in ("trivy", "grype") %}
-          <td class="small">{% for s in rows if s.scanner.value == scanner %}<span class="nowrap">{{ s.mode.value }}: {{ "present" if s.present else "absent" }}{% if s.severity %} ({{ (s.severity|severity_label).text }}){% endif %}</span>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">not run</span>{% endfor %}</td>
-          {% endfor %}
-        </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-      </div>
-      {% else %}
-      <div class="card-body">{{ ui.empty("No sightings recorded", compact=True) }}</div>
-      {% endif %}
-    </section>
-
     {% if same_vuln %}
     <section class="card" aria-labelledby="same-heading">
       {{ ui.section_head("Same CVE elsewhere", id="same-heading", count=same_vuln|length) }}
@@ -219,8 +214,33 @@
   </div>
 </div>
 
-<section class="section" aria-labelledby="events-heading">
-  {{ ui.section_head("Events", id="events-heading", count=events|length) }}
+<section class="section" aria-labelledby="history-heading">
+  {{ ui.section_head("Sighting history", id="history-heading", count=history|length) }}
+  {% if history %}
+  <div class="table-wrap">
+  <table class="data">
+    <thead><tr><th scope="col">Scan</th><th scope="col">Branch</th><th scope="col">Trivy</th><th scope="col">Grype</th></tr></thead>
+    <tbody>
+    {% for run, rows in history %}
+    <tr>
+      <td>{% if run %}<a class="primary mono" href="/runs/{{ run.id }}">{{ run.external_run_id }}</a><span class="secondary">{{ run.ingested_at|dt }} · {{ (run.status|run_status).text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td class="mono">{% if run %}{{ run.source_branch }} <span class="secondary">{{ run.source_sha|short }}</span>{% endif %}</td>
+      {% for scanner in ("trivy", "grype") %}
+      <td class="small">{% for s in rows if s.scanner.value == scanner %}<span class="nowrap">{{ s.mode.value }}: {{ "present" if s.present else "absent" }}{% if s.severity %} ({{ (s.severity|severity_label).text }}){% endif %}</span>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">not run</span>{% endfor %}</td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}
+  {{ ui.empty("No sightings recorded", compact=True) }}
+  {% endif %}
+</section>
+
+<details class="disclosure">
+  <summary>Events <span class="muted">{{ events|length }}</span></summary>
+  <div class="disclosure-body padded">
   {% if events %}
   <ol class="timeline">
     {% for e in events %}
@@ -236,5 +256,6 @@
   {% else %}
   {{ ui.empty("No events yet", compact=True) }}
   {% endif %}
-</section>
+  </div>
+</details>
 {% endblock %}

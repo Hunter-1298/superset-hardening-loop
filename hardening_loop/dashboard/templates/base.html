@@ -18,8 +18,13 @@
     <nav id="primary-nav" aria-label="Primary">
       {% set current = nav_current(current_path) %}
       <ul class="nav-list">
-        {% for item in nav_items %}
-        <li><a class="nav-link{% if item.secondary %} is-secondary{% endif %}" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}><span>{{ item.label }}</span></a></li>
+        {% for item in nav_items if not item.secondary %}
+        <li><a class="nav-link" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}><span>{{ item.label }}</span></a></li>
+        {% endfor %}
+      </ul>
+      <ul class="nav-list nav-secondary" aria-label="More">
+        {% for item in nav_items if item.secondary %}
+        <li><a class="nav-link is-secondary" href="{{ item.href }}"{% if current == item.href %} aria-current="page"{% endif %}><span>{{ item.label }}</span></a></li>
         {% endfor %}
       </ul>
     </nav>

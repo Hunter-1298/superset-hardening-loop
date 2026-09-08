@@ -12,7 +12,8 @@ from __future__ import annotations
 import hmac
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +36,7 @@ from hardening_loop.dashboard import labels
 from hardening_loop.dashboard.vuln import vuln_detail
 from hardening_loop.db import open_database_readonly, session_scope
 from hardening_loop.domain.enums import (
+    CLOSING_FINDING_STATES,
     FindingState,
     Kind,
     Layer,
@@ -65,7 +67,7 @@ from hardening_loop.models.tables import (
     WorkItem,
 )
 from hardening_loop.operator import OperatorContext
-from hardening_loop.orchestrator.launch import LaunchBlock, LaunchResult
+from hardening_loop.orchestrator.launch import LaunchBlock, LaunchPreview, LaunchResult
 from hardening_loop.report.run_report import (
     ReportBody,
     build_report,
@@ -82,10 +84,16 @@ TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_ROWS = 2000
 RECENT_ACTIVITY_ROWS = 12
-RECENT_RUNS = 6
-QUEUE_ROWS = 8
+RECENT_RUNS = 4
+QUEUE_ROWS = 6
+FIX_NEXT_ROWS = 6
+IN_FLIGHT_ROWS = 8
+FINDINGS_PAGE_SIZE = 100
 
 UNCLASSIFIED = "unclassified"
+OPEN_FINDING_STATES: tuple[str, ...] = tuple(
+    s.value for s in FindingState if s not in CLOSING_FINDING_STATES
+)
 
 
 @dataclass(frozen=True)
@@ -100,11 +108,11 @@ class NavItem:
 
 NAV: tuple[NavItem, ...] = (
     NavItem("Overview", "/", ("/",)),
-    NavItem("CVEs", "/findings", ("/findings",)),
-    NavItem("Work items", "/issues", ("/issues",)),
+    NavItem("Vulnerabilities", "/findings", ("/findings",)),
+    NavItem("Work items", "/issues", ("/issues", "/operator")),
     NavItem("Scans", "/runs", ("/runs",)),
-    NavItem("Pull requests", "/prs", ("/prs",)),
-    NavItem("Report", "/report", ("/report",)),
+    NavItem("Pull requests", "/prs", ("/prs",), secondary=True),
+    NavItem("Report", "/report", ("/report",), secondary=True),
 )
 
 LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
@@ -118,6 +126,17 @@ LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
     LaunchBlock.scan_pending: (
         "A scan of the branch is still waiting to be evaluated; it may already resolve this item."
     ),
+}
+
+LAUNCH_BLOCK_SHORT: dict[LaunchBlock, str] = {
+    LaunchBlock.dispatch_in_progress: "Dispatching",
+    LaunchBlock.session_in_flight: "Session running",
+    LaunchBlock.awaiting_human_merge: "Awaiting merge",
+    LaunchBlock.awaiting_rescan: "Awaiting rescan",
+    LaunchBlock.closed: "Closed",
+    LaunchBlock.at_capacity: "No session slot free",
+    LaunchBlock.over_budget: "Over ACU budget",
+    LaunchBlock.scan_pending: "Scan pending",
 }
 
 
@@ -293,7 +312,14 @@ def _templates() -> Jinja2Templates:
     env.filters["plain_label"] = labels.plain
     env.filters["relation_label"] = labels.relation
     env.filters["blocked_reason"] = labels.blocked_reason_text
+    env.filters["stage_label"] = labels.stage
+    env.filters["stage_of"] = labels.stage_of
+    env.filters["pipeline_position"] = labels.pipeline_position
     env.globals["gate_label"] = labels.gate
+    env.globals["pipeline"] = labels.PIPELINE
+    env.globals["next_human_action"] = labels.next_human_action
+    env.globals["stages"] = list(labels.Stage)
+    env.globals["attention_stage"] = labels.Stage.attention
     env.globals["nav_items"] = NAV
     env.globals["nav_current"] = nav_current
     env.globals["kinds"] = list(Kind)
@@ -448,6 +474,16 @@ def create_app(
             return None
         return operator.preview(wi.id)
 
+    def launch_offers(items: Sequence[WorkItem]) -> dict[int, LaunchPreview]:
+        """Launch previews for the ready items in a list, keyed by work-item id."""
+        if operator is None:
+            return {}
+        return {
+            w.id: operator.preview(w.id)
+            for w in items
+            if w.id is not None and labels.stage_of(w.state) is labels.Stage.ready
+        }
+
     @app.exception_handler(StarletteHTTPException)
     async def html_or_json_error(request: Request, exc: StarletteHTTPException) -> Response:
         if not _wants_html(request):
@@ -474,6 +510,32 @@ def create_app(
                 ).all(),
                 key=lambda w: (-w.severity.rank, -(w.id or 0)),
             )
+            fix_next = sorted(
+                db.exec(
+                    select(WorkItem).where(
+                        col(WorkItem.state).in_(
+                            [s.value for s in labels.STAGE_STATES[labels.Stage.ready]]
+                        )
+                    )
+                ).all(),
+                key=lambda w: (-w.severity.rank, w.id or 0),
+            )
+            in_flight_states = [
+                s.value for stage in labels.IN_FLIGHT_STAGES for s in labels.STAGE_STATES[stage]
+            ]
+            in_flight = sorted(
+                db.exec(select(WorkItem).where(col(WorkItem.state).in_(in_flight_states))).all(),
+                key=lambda w: w.updated_at,
+                reverse=True,
+            )
+            in_flight_ids = [w.id for w in in_flight[:IN_FLIGHT_ROWS] if w.id is not None]
+            session_by_wi: dict[int, Session] = {}
+            for s in db.exec(
+                select(Session)
+                .where(col(Session.work_item_id).in_(in_flight_ids))
+                .order_by(col(Session.id))
+            ).all():
+                session_by_wi[s.work_item_id] = s
             recent_events = db.exec(
                 select(Event)
                 .where(Event.entity_type == "work_item")
@@ -495,6 +557,14 @@ def create_app(
                 runs=m.runs[-RECENT_RUNS:][::-1],
                 queue=queue[:QUEUE_ROWS],
                 queue_total=len(queue),
+                fix_next=fix_next[:FIX_NEXT_ROWS],
+                fix_next_total=len(fix_next),
+                previews=launch_offers(fix_next[:FIX_NEXT_ROWS]),
+                launch_block_short=LAUNCH_BLOCK_SHORT,
+                in_flight=in_flight[:IN_FLIGHT_ROWS],
+                in_flight_total=len(in_flight),
+                session_by_wi=session_by_wi,
+                stage_counts=labels.stage_counts(m.issues_by_state),
                 recent_events=recent_events,
                 titles=titles,
             )
@@ -557,14 +627,27 @@ def create_app(
         severity: str | None = Query(default=None),
         layer: str | None = Query(default=None),
         run: int | None = Query(default=None),
+        q: str | None = Query(default=None),
+        page: int = Query(default=1, ge=1),
     ) -> HTMLResponse:
         kind = kind or None
         state = state or None
         severity = severity or None
         layer = layer or None
         wanted = parse_kind(kind)
+        needle = (q or "").strip()
         with session_scope(engine) as db:
             stmt = select(Finding)
+            if needle:
+                like = f"%{needle}%"
+                stmt = stmt.where(
+                    or_(
+                        col(Finding.vuln_id).ilike(like),
+                        col(Finding.pkg_name).ilike(like),
+                        col(Finding.resource).ilike(like),
+                        col(Finding.title).ilike(like),
+                    )
+                )
             if kind is not None:
                 stmt = stmt.where(
                     col(Finding.kind).is_(None) if wanted is None else Finding.kind == wanted
@@ -577,21 +660,45 @@ def create_app(
                 stmt = stmt.where(col(Finding.layer) == layer)
             if run is not None:
                 stmt = stmt.where(Finding.first_seen_run_id == run)
-            rows = db.exec(
-                stmt.order_by(col(Finding.severity), col(Finding.vuln_id)).limit(MAX_ROWS)
-            ).all()
+            matched = sorted(
+                db.exec(stmt.order_by(col(Finding.vuln_id)).limit(MAX_ROWS)).all(),
+                key=lambda f: (-f.severity.rank, f.vuln_id, f.pkg_name or f.resource or ""),
+            )
             total = len(db.exec(select(Finding.id)).all())
+            severity_counts = Counter(
+                f.severity.value
+                for f in db.exec(
+                    select(Finding).where(col(Finding.state).in_(OPEN_FINDING_STATES))
+                ).all()
+            )
+            pages = max(1, -(-len(matched) // FINDINGS_PAGE_SIZE))
+            page = min(page, pages)
+            start = (page - 1) * FINDINGS_PAGE_SIZE
+            shown = matched[start : start + FINDINGS_PAGE_SIZE]
+            wi_ids = sorted({f.work_item_id for f in shown if f.work_item_id is not None})
+            wi_states = {
+                w.id: w.state
+                for w in db.exec(select(WorkItem).where(col(WorkItem.id).in_(wi_ids))).all()
+                if w.id is not None
+            }
             return render(
                 request,
                 "findings.html",
-                findings=rows,
+                findings=shown,
+                wi_states=wi_states,
+                matched=len(matched),
                 total=total,
+                page=page,
+                pages=pages,
+                page_size=FINDINGS_PAGE_SIZE,
+                open_by_severity=severity_counts,
                 filters={
                     "kind": kind,
                     "state": state,
                     "severity": severity,
                     "layer": layer,
                     "run": run,
+                    "q": needle or None,
                 },
             )
 
@@ -688,18 +795,27 @@ def create_app(
         depth: str | None = Query(default=None),
         q: str | None = Query(default=None),
         queue: bool = Query(default=False),
+        stage: str | None = Query(default=None),
     ) -> HTMLResponse:
         state = state or None
         severity = severity or None
         wanted = parse_kind(kind)
         wanted_level = parse_lifecycle(level)
         wanted_depth = parse_depth(depth)
+        wanted_stage = labels.parse_stage(stage)
+        if stage and wanted_stage is None:
+            choices = ", ".join(s.value for s in labels.Stage)
+            raise HTTPException(422, f"unknown stage {stage!r}; one of {choices}")
         needle = (q or "").strip()
         with session_scope(engine) as db:
             stmt = select(WorkItem)
             if queue:
                 stmt = stmt.where(
                     col(WorkItem.state).in_([s.value for s in labels.HUMAN_ACTION_STATES])
+                )
+            if wanted_stage is not None:
+                stmt = stmt.where(
+                    col(WorkItem.state).in_([s.value for s in labels.STAGE_STATES[wanted_stage]])
                 )
             if state:
                 stmt = stmt.where(col(WorkItem.state) == state)
@@ -738,6 +854,8 @@ def create_app(
                 items=items,
                 total=total,
                 acu_by_wi=acu_by_wi,
+                previews=launch_offers(items),
+                launch_block_short=LAUNCH_BLOCK_SHORT,
                 acu_cost_usd=settings.acu_cost_usd,
                 filters={
                     "q": needle or None,
@@ -747,7 +865,11 @@ def create_app(
                     "level": level or None,
                     "depth": depth or None,
                     "queue": "1" if queue else None,
+                    "stage": wanted_stage.value if wanted_stage is not None else None,
                 },
+                stage_counts=labels.stage_counts(
+                    Counter(w.state.value for w in db.exec(select(WorkItem)).all())
+                ),
             )
 
     @app.get("/issues/{wi_id}", response_class=HTMLResponse)

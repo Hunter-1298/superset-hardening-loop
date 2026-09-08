@@ -1,30 +1,28 @@
-{# Expects `findings`; set `hide_work_item=True` when every row belongs to the page's own work item. #}
+{# Expects `findings`; set `hide_work_item=True` when every row belongs to the page's own work item.
+   `wi_states` (work item id → state) is optional and turns the remediation column into stage chips. #}
+{% set known_states = wi_states if wi_states is defined else {} %}
 {% if findings %}
 <div class="table-wrap">
 <table class="data">
   <thead><tr>
     <th scope="col">Severity</th>
-    <th scope="col" class="w-title">Finding</th>
-    <th scope="col">Package or resource</th>
-    <th scope="col">Kind</th>
-    <th scope="col">Layer</th>
+    <th scope="col" class="w-title">Vulnerability</th>
+    <th scope="col">Package → fix</th>
     <th scope="col">Scanners</th>
-    <th scope="col">Fix available</th>
-    <th scope="col">State</th>
-    {% if not hide_work_item %}<th scope="col">Work item</th>{% endif %}
+    <th scope="col">Status</th>
+    {% if not hide_work_item %}<th scope="col">Remediation</th>{% endif %}
   </tr></thead>
   <tbody>
   {% for f in findings %}
+  {% set fixes = [] %}
+  {% for s, v in f.fix_versions_by_scanner.items() %}{% for x in v if x not in fixes %}{% set _ = fixes.append(x) %}{% endfor %}{% endfor %}
   <tr>
     <td>{{ ui.severity_badge(f.severity) }}{% if f.severity_disagreement %}<span class="secondary" title="{{ f.severity_by_scanner|tojson }}">scanners disagree</span>{% endif %}</td>
-    <td class="w-title"><a class="primary mono" href="/findings/{{ f.id }}">{{ f.vuln_id }}</a>{% if f.title %}<span class="secondary">{{ f.title }}</span>{% endif %}</td>
-    <td class="mono">{{ f.pkg_name or f.resource or "—" }}{% if f.pkg_version %}<span class="secondary">{{ f.pkg_version }}</span>{% endif %}{% if f.bound_blocked %}<span class="secondary">upper bound blocks the upgrade</span>{% endif %}</td>
-    <td>{{ ui.kind_badge(f.kind) }}{% if f.unclassified_reason %}<span class="secondary">{{ f.unclassified_reason }}</span>{% endif %}</td>
-    <td>{{ f.layer|layer_label }}</td>
+    <td class="w-title"><a class="primary mono" href="/findings/{{ f.id }}">{{ f.vuln_id }}</a><span class="secondary">{{ f.title or ((f.kind|kind_label).text ~ " · " ~ (f.layer|layer_label)) }}</span></td>
+    <td class="mono">{{ f.pkg_name or f.resource or "—" }}{% if f.pkg_version %} {{ f.pkg_version }}{% endif %}{% if fixes %} <span class="fix">→ {{ fixes|join(", ") }}</span>{% endif %}<span class="secondary">{% if f.bound_blocked %}upper bound blocks the upgrade · {% endif %}{{ (f.kind|kind_label).text }} · {{ f.layer|layer_label }}{% if f.unclassified_reason %} · {{ f.unclassified_reason }}{% endif %}</span></td>
     <td>{{ ("both" if f.reported_by_trivy and f.reported_by_grype else ("trivy_only" if f.reported_by_trivy else ("grype_only" if f.reported_by_grype else "config")))|scanner_label }}</td>
-    <td class="mono small nowrap">{% for s, v in f.fix_versions_by_scanner.items() %}{{ s }}: {{ v|join(", ") or "—" }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</td>
     <td>{{ ui.finding_state_badge(f.state) }}</td>
-    {% if not hide_work_item %}<td>{% if f.work_item_id %}<a href="/issues/{{ f.work_item_id }}">#{{ f.work_item_id }}</a>{% else %}<span class="muted">—</span>{% endif %}</td>{% endif %}
+    {% if not hide_work_item %}<td>{% if f.work_item_id and f.work_item_id in known_states %}<a href="/issues/{{ f.work_item_id }}">{{ ui.stage_badge(known_states[f.work_item_id]) }}</a>{% elif f.work_item_id %}<a href="/issues/{{ f.work_item_id }}">Work item #{{ f.work_item_id }}</a>{% elif f.kind is none %}<span class="muted">Not dispatchable</span>{% else %}<span class="muted">Not grouped yet</span>{% endif %}</td>{% endif %}
   </tr>
   {% endfor %}
   </tbody>
