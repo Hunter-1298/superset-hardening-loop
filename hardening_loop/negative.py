@@ -340,6 +340,7 @@ class NegativeRunner:
         timeout_seconds: float = 90 * 60,
         work_dir: Path,
         sleep: Callable[[float], None] = time.sleep,
+        compare_run_id: int | None = None,
     ) -> None:
         self.gh = gh
         self.repo = repo
@@ -348,6 +349,7 @@ class NegativeRunner:
         self.timeout_seconds = timeout_seconds
         self.work_dir = work_dir
         self.sleep = sleep
+        self.compare_run_id = compare_run_id
 
     def run(self, case_name: str, *, branch: str, head_sha: str, run_url: str) -> CaseReport:
         """Branch is already pushed by the workflow (git needs a real checkout for the dependency
@@ -416,28 +418,42 @@ class NegativeRunner:
                     return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
-    def _latest_main_evidence(self) -> Path | None:
+    def _baseline_evidence(self) -> tuple[int | None, Path | None]:
+        """Evidence to compare the regressed scan against: an explicit successful run id when
+        given, else the latest successful `security-scan` run on the base branch."""
+        if self.compare_run_id is not None:
+            return self.compare_run_id, self._evidence_for_run(self.compare_run_id, "baseline")
         for run in self.gh.list_workflow_runs(
             self.repo, SECURITY_SCAN_WORKFLOW, branch=self.base_branch
         ):
             if run.conclusion != "success":
                 continue
-            for artifact in self.gh.list_run_artifacts(self.repo, run.id):
-                if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
-                    dest = self.work_dir / "evidence" / f"main-{run.id}"
-                    return self.gh.download_artifact(self.repo, artifact.id, dest)
+            root = self._evidence_for_run(run.id, "main")
+            if root is not None:
+                return run.id, root
+        return None, None
+
+    def _evidence_for_run(self, run_id: int, label: str) -> Path | None:
+        for artifact in self.gh.list_run_artifacts(self.repo, run_id):
+            if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+                dest = self.work_dir / "evidence" / f"{label}-{run_id}"
+                return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
     def _compare_counts(self, head_sha: str) -> dict[str, Any]:
         failures: list[str] = []
         pr_root = self._evidence_for(head_sha)
-        main_root = self._latest_main_evidence()
-        out: dict[str, Any] = {"failures": failures}
+        baseline_run_id, main_root = self._baseline_evidence()
+        out: dict[str, Any] = {"failures": failures, "baseline_run_id": baseline_run_id}
         if pr_root is None:
             failures.append("no scan-evidence artifact for the PR head")
             return out
         if main_root is None:
-            failures.append(f"no successful security-scan run with evidence on {self.base_branch}")
+            failures.append(
+                f"no scan-evidence artifact for run {self.compare_run_id}"
+                if self.compare_run_id is not None
+                else f"no successful security-scan run with evidence on {self.base_branch}"
+            )
             return out
         try:
             pr_counts, main_counts = raw_counts(pr_root), raw_counts(main_root)

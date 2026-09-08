@@ -289,3 +289,65 @@ def test_workflow_job_names_match_expectation_table() -> None:
     ).read_text()
     for name in CASES:
         assert f'"{name}"' in text, name
+
+
+class _ArtifactGitHub(httpx.BaseTransport):
+    """Artifact lookups only: every run has one `scan-evidence-*` artifact whose zip holds a
+    marker file naming the run, so the test can tell which baseline was downloaded."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        import io
+        import zipfile
+
+        path = request.url.path
+        self.calls.append(f"{request.method} {path}")
+        if path.endswith("/artifacts") and "/actions/runs/" in path:
+            run_id = int(path.split("/actions/runs/")[1].split("/")[0])
+            return httpx.Response(
+                200,
+                json={"artifacts": [{"id": run_id * 10, "name": f"scan-evidence-{run_id}"}]},
+            )
+        if "/actions/artifacts/" in path and path.endswith("/zip"):
+            artifact_id = int(path.split("/actions/artifacts/")[1].split("/")[0])
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w") as zf:
+                zf.writestr("run.txt", str(artifact_id // 10))
+            return httpx.Response(200, content=buf.getvalue())
+        if path.endswith("/actions/workflows/security-scan.yml/runs"):
+            return httpx.Response(
+                200,
+                json={
+                    "workflow_runs": [
+                        {"id": 900, "conclusion": "failure", "head_sha": "a" * 40},
+                        {"id": 901, "conclusion": "success", "head_sha": "b" * 40},
+                    ]
+                },
+            )
+        return httpx.Response(404, json={"message": f"unexpected {request.method} {path}"})
+
+
+def test_baseline_evidence_uses_explicit_run_id_without_listing_runs(tmp_path: Path) -> None:
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh, repo="Hunter-1298/superset", work_dir=tmp_path, compare_run_id=555, sleep=lambda s: None
+    )
+    run_id, root = runner._baseline_evidence()
+    assert run_id == 555 and root is not None
+    assert (root / "run.txt").read_text() == "555"
+    assert not any("/workflows/" in c for c in fake.calls)
+
+
+def test_baseline_evidence_defaults_to_latest_successful_base_run(tmp_path: Path) -> None:
+    fake = _ArtifactGitHub()
+    gh = GitHubRest(SecretStr("t"), transport=fake)
+    runner = NegativeRunner(
+        gh, repo="Hunter-1298/superset", work_dir=tmp_path, sleep=lambda s: None
+    )
+    run_id, root = runner._baseline_evidence()
+    assert run_id == 901 and root is not None
+    assert (root / "run.txt").read_text() == "901"
+    assert "GET /repos/Hunter-1298/superset/actions/runs/900/artifacts" not in fake.calls

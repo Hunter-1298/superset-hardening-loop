@@ -131,9 +131,12 @@ Controller repo → Actions → `ci-negative` → Run workflow with `cases` = `a
 a throwaway branch to the fork, opens a draft PR, waits for `security-scan`, asserts the
 expected job fails (or, for `dependency-regression`, that report mode stays green while finding
 counts rise), then deletes the branch. Needs the `FORK_TOKEN` repository secret in the controller
-repo. Evidence-side negatives (invalid checksum, source-mismatched manifest, tampered file, path
-traversal) are unit tests in `tests/test_scan_intake.py` and replay scenarios; they need no
-network.
+repo. `dependency-regression` compares against the latest successful `security-scan` run on
+`base_branch`; set `compare_run_id` to a specific successful run when that branch has none yet.
+The same steps run from a shell (`hardening-loop ci-negative mutate` → push → `hardening-loop
+ci-negative run --compare-run-id <id>`) when Actions cannot be dispatched. Evidence-side
+negatives (invalid checksum, source-mismatched manifest, tampered file, path traversal) are unit
+tests in `tests/test_scan_intake.py` and replay scenarios; they need no network.
 
 ## Devin assets
 

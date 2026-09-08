@@ -550,6 +550,7 @@ def cmd_negative_run(args: argparse.Namespace) -> int:
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_minutes * 60,
         work_dir=Path(args.work_dir),
+        compare_run_id=args.compare_run_id,
     )
     try:
         report = runner.run(
@@ -774,6 +775,12 @@ def build_parser() -> argparse.ArgumentParser:
     nr.add_argument("--work-dir", default="data/ci-negative")
     nr.add_argument("--poll-seconds", type=float, default=30.0)
     nr.add_argument("--timeout-minutes", type=float, default=90.0)
+    nr.add_argument(
+        "--compare-run-id",
+        type=int,
+        help="dependency-regression baseline: a successful security-scan run id whose evidence "
+        "to compare against (default: latest successful run on --base)",
+    )
     nr.set_defaults(fn=cmd_negative_run)
     return p
 
