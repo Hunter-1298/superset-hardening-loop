@@ -2,21 +2,24 @@
 {% block title %}Work items · Superset hardening loop{% endblock %}
 {% block content %}
 {% set active = [] %}
-{% for k, v in filters.items() if v %}{% set _ = active.append(k) %}{% endfor %}
-{{ ui.page_header("Work items", total ~ " work item" ~ ("" if total == 1 else "s") ~ " on " ~ branch ~ ", one GitHub issue and one Devin session each.") }}
+{% for k, v in filters.items() if v and k != "stage" %}{% set _ = active.append(k) %}{% endfor %}
+{% set more_active = filters.state or filters.level or filters.depth or filters.queue %}
+{{ ui.page_header("Work items", total ~ " work item" ~ ("" if total == 1 else "s") ~ " on " ~ branch ~ ". Each one groups related findings and gets one GitHub issue and one Devin session.") }}
 
 <section class="section" aria-label="Work items">
+<nav class="tabs" aria-label="Stage">
+  <a href="/issues"{% if not filters.stage and not filters.queue %} aria-current="page"{% endif %}>All <span class="count">{{ total }}</span></a>
+  {% for st in pipeline %}
+  <a href="/issues?stage={{ st.value }}"{% if filters.stage == st.value %} aria-current="page"{% endif %}>{{ (st|stage_label).text }} <span class="count">{{ stage_counts[st] }}</span></a>
+  {% endfor %}
+  <a class="is-danger" href="/issues?stage=attention"{% if filters.stage == "attention" %} aria-current="page"{% endif %}>Needs attention <span class="count">{{ stage_counts[attention_stage] }}</span></a>
+</nav>
+
 <form class="filters" method="get" action="/issues" role="search" aria-label="Filter work items">
+  {% if filters.stage %}<input type="hidden" name="stage" value="{{ filters.stage }}">{% endif %}
   <div class="field grow">
     <label for="f-q">Search</label>
     <input id="f-q" type="search" name="q" value="{{ filters.q or '' }}" placeholder="Title, package, #id, issue or PR number">
-  </div>
-  <div class="field">
-    <label for="f-state">State</label>
-    <select id="f-state" name="state">
-      <option value="">Any</option>
-      {% for s in work_item_states %}<option value="{{ s.value }}"{% if filters.state == s.value %} selected{% endif %}>{{ (s|wi_state).text }}</option>{% endfor %}
-    </select>
   </div>
   <div class="field">
     <label for="f-severity">Severity</label>
@@ -32,27 +35,39 @@
       {% for k in kinds %}<option value="{{ k.slug }}"{% if filters.kind in (k.slug, k.value|string) %} selected{% endif %}>{{ (k|kind_label).text }}</option>{% endfor %}
     </select>
   </div>
-  <div class="field">
-    <label for="f-level">Lifecycle</label>
-    <select id="f-level" name="level">
-      <option value="">Any</option>
-      {% for lv in lifecycle_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|lifecycle_label).text }}</option>{% endfor %}
-    </select>
-  </div>
-  <div class="field">
-    <label for="f-depth">Verified depth</label>
-    <select id="f-depth" name="depth">
-      <option value="">Any</option>
-      {% for d in depth_levels %}<option value="{{ d.name }}"{% if filters.depth in (d.name, d.value|string, "L" ~ d.value) %} selected{% endif %}>{{ (d|depth_label).text }}</option>{% endfor %}
-    </select>
-  </div>
-  <div class="field check">
-    <input id="f-queue" type="checkbox" name="queue" value="1"{% if filters.queue %} checked{% endif %}>
-    <label for="f-queue">Needs a person</label>
-  </div>
+  <details class="more-filters"{% if more_active %} open{% endif %}>
+    <summary>More filters</summary>
+    <div class="more-filters-body">
+      <div class="field">
+        <label for="f-state">Exact state</label>
+        <select id="f-state" name="state">
+          <option value="">Any</option>
+          {% for s in work_item_states %}<option value="{{ s.value }}"{% if filters.state == s.value %} selected{% endif %}>{{ (s|wi_state).text }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-level">Lifecycle</label>
+        <select id="f-level" name="level">
+          <option value="">Any</option>
+          {% for lv in lifecycle_levels %}<option value="{{ lv.name }}"{% if filters.level in (lv.name, lv.value|string) %} selected{% endif %}>{{ (lv|lifecycle_label).text }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="f-depth">Verified depth</label>
+        <select id="f-depth" name="depth">
+          <option value="">Any</option>
+          {% for d in depth_levels %}<option value="{{ d.name }}"{% if filters.depth in (d.name, d.value|string, "L" ~ d.value) %} selected{% endif %}>{{ (d|depth_label).text }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field check">
+        <input id="f-queue" type="checkbox" name="queue" value="1"{% if filters.queue %} checked{% endif %}>
+        <label for="f-queue">Needs a person</label>
+      </div>
+    </div>
+  </details>
   <div class="actions">
     <button class="btn btn-primary" type="submit">Apply</button>
-    {% if active %}<a href="/issues">Clear</a>{% endif %}
+    {% if active or filters.stage %}<a href="/issues">Clear</a>{% endif %}
   </div>
 </form>
 
@@ -76,12 +91,9 @@
     <th scope="col" class="w-title">Work item</th>
     <th scope="col">Severity</th>
     <th scope="col">State</th>
-    <th scope="col">Kind</th>
-    <th scope="col">Lifecycle</th>
-    <th scope="col">Depth</th>
+    <th scope="col" class="w-next">Next step</th>
     <th scope="col" class="num">ACU</th>
-    {% if acu_cost_usd %}<th scope="col" class="num">Est. cost</th>{% endif %}
-    <th scope="col" class="w-links">GitHub</th>
+    <th scope="col" class="w-links">Links</th>
     <th scope="col" class="w-date">Updated</th>
   </tr></thead>
   <tbody>
@@ -89,20 +101,13 @@
   <tr>
     <td class="w-title">
       <a class="primary" href="/issues/{{ w.id }}">{{ w.title }}</a>
-      <span class="secondary"><span class="mono">#{{ w.id }}</span>{% if w.retries_used %} · {{ w.retries_used }} retr{{ 'y' if w.retries_used == 1 else 'ies' }}{% endif %}{% if w.regression_of_work_item_id %} · regression of <a href="/issues/{{ w.regression_of_work_item_id }}">#{{ w.regression_of_work_item_id }}</a>{% endif %}{% if w.state.value in ('needs_human', 'failed') and w.blocked_reason %} · blocked{% endif %}</span>
+      <span class="secondary"><span class="mono">#{{ w.id }}</span> · {{ (w.kind|kind_label).text }}{% if w.verification_depth is not none and w.verification_depth.value > 0 %} · {{ w.verification_depth|depth_code }}{% endif %}{% if w.retries_used %} · {{ w.retries_used }} retr{{ 'y' if w.retries_used == 1 else 'ies' }}{% endif %}{% if w.regression_of_work_item_id %} · regression of <a href="/issues/{{ w.regression_of_work_item_id }}">#{{ w.regression_of_work_item_id }}</a>{% endif %}</span>
     </td>
     <td>{{ ui.severity_badge(w.severity) }}</td>
-    <td>{{ ui.state_badge(w.state) }}</td>
-    <td>{{ ui.kind_badge(w.kind) }}</td>
-    <td>{{ ui.level_badge(w.lifecycle_level) }}</td>
-    <td>{{ w.verification_depth|depth_code }}</td>
-    <td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }}<span class="secondary">of {{ w.acu_cap|num(0) }}</span></td>
-    {% if acu_cost_usd %}<td class="num">{{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money }}</td>{% endif %}
-    <td class="w-links">
-      {% if w.issue_url %}<a href="{{ w.issue_url }}">Issue #{{ w.issue_number }}</a>{% endif %}
-      {% if w.pr_url %}<a href="{{ w.pr_url }}">PR #{{ w.pr_number }}</a>{% endif %}
-      {% if not w.issue_url and not w.pr_url %}<span class="muted">—</span>{% endif %}
-    </td>
+    <td>{{ ui.stage_badge(w.state) }}<span class="secondary">{{ (w.state|wi_state).text }}</span></td>
+    <td class="w-next">{{ ui.next_step(w, operator, previews, launch_block_short) }}</td>
+    <td class="num">{{ acu_by_wi.get(w.id, 0.0)|num }}<span class="secondary">of {{ w.acu_cap|num(0) }}{% if acu_cost_usd %} · {{ (acu_by_wi.get(w.id, 0.0) * acu_cost_usd)|money }}{% endif %}</span></td>
+    <td class="w-links">{{ ui.links(w) }}</td>
     <td class="w-date"><time datetime="{{ w.updated_at.isoformat() }}">{{ w.updated_at|dt }}</time></td>
   </tr>
   {% endfor %}

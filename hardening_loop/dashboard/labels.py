@@ -66,6 +66,107 @@ HUMAN_ACTION_STATES: frozenset[WorkItemState] = frozenset(
     {WorkItemState.needs_human, WorkItemState.ready_for_human, WorkItemState.failed}
 )
 
+
+class Stage(StrEnum):
+    """Coarse remediation stage shown to operators. The fifteen work-item states collapse onto
+    the happy path (ready → Devin → PR → review → merged → verified) plus two side pockets."""
+
+    ready = "ready"
+    devin = "devin"
+    pr = "pr"
+    review = "review"
+    merged = "merged"
+    verified = "verified"
+    attention = "attention"
+    closed = "closed"
+
+
+STAGE_LABELS: dict[Stage, Label] = {
+    Stage.ready: Label("Ready to fix", Tone.neutral, "Queued; launch Devin to start"),
+    Stage.devin: Label("Devin working", Tone.info, "A Devin session is on it"),
+    Stage.pr: Label("PR in CI", Tone.info, "Pull request open; CI and review running"),
+    Stage.review: Label("Awaiting your review", Tone.warning, "Approve and merge in GitHub"),
+    Stage.merged: Label("Merged, awaiting rescan", Tone.info, "A later scan must confirm"),
+    Stage.verified: Label("Verified", Tone.success, "Absent from a later successful scan"),
+    Stage.attention: Label("Needs attention", Tone.danger, "Blocked on a person"),
+    Stage.closed: Label("Closed", Tone.neutral, "Abandoned without remediation"),
+}
+
+STAGE_STATES: dict[Stage, tuple[WorkItemState, ...]] = {
+    Stage.ready: (WorkItemState.queued, WorkItemState.issue_open),
+    Stage.devin: (
+        WorkItemState.dispatching,
+        WorkItemState.session_active,
+        WorkItemState.checks_failed,
+    ),
+    Stage.pr: (
+        WorkItemState.pr_open,
+        WorkItemState.checks_running,
+        WorkItemState.review_pending,
+    ),
+    Stage.review: (WorkItemState.ready_for_human,),
+    Stage.merged: (WorkItemState.merged, WorkItemState.awaiting_rescan),
+    Stage.verified: (WorkItemState.verified,),
+    Stage.attention: (WorkItemState.needs_human, WorkItemState.failed),
+    Stage.closed: (WorkItemState.abandoned,),
+}
+
+# The happy path, left to right.
+PIPELINE: tuple[Stage, ...] = (
+    Stage.ready,
+    Stage.devin,
+    Stage.pr,
+    Stage.review,
+    Stage.merged,
+    Stage.verified,
+)
+
+# Stages where the loop is actively moving without a person.
+IN_FLIGHT_STAGES: frozenset[Stage] = frozenset({Stage.devin, Stage.pr, Stage.review})
+
+_STAGE_OF_STATE: dict[WorkItemState, Stage] = {
+    s: stage for stage, states in STAGE_STATES.items() for s in states
+}
+
+
+def stage_of(state: object) -> Stage:
+    """Stage for a work-item state (enum or raw value). Unknown values count as attention."""
+    try:
+        return _STAGE_OF_STATE[WorkItemState(str(state))]
+    except ValueError:
+        return Stage.attention
+
+
+def parse_stage(value: str | None) -> Stage | None:
+    if not value:
+        return None
+    try:
+        return Stage(value)
+    except ValueError:
+        return None
+
+
+def stage(value: object) -> Label:
+    """Label for a stage, or for a work-item state via its stage."""
+    if isinstance(value, Stage):
+        return STAGE_LABELS[value]
+    parsed = parse_stage(str(value)) if value is not None else None
+    return STAGE_LABELS[parsed] if parsed is not None else STAGE_LABELS[stage_of(value)]
+
+
+def stage_counts(by_state: dict[str, int]) -> dict[Stage, int]:
+    counts = dict.fromkeys(Stage, 0)
+    for raw, n in by_state.items():
+        counts[stage_of(raw)] += n
+    return counts
+
+
+def pipeline_position(state: object) -> int | None:
+    """Index of the state's stage on the happy path, or None for attention/closed."""
+    s = stage_of(state)
+    return PIPELINE.index(s) if s in PIPELINE else None
+
+
 FINDING_STATE_LABELS: dict[FindingState, Label] = {
     FindingState.open: Label("Open", Tone.neutral),
     FindingState.unclassified: Label("Unclassified", Tone.warning, "Not dispatched"),

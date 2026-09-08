@@ -177,7 +177,23 @@ def test_findings_list_links_to_cve_pages(baseline_client: TestClient) -> None:
     fid, vid = links[0]
     page = baseline_client.get(f"/findings/{fid}")
     assert page.status_code == 200 and vid in page.text
-    assert "CVEs" in _text(html)  # page title
+    assert "Vulnerabilities" in _text(html)  # page title
+
+
+def test_findings_search_is_server_side(baseline_client: TestClient) -> None:
+    html = baseline_client.get("/findings?severity=CRITICAL").text
+    fid, vid = re.findall(
+        r'<a class="primary mono" href="/findings/(\d+)">(CVE-[\d-]+|GHSA-[\w-]+)</a>', html
+    )[0]
+    hit = baseline_client.get(f"/findings?q={vid.lower()}").text
+    assert f'href="/findings/{fid}">{vid}</a>' in hit
+    assert "Search: <strong>" in hit and vid.lower() in hit
+    # the severity tabs and pager keep the search
+    assert f'href="/findings?severity=CRITICAL&amp;q={vid.lower()}"' in hit
+
+    miss = baseline_client.get("/findings?q=zzzz-no-such-cve").text
+    assert "No findings match these filters" in _text(miss)
+    assert 'href="/findings/' not in miss
 
 
 # ------------------------------------------------------------------------- replay DEMO lifecycle

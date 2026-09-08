@@ -9,6 +9,7 @@
 {%- endmacro %}
 
 {% macro state_badge(state) -%}{{ badge(state|wi_state) }}{%- endmacro %}
+{% macro stage_badge(state) -%}{{ badge(state|stage_label, title=(state|wi_state).text) }}{%- endmacro %}
 {% macro finding_state_badge(state) -%}{{ badge(state|finding_state) }}{%- endmacro %}
 {% macro severity_badge(sev) -%}{{ badge(sev|severity_label) }}{%- endmacro %}
 {% macro kind_badge(kind) -%}{{ plain(kind|kind_label) }}{%- endmacro %}
@@ -64,4 +65,43 @@
 
 {% macro external_link(href, text) -%}
 <a href="{{ href }}" rel="noopener">{{ text }}<span class="sr-only"> (opens GitHub or Devin)</span></a>
+{%- endmacro %}
+
+{# Six-stage happy path with the item's current position; attention/closed items sit beside it. #}
+{% macro stepper(state) -%}
+{% set pos = state|pipeline_position %}
+<div class="stepper-wrap">
+<ol class="stepper" aria-label="Remediation progress">
+  {% for st in pipeline %}
+  <li class="{% if pos is not none and loop.index0 < pos %}is-done{% elif pos == loop.index0 %}is-current{% endif %}"{% if pos == loop.index0 %} aria-current="step"{% endif %}><span class="step-dot" aria-hidden="true"></span><span class="step-text">{{ (st|stage_label).text }}</span></li>
+  {% endfor %}
+</ol>
+{% if pos is none %}<div class="stepper-aside">{{ badge(state|stage_label) }}</div>{% endif %}
+</div>
+{%- endmacro %}
+
+{# What a person should do about a work item right now, as one short phrase or a launch link. #}
+{% macro next_step(w, operator, previews=None, block_short=None) -%}
+{% set stage = w.state|stage_of %}
+{% set action = next_human_action(w.state, w.blocked_reason, w.pr_url) %}
+{% set preview = previews.get(w.id) if previews else None %}
+{% if stage.value == "ready" %}
+  {% if not operator %}<span class="muted">Waiting for an operator</span>
+  {% elif preview and not preview.eligible %}<a class="next-text muted" href="/operator/launch/{{ w.id }}">Launch blocked · {{ block_short[preview.block] }}</a>
+  {% else %}<a class="btn btn-launch btn-sm" href="/operator/launch/{{ w.id }}">Launch Devin</a>{% endif %}
+{% elif stage.value == "review" and w.pr_url %}
+  <a href="{{ w.pr_url }}" rel="noopener">Review PR #{{ w.pr_number }}</a>
+{% elif action %}
+  <span class="next-text">{{ action }}</span>
+{% else %}
+  <span class="muted">{{ (w.state|wi_state).hint or "Nothing to do" }}</span>
+{% endif %}
+{%- endmacro %}
+
+{# Compact GitHub/Devin link row. #}
+{% macro links(w, session_url=None) -%}
+{% if w.issue_url %}<a href="{{ w.issue_url }}" rel="noopener">Issue #{{ w.issue_number }}</a>{% endif %}
+{% if w.pr_url %}<a href="{{ w.pr_url }}" rel="noopener">PR #{{ w.pr_number }}</a>{% endif %}
+{% if session_url %}<a href="{{ session_url }}" rel="noopener">Devin session</a>{% endif %}
+{% if not w.issue_url and not w.pr_url and not session_url %}<span class="muted">—</span>{% endif %}
 {%- endmacro %}

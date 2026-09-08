@@ -1,23 +1,30 @@
 {% extends "base.html" %}
-{% block title %}CVEs · Superset hardening loop{% endblock %}
+{% block title %}Vulnerabilities · Superset hardening loop{% endblock %}
 {% block content %}
 {% set active = [] %}
-{% for k, v in filters.items() if v is not none and v != "" %}{% set _ = active.append(k) %}{% endfor %}
-{{ ui.page_header("CVEs", total ~ " normalized finding" ~ ("" if total == 1 else "s") ~ " from the raw Trivy and Grype scans. Open one for its full record and the work item that owns it.") }}
+{% for k, v in filters.items() if v is not none and v != "" and k != "severity" %}{% set _ = active.append(k) %}{% endfor %}
+{% set open_total = open_by_severity.values()|sum %}
+{{ ui.page_header("Vulnerabilities", open_total ~ " open finding" ~ ("" if open_total == 1 else "s") ~ " on " ~ branch ~ " from the raw Trivy and Grype scans, " ~ total ~ " tracked in total. Open one for the evidence and its remediation.") }}
 
 <section class="section" aria-label="Findings">
+{% macro sev_query(value) -%}{% set parts = [] %}{% if value %}{% set _ = parts.append("severity=" ~ value) %}{% endif %}{% for k in ("state", "kind", "layer", "run", "q") if filters[k] is not none and filters[k] != "" %}{% set _ = parts.append(k ~ "=" ~ (filters[k]|string|urlencode)) %}{% endfor %}/findings{% if parts %}?{{ parts|join("&") }}{% endif %}{%- endmacro %}
+<nav class="tabs" aria-label="Severity">
+  <a href="{{ sev_query(none) }}"{% if not filters.severity %} aria-current="page"{% endif %}>All <span class="count">{{ open_total }}</span></a>
+  {% for s in severities if s.value != "UNKNOWN" or open_by_severity.get(s.value) %}
+  <a href="{{ sev_query(s.value) }}"{% if filters.severity and filters.severity|upper == s.value %} aria-current="page"{% endif %}{% if (s|severity_label).tone.value == "danger" %} class="is-danger"{% endif %}>{{ (s|severity_label).text }} <span class="count">{{ open_by_severity.get(s.value, 0) }}</span></a>
+  {% endfor %}
+</nav>
+
 <form class="filters" method="get" action="/findings" role="search" aria-label="Filter findings">
-  <div class="field">
-    <label for="f-severity">Severity</label>
-    <select id="f-severity" name="severity">
-      <option value="">Any</option>
-      {% for s in severities %}<option value="{{ s.value }}"{% if filters.severity and filters.severity|upper == s.value %} selected{% endif %}>{{ (s|severity_label).text }}</option>{% endfor %}
-    </select>
+  {% if filters.severity %}<input type="hidden" name="severity" value="{{ filters.severity }}">{% endif %}
+  <div class="field grow">
+    <label for="f-q">Search</label>
+    <input id="f-q" type="search" name="q" value="{{ filters.q or '' }}" placeholder="CVE id, package or title">
   </div>
   <div class="field">
-    <label for="f-state">State</label>
+    <label for="f-state">Status</label>
     <select id="f-state" name="state">
-      <option value="">Any</option>
+      <option value="">Open and closed</option>
       {% for s in finding_states %}<option value="{{ s.value }}"{% if filters.state == s.value %} selected{% endif %}>{{ (s|finding_state).text }}</option>{% endfor %}
     </select>
   </div>
@@ -39,15 +46,15 @@
   {% if filters.run is not none %}<input type="hidden" name="run" value="{{ filters.run }}">{% endif %}
   <div class="actions">
     <button class="btn btn-primary" type="submit">Apply</button>
-    {% if active %}<a href="/findings">Clear</a>{% endif %}
+    {% if active or filters.severity %}<a href="/findings">Clear</a>{% endif %}
   </div>
 </form>
 
 {% if active %}
 <div class="active-filters" aria-label="Active filters">
-  <span>{{ findings|length }} of {{ total }} · </span>
-  {% if filters.severity %}<span class="pill">Severity: <strong>{{ (filters.severity|severity_label).text }}</strong></span>{% endif %}
-  {% if filters.state %}<span class="pill">State: <strong>{{ (filters.state|finding_state).text }}</strong></span>{% endif %}
+  <span>{{ matched }} of {{ total }} · </span>
+  {% if filters.q %}<span class="pill">Search: <strong>{{ filters.q }}</strong></span>{% endif %}
+  {% if filters.state %}<span class="pill">Status: <strong>{{ (filters.state|finding_state).text }}</strong></span>{% endif %}
   {% if filters.kind %}<span class="pill">Kind: <strong>{{ filters.kind|kind }}</strong></span>{% endif %}
   {% if filters.layer %}<span class="pill">Layer: <strong>{{ filters.layer|layer_label }}</strong></span>{% endif %}
   {% if filters.run is not none %}<span class="pill">First seen in <a href="/runs/{{ filters.run }}">scan #{{ filters.run }}</a></span>{% endif %}
@@ -56,6 +63,15 @@
 
 {% if findings %}
 {% include "_findings_table.html" %}
+{% if pages > 1 %}
+{% macro page_query(n) -%}{% set parts = ["page=" ~ n] %}{% for k in ("severity", "state", "kind", "layer", "run", "q") if filters[k] is not none and filters[k] != "" %}{% set _ = parts.append(k ~ "=" ~ (filters[k]|string|urlencode)) %}{% endfor %}/findings?{{ parts|join("&") }}{%- endmacro %}
+<nav class="pager" aria-label="Pages">
+  <span class="pager-info">{{ (page - 1) * page_size + 1 }}–{{ [page * page_size, matched]|min }} of {{ matched }}</span>
+  {% if page > 1 %}<a rel="prev" href="{{ page_query(page - 1) }}">Previous</a>{% else %}<span class="muted">Previous</span>{% endif %}
+  <span class="pager-page">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a rel="next" href="{{ page_query(page + 1) }}">Next</a>{% else %}<span class="muted">Next</span>{% endif %}
+</nav>
+{% endif %}
 {% elif total == 0 %}
 {{ ui.empty("No findings yet", "Findings appear once a scan run has been ingested.") }}
 {% else %}
