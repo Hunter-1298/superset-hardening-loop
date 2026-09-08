@@ -235,7 +235,7 @@ def ingest_run(
     by_sev: Counter[str] = Counter()
     for nf in normalized:
         cls = classify(nf, ctx)
-        finding, is_new = _upsert_finding(db, run_id, raw, nf, cls, ts)
+        finding, is_new = _upsert_finding(db, run, raw, nf, cls, ts)
         assert finding.id is not None
         result.findings_new += int(is_new)
         by_kind[str(cls.kind.value) if cls.kind else "unclassified"] += 1
@@ -390,14 +390,26 @@ def _severity_counts(items: Sequence[RawVuln] | Sequence[RawConfigFinding]) -> d
 
 def _upsert_finding(
     db: Session,
-    run_id: int,
+    run: ScanRun,
     raw: ScanJobEvidence,
     nf: NormalizedFinding,
     cls: Classification,
     ts: datetime,
 ) -> tuple[Finding, bool]:
+    """Open or refresh the finding `nf` names. A finding's mutable description (package, version,
+    severity, classification, `last_seen_run_id`, state) always reflects the run that finished
+    last: a run ingested after a newer scan has already spoken for the finding only records its
+    sightings and, if it finished first, becomes the finding's `first_seen_run_id`."""
+    assert run.id is not None
+    run_id = run.id
     finding = db.exec(select(Finding).where(Finding.dedupe_key == nf.dedupe_key)).first()
     is_new = finding is None
+    if finding is not None and _finished_before(db, run, finding.first_seen_run_id):
+        finding.first_seen_run_id = run_id
+    if finding is not None and _finished_before(db, run, finding.last_seen_run_id):
+        db.add(finding)
+        db.flush()
+        return finding, False
     if finding is None:
         finding = Finding(
             dedupe_key=nf.dedupe_key,
@@ -444,6 +456,17 @@ def _upsert_finding(
     db.add(finding)
     db.flush()
     return finding, is_new
+
+
+def _finished_before(db: Session, run: ScanRun, other_run_id: int) -> bool:
+    """Whether `run` finished strictly before the run `other_run_id` (scan chronology, not
+    ingestion order). Unknown timestamps never reorder."""
+    if other_run_id == run.id or run.finished_at is None:
+        return False
+    other = db.get(ScanRun, other_run_id)
+    return (
+        other is not None and other.finished_at is not None and run.finished_at < other.finished_at
+    )
 
 
 _CLOSED_STATES = frozenset(

@@ -307,8 +307,9 @@ class ScanIntakeService:
         return None
 
     def unseen_runs(self, *, limit: int) -> list[WorkflowRunInfo]:
-        """The newest `limit` completed run attempts with no `ScanIntake` row yet. Seen attempts
-        are skipped before counting, so a backlog older than one page is still reached."""
+        """The newest `limit` completed run attempts with no `ScanIntake` row yet, returned oldest
+        first so a batch is ingested in scan chronology. Seen attempts are skipped before counting,
+        so a backlog older than one page is still reached."""
         repo = self.expect.source_repo
         out: list[WorkflowRunInfo] = []
         with Session(self.engine) as db:
@@ -317,6 +318,7 @@ class ScanIntakeService:
                     break
                 if self.seen(db, external_run_id(repo, run)) is None:
                     out.append(run)
+        out.reverse()
         return out
 
     def seen(self, db: Session, ext_id: str) -> ScanIntake | None:
@@ -325,8 +327,11 @@ class ScanIntakeService:
     # ------------------------------------------------------------------ intake
 
     def poll(self, *, limit: int = 10) -> list[IntakeOutcome]:
-        """Ingest up to `limit` completed runs of the expected branch not seen before, newest
-        first. Older unseen runs are picked up by later polls until none remain."""
+        """Ingest up to `limit` of the newest completed runs of the expected branch not seen
+        before, oldest of those first; runs older still are picked up by later polls until none
+        remain. Ingestion order is not load-bearing: a finding's current description and the
+        "latest run" always follow scan `finished_at`, so a backlog entry brought in after a newer
+        scan cannot present itself as current (see `ingest.persist._upsert_finding`)."""
         return [self.ingest_workflow_run(run) for run in self.unseen_runs(limit=limit)]
 
     def ingest_workflow_run(self, run: WorkflowRunInfo) -> IntakeOutcome:

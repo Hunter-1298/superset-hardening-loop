@@ -346,10 +346,22 @@ def header_context(engine: Engine, branch: str) -> HeaderContext:
     timestamp the database knows about, so the header never invents a value."""
     with session_scope(engine) as db:
         run = db.exec(
-            select(ScanRun).where(ScanRun.source_branch == branch).order_by(col(ScanRun.id).desc())
+            select(ScanRun)
+            .where(ScanRun.source_branch == branch)
+            .order_by(
+                col(ScanRun.finished_at).desc(),
+                col(ScanRun.ingested_at).desc(),
+                col(ScanRun.id).desc(),
+            )
         ).first()
         if run is None:
-            run = db.exec(select(ScanRun).order_by(col(ScanRun.id).desc())).first()
+            run = db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at).desc(),
+                    col(ScanRun.ingested_at).desc(),
+                    col(ScanRun.id).desc(),
+                )
+            ).first()
         last_event = db.exec(select(Event.ts).order_by(col(Event.ts).desc())).first()
         if run is not None:
             db.expunge(run)

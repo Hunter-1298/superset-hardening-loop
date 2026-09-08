@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -16,9 +16,16 @@ from sqlmodel import Session, col, select
 from hardening_loop.ci import WorkflowRun, write_scan_manifest
 from hardening_loop.cli import main
 from hardening_loop.config import BASELINE_SHA, FORK_REPO, Settings
+from hardening_loop.dashboard.app import header_context
 from hardening_loop.db import open_database
 from hardening_loop.devin.fake import FakeDevin
-from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus, ScanRunStatus
+from hardening_loop.domain.enums import (
+    GateMode,
+    ImageTarget,
+    IntakeStatus,
+    ScanRunStatus,
+    WorkItemState,
+)
 from hardening_loop.github.fake import FakeGitHub
 from hardening_loop.ingest.evidence import RUNTIME_RECORDS, load_source_pyproject, sha256_file
 from hardening_loop.ingest.intake import (
@@ -31,6 +38,9 @@ from hardening_loop.ingest.intake import (
 from hardening_loop.models.tables import Finding, ScanIntake, ScanJob, ScanRun
 from hardening_loop.orchestrator.engine import Orchestrator
 from hardening_loop.replay.bundle import stage_runtime_records
+from hardening_loop.replay.scenarios import DEP_FILES
+from hardening_loop.replay.world import World
+from hardening_loop.report.run_report import select_runs
 from tests.test_ci_helpers import _images, _stage_jobs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +60,7 @@ def _bundle(
     head_sha: str | None = None,
     job_results: dict[str, str] | None = None,
     drop: str | None = None,
+    captured_at: datetime = datetime(2026, 9, 8, 3, tzinfo=UTC),
 ) -> Path:
     """Stage a complete evidence tree the way the workflow's scan-manifest job leaves it."""
     out.mkdir(parents=True, exist_ok=True)
@@ -85,7 +96,7 @@ def _bundle(
         expected_jobs=expected,
         gate_files={"lean-policy": gate},
         attach_dirs=("runtime",) if results else (),
-        now=datetime(2026, 9, 8, 3, tzinfo=UTC),
+        now=captured_at,
     )
     return out
 
@@ -457,28 +468,51 @@ def test_backlog_deeper_than_one_poll_is_drained_exactly_once(
     engine: Engine, gh: FakeGitHub, tmp_path: Path
 ) -> None:
     """Seen attempts are skipped before `limit` is applied, so older never-seen runs are reached
-    on later polls instead of being shadowed forever by the newest already-ingested ones."""
+    on later polls instead of being shadowed forever by the newest already-ingested ones. Each
+    batch is ingested oldest first, and whatever the ingestion order, the run that finished last
+    is the latest one everywhere."""
     run_ids = [RUN_ID + i for i in range(12)]
-    for rid in run_ids:
-        _publish(
-            gh, _bundle(tmp_path / f"tree-{rid}", run_id=rid), run_id=rid, head_sha=BASELINE_SHA
+    for n, rid in enumerate(run_ids):
+        tree = _bundle(
+            tmp_path / f"tree-{rid}",
+            run_id=rid,
+            captured_at=datetime(2026, 9, 8, 3, tzinfo=UTC) + timedelta(hours=n),
         )
+        _publish(gh, tree, run_id=rid, head_sha=BASELINE_SHA)
     svc = _service(engine, gh, tmp_path)
 
-    seen: list[str] = []
+    batches: list[list[str]] = []
     for expected in (5, 5, 2, 0):
         gh.workflow_runs_yielded = 0
         out = svc.poll(limit=5)
         assert len(out) == expected
         assert all(o.status is IntakeStatus.ingested and not o.seen_before for o in out)
-        seen.extend(o.external_run_id for o in out)
-    # Newest first; the listing is only read as far as needed to find `limit` unseen runs.
-    assert seen == [f"gha:{FORK_REPO}:{rid}:1" for rid in reversed(run_ids)]
+        batches.append([o.external_run_id for o in out])
+    ext = [f"gha:{FORK_REPO}:{rid}:1" for rid in run_ids]
+    # The listing is newest first and only read as far as needed to find `limit` unseen runs;
+    # the selected batch is then ingested in scan order.
+    assert batches == [ext[7:12], ext[2:7], ext[0:2], []]
+    seen = [e for b in batches for e in b]
     assert len(seen) == len(set(seen)) == 12
     assert gh.workflow_runs_yielded == 12, "the empty poll had to walk the whole listing"
-    with Session(engine) as db:
-        assert len(db.exec(select(ScanRun)).all()) == 12
     assert len(_intakes(engine)) == 12
+    with Session(engine) as db:
+        runs = db.exec(select(ScanRun).order_by(col(ScanRun.id))).all()
+        assert len(runs) == 12
+        newest = max(runs, key=ScanRun.chronology)
+        assert newest.external_run_id == ext[-1]
+        assert newest.id != runs[-1].id, "the last-ingested run is an older backlog entry"
+        assert [r.external_run_id for r in sorted(runs, key=ScanRun.chronology)] == ext
+    settings = Settings(
+        data_dir=tmp_path / "data", database_file="c.sqlite3", repo_root=ROOT, operator_mode=True
+    )
+    with Session(engine) as db:
+        latest = Orchestrator(engine, gh, FakeDevin(), settings)._latest_main_run(db, None)
+    assert latest is not None and latest.external_run_id == ext[-1]
+    header = header_context(engine, "main").latest_run
+    assert header is not None and header.external_run_id == ext[-1]
+    _, report_latest = select_runs(list(runs), fork_repo=FORK_REPO, branch="main")
+    assert report_latest is not None and report_latest.external_run_id == ext[-1]
 
 
 # ------------------------------------------------------------------------ orchestrator + CLI
@@ -501,6 +535,53 @@ def test_tick_polls_scans_and_reports_counts(gh: FakeGitHub, tmp_path: Path) -> 
     assert (second.scans_ingested, second.scans_rejected) == (0, 0)
     assert second.work_items_created == 0
     assert len(_intakes(engine)) == 2
+
+
+def test_scan_api_failure_does_not_stall_sessions_prs_or_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An Actions/artifact API outage is reported on the tick and retried later; the sessions,
+    PRs and human labels already in flight keep progressing meanwhile."""
+    w = World(tmp_path / "replay.sqlite3")
+    w.baseline("cryptography")
+    w.tick()
+    wi = w.only_wi()
+    assert wi.state is WorkItemState.session_active
+
+    def outage(*_: object, **__: object) -> object:
+        raise httpx.ConnectError("actions api unreachable")
+
+    monkeypatch.setattr(w.gh, "list_workflow_runs", outage)
+    output = {
+        "packages": [{"name": "cryptography", "from": "42.0.2", "to": "42.0.4"}],
+        "regenerated_with": "./scripts/uv-pip-compile.sh",
+    }
+    _url, number = w.devin_opens_pr(wi, output, files=DEP_FILES, acus=1.0)
+    report = w.tick()
+    assert report.scan_intake_error == "ConnectError: actions api unreachable"
+    assert (report.scans_ingested, report.scans_rejected) == (0, 0)
+    assert report.sessions_polled >= 1
+    assert w.state_of(wi.id or 0) is WorkItemState.checks_running, "session outcome was applied"
+
+    head = w.gh.prs[number].head_sha
+    w.ci(head)
+    assert w.tick().scan_intake_error is not None
+    w.review_done(head)
+    assert w.tick().scan_intake_error is not None
+    assert w.state_of(wi.id or 0) is WorkItemState.ready_for_human, "PR checks were polled"
+    w.gh.approve(number, "Hunter-1298", at=w.clock.now())
+    report = w.tick()
+    assert report.scan_intake_error is not None and report.prs_polled >= 1
+    pr_row = w.pr_row(wi.id or 0)
+    assert pr_row is not None and pr_row.approved_by == "Hunter-1298", "PR approval was polled"
+    w.gh.close_issue(FORK_REPO, wi.issue_number or 0)
+    report = w.tick()
+    assert report.scan_intake_error is not None and report.labels_applied >= 1
+    assert w.state_of(wi.id or 0) is WorkItemState.abandoned, "issue state was polled"
+    assert w.scan_intakes() == [], "no intake row is written for runs that were never listed"
+
+    monkeypatch.undo()
+    assert w.tick().scan_intake_error is None
 
 
 def _closure_stamps(engine: Engine) -> list[datetime | None]:

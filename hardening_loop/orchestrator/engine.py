@@ -124,6 +124,7 @@ class TickReport:
     sessions_polled: int = 0
     prs_polled: int = 0
     labels_applied: int = 0
+    scan_intake_error: str | None = None
 
 
 class Orchestrator:
@@ -156,7 +157,14 @@ class Orchestrator:
         one explicitly; issues for queued items are opened only while `auto_open_issues` is on,
         otherwise a work item gets its issue when it is launched."""
         report = TickReport()
-        report.scans_ingested, report.scans_rejected = self.poll_scans()
+        try:
+            report.scans_ingested, report.scans_rejected = self.poll_scans()
+        except Exception as exc:
+            # A failing Actions/artifact API must not stall the sessions, PRs and labels in
+            # flight. Nothing is recorded for a run whose intake did not finish, so it is simply
+            # retried next tick: intake stays fail-closed.
+            report.scan_intake_error = f"{type(exc).__name__}: {exc}"
+            log.warning("scan intake failed this tick, continuing: %s", report.scan_intake_error)
         report.work_items_created = len(self.create_work_items())
         if auto_dispatch:
             created, adopted, issues = self.dispatch()
@@ -446,12 +454,19 @@ class Orchestrator:
         return wi, True
 
     def _latest_main_run(self, db: DbSession, run_id: int | None) -> ScanRun | None:
+        """The remediation branch's most recent scan by when it finished, not by when the controller
+        happened to ingest it, so a backlog brought in out of order never presents stale evidence
+        as current."""
         if run_id is not None:
             return db.get(ScanRun, run_id)
         return db.exec(
             select(ScanRun)
             .where(ScanRun.source_repo == FORK_REPO, ScanRun.source_branch == REMEDIATION_BRANCH)
-            .order_by(col(ScanRun.ingested_at).desc(), col(ScanRun.id).desc())
+            .order_by(
+                col(ScanRun.finished_at).desc(),
+                col(ScanRun.ingested_at).desc(),
+                col(ScanRun.id).desc(),
+            )
         ).first()
 
     # ------------------------------------------------------------------ dispatch

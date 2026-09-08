@@ -27,6 +27,7 @@ from hardening_loop.models.tables import (
     ScanIntake,
     ScanRun,
     Session,
+    Sighting,
     WorkItem,
 )
 from hardening_loop.orchestrator.engine import Orchestrator, TickReport
@@ -199,6 +200,19 @@ class World:
     def scan_runs(self) -> list[ScanRun]:
         with session_scope(self.engine) as db:
             rows = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+            for r in rows:
+                db.expunge(r)
+            return rows
+
+    def sightings(self, finding_id: int) -> list[Sighting]:
+        with session_scope(self.engine) as db:
+            rows = list(
+                db.exec(
+                    select(Sighting)
+                    .where(Sighting.finding_id == finding_id)
+                    .order_by(col(Sighting.id))
+                ).all()
+            )
             for r in rows:
                 db.expunge(r)
             return rows

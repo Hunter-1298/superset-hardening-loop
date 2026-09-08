@@ -265,7 +265,13 @@ def _day(ts: datetime | None) -> str | None:
 
 def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime) -> Metrics:
     with session_scope(engine) as db:
-        runs = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+        runs = list(
+            db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at), col(ScanRun.ingested_at), col(ScanRun.id)
+                )
+            ).all()
+        )
         findings = list(db.exec(select(Finding)).all())
         items = list(db.exec(select(WorkItem).order_by(col(WorkItem.id))).all())
         prs = list(db.exec(select(PullRequest)).all())
@@ -375,7 +381,7 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
         for r in runs
         if r.source_branch == "main" and r.status is ScanRunStatus.complete and not r.is_baseline
     ] or [r for r in runs if r.source_branch == "main"]
-    latest_main = main_runs[-1] if main_runs else None
+    latest_main = max(main_runs, key=ScanRun.chronology) if main_runs else None
     gate_ready = (
         next(s for s in run_summaries if s.id == latest_main.id).gate["ready_for_enforce"]
         if latest_main is not None

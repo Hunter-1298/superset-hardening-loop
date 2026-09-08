@@ -88,6 +88,16 @@ class ScanRun(SQLModel, table=True):
     # NULL means the evaluation is still owed, however the run got here (poll, CLI, crash window).
     closure_applied_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
 
+    def chronology(self) -> tuple[datetime, datetime, int]:
+        """Sort key placing runs in the order the scans finished, not the order the controller
+        ingested them (a backlog is drained newest first). Runs without a finish time sort first,
+        like NULLs in an ascending SQL `ORDER BY`."""
+        return (
+            self.finished_at or datetime.min.replace(tzinfo=UTC),
+            self.ingested_at,
+            self.id or 0,
+        )
+
 
 class ScanIntake(SQLModel, table=True):
     """One attempt to bring a completed fork `security-scan` run into the controller. Every run

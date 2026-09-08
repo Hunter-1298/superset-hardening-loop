@@ -49,6 +49,9 @@ class Seed:
     def with_version(self, version: str) -> Seed:
         return replace(self, pkg_version=version)
 
+    def with_reporters(self, *scanners: Scanner) -> Seed:
+        return replace(self, reported_by=frozenset(scanners))
+
 
 @dataclass(frozen=True)
 class ConfigSeed:

@@ -259,7 +259,10 @@ def select_runs(
 ) -> tuple[ScanRun | None, ScanRun | None]:
     """Baseline = the flagged baseline run (else the oldest run on `branch`); latest = the newest
     successful non-PR run of `branch`, falling back to the newest run of `branch` of any status."""
-    on_branch = [r for r in runs if r.source_repo == fork_repo and r.source_branch == branch]
+    on_branch = sorted(
+        (r for r in runs if r.source_repo == fork_repo and r.source_branch == branch),
+        key=ScanRun.chronology,
+    )
     baseline = next((r for r in on_branch if r.is_baseline), on_branch[0] if on_branch else None)
     closing = [
         r for r in on_branch if r.status is ScanRunStatus.complete and r.trigger in CLOSING_TRIGGERS
@@ -375,7 +378,13 @@ def build_report(
     upstream_pins_source: str | None,
 ) -> ReportBody:
     with session_scope(engine) as db:
-        runs = list(db.exec(select(ScanRun).order_by(col(ScanRun.id))).all())
+        runs = list(
+            db.exec(
+                select(ScanRun).order_by(
+                    col(ScanRun.finished_at), col(ScanRun.ingested_at), col(ScanRun.id)
+                )
+            ).all()
+        )
         findings = list(db.exec(select(Finding).order_by(col(Finding.id))).all())
         items = list(db.exec(select(WorkItem).order_by(col(WorkItem.id))).all())
         prs = list(db.exec(select(PullRequest)).all())
