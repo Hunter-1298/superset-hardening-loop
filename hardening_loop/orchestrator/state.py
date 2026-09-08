@@ -25,6 +25,7 @@ class WorkItemEvent(StrEnum):
     checks_red = "checks_red"
     retry_sent = "retry_sent"
     retries_exhausted = "retries_exhausted"
+    new_head_pushed = "new_head_pushed"  # a push replaced the reviewed commit
     review_completed = "review_completed"
     review_not_observed = "review_not_observed"
     human_merged = "human_merged"
@@ -80,11 +81,13 @@ WORK_ITEM_TRANSITIONS: dict[tuple[WorkItemState, WorkItemEvent], WorkItemState] 
     (_W.review_pending, _E.checks_red): _W.checks_failed,  # new push invalidated checks
     (_W.review_pending, _E.blocked): _W.needs_human,
     (_W.review_pending, _E.pr_closed_unmerged): _W.needs_human,
+    (_W.review_pending, _E.new_head_pushed): _W.checks_running,
     (_W.ready_for_human, _E.human_merged): _W.merged,
     (_W.ready_for_human, _E.checks_red): _W.checks_failed,
     (_W.ready_for_human, _E.pr_closed_unmerged): _W.needs_human,
     (_W.ready_for_human, _E.human_abandoned): _W.abandoned,
     (_W.ready_for_human, _E.blocked): _W.needs_human,
+    (_W.ready_for_human, _E.new_head_pushed): _W.checks_running,
     (_W.merged, _E.rescan_started): _W.awaiting_rescan,
     (_W.awaiting_rescan, _E.rescan_verified): _W.verified,
     (_W.awaiting_rescan, _E.rescan_shows_present): _W.needs_human,

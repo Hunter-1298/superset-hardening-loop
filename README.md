@@ -17,7 +17,7 @@ Baseline: Superset `6.1.0` = `c83fb2bb1dcfac41ac51bcebd82471f4a7180d18` (`fixtur
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 
-hardening-loop replay --out data/replay      # R0-R16, N1-N5, DEMO; outbound network blocked
+hardening-loop replay --out data/replay      # R0-R20, N1-N5, DEMO; outbound network blocked
 hardening-loop serve --replay --db data/replay/replay.sqlite3
 # open http://127.0.0.1:8080
 ```
