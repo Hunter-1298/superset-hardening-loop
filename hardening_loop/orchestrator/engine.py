@@ -25,7 +25,7 @@ from hardening_loop.classify.group import group_key_for, title_for
 from hardening_loop.config import FORK_REPO, REMEDIATION_BRANCH, Settings, assert_repo_allowed
 from hardening_loop.db import session_scope
 from hardening_loop.devin.enums import Outcome, SessionSnapshot
-from hardening_loop.devin.protocol import CreateSessionRequest, DevinClient
+from hardening_loop.devin.protocol import CreateSessionRequest, DevinClient, ReviewStatus
 from hardening_loop.devin.schemas import schema_for, validate_output
 from hardening_loop.domain.enums import (
     ACTIVE_WORK_ITEM_STATES,
@@ -38,7 +38,7 @@ from hardening_loop.domain.enums import (
     Severity,
     WorkItemState,
 )
-from hardening_loop.github.protocol import CheckRun, CommitStatus, GitHubClient, PullRequestInfo
+from hardening_loop.github.protocol import CheckRun, GitHubClient, PullRequestInfo
 from hardening_loop.ingest.intake import IntakeExpectation, ScanIntakeService
 from hardening_loop.models.tables import (
     Event,
@@ -235,7 +235,7 @@ class Orchestrator:
             return before
         wi.state = after
         wi.updated_at = self.clock.now()
-        if event is WorkItemEvent.blocked:
+        if event is WorkItemEvent.blocked or after is WorkItemState.needs_human:
             wi.blocked_reason = reason
         db.add(wi)
         self._event(
@@ -1199,7 +1199,6 @@ class Orchestrator:
             return  # a human owns it; we only track merge/close above
 
         checks = self.gh.list_check_runs(self.repo, pr.head_sha)
-        statuses = self.gh.list_commit_statuses(self.repo, pr.head_sha)
         self._record_checks(db, row, pr.head_sha, checks)
         self._record_depth(db, wi, row, pr.head_sha, checks)
         verdict = self._checks_verdict(checks)
@@ -1226,7 +1225,7 @@ class Orchestrator:
             self._wi(db, wi, WorkItemEvent.checks_green, pr.head_sha, actor="ci")
             self._raise_level(db, wi, row, LifecycleLevel.ci_green, "ci_green")
         if wi.state is WorkItemState.review_pending:
-            self._check_review(db, wi, row, pr, statuses)
+            self._check_review(db, wi, row, pr)
         if wi.state is WorkItemState.ready_for_human:
             self._check_approval(db, wi, row, pr)
 
@@ -1383,21 +1382,79 @@ class Orchestrator:
         wi: WorkItem,
         row: PullRequest,
         pr: PullRequestInfo,
-        statuses: list[CommitStatus],
     ) -> None:
-        ctx = self.settings.devin_review_status_context
-        if ctx is None:
-            self._wi(db, wi, WorkItemEvent.review_not_observed, "devin_review_context_unknown")
+        """Devin Review through the v3 `pr-reviews` resource, always about exactly `pr.head_sha`.
+
+        Trigger once per head (or reuse a review Devin already has for that commit), then poll by
+        `commit_sha`. `completed` is the only state that advances the item; the API exposes no
+        verdict or findings count, so the review's comments are for the human approver to weigh.
+        `errored` earns one re-trigger; a second error, `cancelled`, a review that names a
+        different commit, or no terminal state within `review_timeout_minutes` all hand the item
+        to a human instead of being guessed around."""
+        head = pr.head_sha
+        try:
+            snap = self.devin.get_review(pr.url, head)
+            if snap is None or (
+                snap.status.is_terminal and snap.status is not ReviewStatus.completed
+            ):
+                if snap is not None and snap.status is ReviewStatus.errored:
+                    if self._review_retriggered(db, head):
+                        self._wi(
+                            db,
+                            wi,
+                            WorkItemEvent.review_not_observed,
+                            f"devin review errored twice on {head[:12]}",
+                        )
+                        return
+                    reason = f"review errored on {head[:12]}, re-triggered"
+                elif snap is not None:
+                    self._wi(
+                        db,
+                        wi,
+                        WorkItemEvent.review_not_observed,
+                        f"devin review {snap.status.value} on {head[:12]}",
+                    )
+                    return
+                else:
+                    reason = f"triggered for {head[:12]}"
+                snap = self.devin.trigger_review(pr.url)
+                self._event(
+                    db,
+                    entity_type="pull_request",
+                    entity_id=row.id or 0,
+                    event="review_triggered",
+                    from_state=None,
+                    to_state=snap.commit_sha,
+                    reason=reason,
+                )
+        except Exception as exc:
+            log.warning("devin review for %s@%s failed: %s", pr.url, head[:12], exc)
+            self._review_timeout(db, wi, head, f"devin review API error: {exc}")
             return
-        matching = [s for s in statuses if s.context == ctx]
-        done = [s for s in matching if s.state in ("success", "failure", "error")]
-        if done:
-            row.review_status = done[0].state
-            self._wi(
-                db, wi, WorkItemEvent.review_completed, f"{ctx}={done[0].state}", actor="devin"
-            )
+        if snap.commit_sha != head:
+            # The PR moved between our GitHub read and Devin's; next tick sees the new head.
+            log.info("review names %s, PR head is %s; waiting", snap.commit_sha[:12], head[:12])
+            return
+        row.review_id = f"{snap.repo_path}#{snap.pr_number}@{snap.commit_sha}"
+        row.review_head_sha = snap.commit_sha
+        row.review_status = snap.status.value
+        if snap.status is ReviewStatus.completed:
+            self._wi(db, wi, WorkItemEvent.review_completed, row.review_id, actor="devin")
             self._raise_level(db, wi, row, LifecycleLevel.review_completed, "review_completed")
             return
+        self._review_timeout(db, wi, head, f"devin review still {snap.status.value}")
+
+    def _review_retriggered(self, db: DbSession, head: str) -> bool:
+        rows = db.exec(
+            select(Event).where(
+                Event.entity_type == "pull_request",
+                Event.event == "review_triggered",
+                Event.to_state == head,
+            )
+        ).all()
+        return any((r.reason or "").startswith("review errored") for r in rows)
+
+    def _review_timeout(self, db: DbSession, wi: WorkItem, head: str, why: str) -> None:
         green_at = self._last_event_ts(db, wi, WorkItemEvent.checks_green)
         if green_at is not None and self.clock.now() - green_at > timedelta(
             minutes=self.settings.review_timeout_minutes
@@ -1406,7 +1463,7 @@ class Orchestrator:
                 db,
                 wi,
                 WorkItemEvent.review_not_observed,
-                f"no `{ctx}` status on {pr.head_sha[:12]}",
+                f"{why} after {self.settings.review_timeout_minutes} min on {head[:12]}",
             )
 
     def _check_approval(

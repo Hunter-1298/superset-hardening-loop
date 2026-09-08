@@ -3,7 +3,9 @@ sees `SessionSnapshot`s. Records every message and every create request (prompt,
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from hardening_loop.devin.enums import (
@@ -12,7 +14,7 @@ from hardening_loop.devin.enums import (
     SessionPullRequest,
     SessionSnapshot,
 )
-from hardening_loop.devin.protocol import CreateSessionRequest
+from hardening_loop.devin.protocol import CreateSessionRequest, ReviewSnapshot, ReviewStatus
 
 
 class FakeDevinError(RuntimeError):
@@ -39,12 +41,25 @@ class _Session:
     updated_at: int = 0
 
 
+@dataclass
+class _Review:
+    pr_url: str
+    commit_sha: str
+    status: ReviewStatus
+    created_at: int
+
+
 class FakeDevin:
     def __init__(self) -> None:
         self.sessions: dict[str, _Session] = {}
         self.attachments: dict[str, bytes] = {}
         self.calls: list[tuple[str, str]] = []
         self._n = 0
+        # Reviews always target the PR's current head; the double learns heads from scenarios,
+        # either pinned per URL or through a resolver (the replay world points it at FakeGitHub).
+        self.pr_heads: dict[str, str] = {}
+        self.head_resolver: Callable[[str], str | None] | None = None
+        self.reviews: dict[tuple[str, str], _Review] = {}
         self.fail_next: dict[str, Exception] = {}
         # Methods that kill the controller before running / after taking effect (once each).
         self.crash_before: set[str] = set()
@@ -106,6 +121,23 @@ class FakeDevin:
             status_detail=DevinStatusDetail.working,
             acus_consumed=acus,
         )
+
+    def set_pr_head(self, pr_url: str, commit_sha: str) -> None:
+        self.pr_heads[pr_url] = commit_sha
+
+    def review_status(self, pr_url: str, commit_sha: str) -> ReviewStatus | None:
+        r = self.reviews.get((pr_url, commit_sha))
+        return r.status if r else None
+
+    def finish_review(
+        self, pr_url: str, commit_sha: str, status: ReviewStatus = ReviewStatus.completed
+    ) -> None:
+        """Move a triggered review to a terminal state. A review the controller never asked for
+        cannot finish: that catches an orchestrator that skips the trigger."""
+        r = self.reviews.get((pr_url, commit_sha))
+        if r is None:
+            raise FakeDevinError(f"no review was triggered for {pr_url}@{commit_sha[:12]}")
+        r.status = status
 
     def created_requests(self) -> list[CreateSessionRequest]:
         return [s.request for s in self.sessions.values() if s.request.prompt != "(pre-existing)"]
@@ -188,3 +220,38 @@ class FakeDevin:
     def last_user_facing_question(self, session_id: str) -> str | None:
         self._touch("last_user_facing_question", session_id)
         return self.sessions[session_id].question
+
+    def trigger_review(self, pr_url: str) -> ReviewSnapshot:
+        self._touch("trigger_review", pr_url)
+        head = self.pr_heads.get(pr_url)
+        if head is None and self.head_resolver is not None:
+            head = self.head_resolver(pr_url)
+        if head is None:
+            raise FakeDevinError(f"unknown pull request {pr_url}")
+        self.clock_seconds += 1
+        r = self.reviews.get((pr_url, head))
+        if r is None or r.status.is_terminal:
+            r = _Review(pr_url, head, ReviewStatus.pending, self.clock_seconds)
+            self.reviews[(pr_url, head)] = r
+        self._crash_after("trigger_review")
+        return self._review_snap(r)
+
+    def get_review(self, pr_url: str, commit_sha: str) -> ReviewSnapshot | None:
+        self._touch("get_review", f"{pr_url}@{commit_sha}")
+        r = self.reviews.get((pr_url, commit_sha))
+        if r is None:
+            return None
+        if r.status is ReviewStatus.pending:
+            r.status = ReviewStatus.running
+        return self._review_snap(r)
+
+    @staticmethod
+    def _review_snap(r: _Review) -> ReviewSnapshot:
+        prefix, _, number = r.pr_url.rpartition("/pull/")
+        return ReviewSnapshot(
+            status=r.status,
+            repo_path=prefix.removeprefix("https://"),
+            pr_number=int(number),
+            commit_sha=r.commit_sha,
+            created_at=datetime.fromtimestamp(r.created_at, tz=UTC),
+        )

@@ -8,6 +8,8 @@ Endpoints, from the published v3 OpenAPI document:
     POST /v3/organizations/{org_id}/sessions/{devin_id}/messages -> SessionResponse
     GET  /v3/organizations/{org_id}/sessions/{devin_id}/messages -> Paginated[SessionMessage]
     POST /v3/organizations/{org_id}/attachments  (multipart)     -> AttachmentResponse
+    POST /v3/organizations/{org_id}/pr-reviews                   -> PrReviewResponse
+    GET  /v3/organizations/{org_id}/pr-reviews?pr_url&commit_sha -> PrReviewResponse | 404
 
 Responses are parsed into `SessionSnapshot`, whose enums reject unknown `status`/`status_detail`
 values, so an API change surfaces as an error the orchestrator turns into `needs_human` rather than
@@ -23,7 +25,7 @@ import httpx
 from pydantic import SecretStr, ValidationError
 
 from hardening_loop.devin.enums import SessionSnapshot
-from hardening_loop.devin.protocol import CreateSessionRequest
+from hardening_loop.devin.protocol import CreateSessionRequest, ReviewSnapshot
 
 RETRY_STATUSES = frozenset({429, 502, 503, 504})
 PAGE_SIZE = 100
@@ -147,9 +149,32 @@ class DevinRest:
             params["after"] = data["end_cursor"]
         return latest[1] if latest else None
 
+    def trigger_review(self, pr_url: str) -> ReviewSnapshot:
+        """Ask for a Devin Review of the PR. The API always reviews the PR's *current* head; the
+        caller compares `commit_sha` with the head it meant and treats a difference as a push."""
+        data = self._request(
+            "POST", f"/organizations/{self._org}/pr-reviews", json={"pr_url": pr_url}
+        ).json()
+        return _review(data)
+
+    def get_review(self, pr_url: str, commit_sha: str) -> ReviewSnapshot | None:
+        """Latest review of exactly `commit_sha`; `None` when Devin has never reviewed that commit
+        (the documented 404)."""
+        resp = self._request(
+            "GET",
+            f"/organizations/{self._org}/pr-reviews",
+            params={"pr_url": pr_url, "commit_sha": commit_sha},
+            allow_404=True,
+        )
+        if resp.status_code == 404:
+            return None
+        return _review(resp.json())
+
     # ------------------------------------------------------------------ transport
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def _request(
+        self, method: str, path: str, *, allow_404: bool = False, **kwargs: Any
+    ) -> httpx.Response:
         resp: httpx.Response | None = None
         for attempt in range(4):
             try:
@@ -162,6 +187,8 @@ class DevinRest:
             if resp.status_code in RETRY_STATUSES and attempt < 3:
                 self._sleep(2**attempt)
                 continue
+            if resp.status_code == 404 and allow_404:
+                return resp
             if resp.status_code >= 400:
                 raise DevinError(f"{method} {path} -> {resp.status_code}: {_problem(resp)}")
             return resp
@@ -185,6 +212,13 @@ def _snapshot(data: dict[str, Any]) -> SessionSnapshot:
         return SessionSnapshot.model_validate(data)
     except ValidationError as exc:
         raise DevinError(f"unexpected SessionResponse shape: {exc.errors()[:3]}") from None
+
+
+def _review(data: dict[str, Any]) -> ReviewSnapshot:
+    try:
+        return ReviewSnapshot.model_validate(data)
+    except ValidationError as exc:
+        raise DevinError(f"unexpected PrReviewResponse shape: {exc.errors()[:3]}") from None
 
 
 __all__ = ["DevinError", "DevinRest"]
