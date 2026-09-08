@@ -59,6 +59,8 @@ from hardening_loop.orchestrator.closer import (
     sightings_for,
     validate_closing_run,
 )
+from hardening_loop.orchestrator.launch import LaunchAction, LaunchPreview, LaunchResult
+from hardening_loop.orchestrator.launch import preview as launch_preview_for
 from hardening_loop.orchestrator.policy import (
     diff_policy_violations,
     dispatch_allowed,
@@ -141,10 +143,19 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ tick
 
-    def tick(self) -> TickReport:
+    def tick(self, *, auto_dispatch: bool = True) -> TickReport:
+        """One control-loop iteration. With `auto_dispatch=False` (operator mode) issues are still
+        opened and crashed dispatches recovered, but no new session is created unless an operator
+        launches one explicitly."""
         report = TickReport()
         report.work_items_created = len(self.create_work_items())
-        created, adopted, issues = self.dispatch()
+        if auto_dispatch:
+            created, adopted, issues = self.dispatch()
+        else:
+            issues = self.open_issues()
+            created = 0
+            with session_scope(self.engine) as db:
+                adopted = self._recover_dispatching(db)
         report.sessions_created, report.sessions_adopted, report.issues_created = (
             created,
             adopted,
@@ -477,37 +488,188 @@ class Orchestrator:
         with session_scope(self.engine) as db:
             queued = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.queued)).all()
             for wi in queued:
-                assert wi.id is not None
-                members = db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all()
-                labels = [CONTROLLER_LABEL, KIND_LABELS[wi.kind], f"severity:{wi.severity.value}"]
-                if wi.risk is Risk.high:
-                    labels.append("risk:high")
-                if not dispatch_allowed(wi.severity, []):
-                    labels.append(AWAITING_DISPATCH_LABEL)
-                try:
-                    issue = self.gh.create_issue(
-                        self.repo,
-                        f"[hardening-loop] {wi.title}",
-                        self._issue_body(wi, members),
-                        labels,
-                    )
-                except Exception as exc:
-                    self._event(
-                        db,
-                        entity_type="work_item",
-                        entity_id=wi.id,
-                        event="issue_create_failed",
-                        from_state=wi.state.value,
-                        to_state=wi.state.value,
-                        reason=str(exc)[:300],
-                    )
-                    continue
-                wi.issue_number = issue.number
-                wi.issue_url = issue.url
-                wi.issue_opened_at = self.clock.now()
-                self._wi(db, wi, WorkItemEvent.issue_created, issue.url)
-                n += 1
+                if self._open_issue(db, wi):
+                    n += 1
         return n
+
+    def _open_issue(self, db: DbSession, wi: WorkItem) -> bool:
+        assert wi.id is not None
+        members = db.exec(select(Finding).where(Finding.work_item_id == wi.id)).all()
+        labels = [CONTROLLER_LABEL, KIND_LABELS[wi.kind], f"severity:{wi.severity.value}"]
+        if wi.risk is Risk.high:
+            labels.append("risk:high")
+        if not dispatch_allowed(wi.severity, []):
+            labels.append(AWAITING_DISPATCH_LABEL)
+        try:
+            issue = self.gh.create_issue(
+                self.repo,
+                f"[hardening-loop] {wi.title}",
+                self._issue_body(wi, members),
+                labels,
+            )
+        except Exception as exc:
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=wi.id,
+                event="issue_create_failed",
+                from_state=wi.state.value,
+                to_state=wi.state.value,
+                reason=str(exc)[:300],
+            )
+            return False
+        wi.issue_number = issue.number
+        wi.issue_url = issue.url
+        wi.issue_opened_at = self.clock.now()
+        self._wi(db, wi, WorkItemEvent.issue_created, issue.url)
+        return True
+
+    # ------------------------------------------------------------------ operator launch
+
+    def launch_preview(self, work_item_id: int) -> LaunchPreview:
+        """What an operator launch of `work_item_id` would do, and why it may be refused."""
+        with session_scope(self.engine) as db:
+            wi = db.get(WorkItem, work_item_id)
+            if wi is None:
+                raise LookupError(f"work item {work_item_id} not found")
+            return self._launch_preview(db, wi)
+
+    def _launch_preview(self, db: DbSession, wi: WorkItem) -> LaunchPreview:
+        assert wi.id is not None
+        budget = self._acu_budget_position(db)
+        return launch_preview_for(
+            work_item_id=wi.id,
+            state=wi.state,
+            severity=wi.severity,
+            has_issue=wi.issue_number is not None,
+            acu_cap=wi.acu_cap,
+            active_sessions=self._active_session_count(db),
+            max_concurrent_sessions=self.settings.max_concurrent_sessions,
+            acu_consumed=budget.consumed,
+            acu_outstanding=budget.outstanding,
+            global_acu_budget=self.settings.global_acu_budget,
+            repo=self.repo,
+            branch=REMEDIATION_BRANCH,
+        )
+
+    def launch(self, work_item_id: int, *, operator: str) -> LaunchResult:
+        """Explicit operator dispatch of one work item. Records the decision as an event and as a
+        `dispatch:approved` label plus comment on the tracking issue (GitHub stays the audit
+        trail), then runs the ordinary `_dispatch_one` path with every safeguard it has."""
+        with session_scope(self.engine) as db:
+            wi = db.get(WorkItem, work_item_id)
+            if wi is None:
+                raise LookupError(f"work item {work_item_id} not found")
+            pv = self._launch_preview(db, wi)
+            if not pv.eligible:
+                reason = pv.block.value if pv.block else "ineligible"
+                self._event(
+                    db,
+                    entity_type="work_item",
+                    entity_id=work_item_id,
+                    event="operator_launch_refused",
+                    from_state=wi.state.value,
+                    to_state=wi.state.value,
+                    reason=f"{reason}; operator={operator}",
+                    actor="operator",
+                )
+                return LaunchResult("rejected", work_item_id, reason, issue_url=wi.issue_url)
+            if pv.action is LaunchAction.relaunch:
+                if wi.issue_number is not None:
+                    try:
+                        self.gh.remove_label(self.repo, wi.issue_number, HumanLabel.retry.value)
+                    except Exception as exc:
+                        log.debug("retry label absent on #%s: %s", wi.issue_number, exc)
+                wi.retries_used = 0
+                wi.active_session_id = None
+                wi.blocked_reason = None
+                self._wi(
+                    db, wi, WorkItemEvent.human_retry, f"operator={operator}", actor="operator"
+                )
+            if wi.state is WorkItemState.queued and not self._open_issue(db, wi):
+                return LaunchResult("failed", work_item_id, "issue_create_failed")
+            if wi.state is not WorkItemState.issue_open or wi.issue_number is None:
+                return LaunchResult(
+                    "rejected",
+                    work_item_id,
+                    f"unexpected_state:{wi.state.value}",
+                    issue_url=wi.issue_url,
+                )
+            try:
+                if pv.needs_dispatch_approval:
+                    self.gh.add_labels(
+                        self.repo, wi.issue_number, [HumanLabel.dispatch_approved.value]
+                    )
+                    try:
+                        self.gh.remove_label(self.repo, wi.issue_number, AWAITING_DISPATCH_LABEL)
+                    except Exception as exc:
+                        log.debug("awaiting label absent on #%s: %s", wi.issue_number, exc)
+                self.gh.comment_issue(
+                    self.repo,
+                    wi.issue_number,
+                    f"Operator `{operator}` launched Devin from the dashboard "
+                    f"(cap {wi.acu_cap:.0f} ACU, base `{REMEDIATION_BRANCH}`).",
+                )
+            except Exception as exc:
+                return self._launch_failed(db, wi, f"github:{exc}")
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=work_item_id,
+                event="operator_launch",
+                from_state=wi.state.value,
+                to_state=wi.state.value,
+                reason=f"operator={operator}; cap={wi.acu_cap:.0f}",
+                actor="operator",
+            )
+            labels = self.gh.get_issue(self.repo, wi.issue_number).labels
+            if not dispatch_allowed(wi.severity, labels):
+                return self._launch_failed(db, wi, "dispatch_not_allowed_after_labeling")
+            outcome = self._dispatch_one(db, wi)
+            db.flush()
+            row = (
+                db.exec(select(Session).where(Session.devin_id == wi.active_session_id)).first()
+                if wi.active_session_id
+                else None
+            )
+            reason = outcome
+            if outcome == "failed":
+                last = db.exec(
+                    select(Event)
+                    .where(Event.entity_type == "work_item", Event.entity_id == work_item_id)
+                    .order_by(col(Event.id).desc())
+                ).first()
+                reason = (
+                    wi.blocked_reason
+                    or (last.reason if last is not None and last.reason else None)
+                    or "dispatch_failed"
+                )[:300]
+            return LaunchResult(
+                outcome,
+                work_item_id,
+                reason,
+                session_id=row.devin_id if row else None,
+                session_url=row.url if row else None,
+                issue_url=wi.issue_url,
+            )
+
+    def launch_work_item(self, work_item_id: int, operator_actor: str) -> LaunchResult:
+        """Alias of `launch` with positional operator identity."""
+        return self.launch(work_item_id, operator=operator_actor)
+
+    def _launch_failed(self, db: DbSession, wi: WorkItem, reason: str) -> LaunchResult:
+        assert wi.id is not None
+        self._event(
+            db,
+            entity_type="work_item",
+            entity_id=wi.id,
+            event="operator_launch_failed",
+            from_state=wi.state.value,
+            to_state=wi.state.value,
+            reason=reason[:300],
+            actor="operator",
+        )
+        return LaunchResult("failed", wi.id, reason[:300], issue_url=wi.issue_url)
 
     def _issue_body(self, wi: WorkItem, members: Sequence[Finding]) -> str:
         rows = [

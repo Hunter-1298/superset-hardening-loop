@@ -26,7 +26,7 @@
     <div class="nav-footer">
       <a href="/api/metrics">Metrics JSON</a>
       <a href="/api/docs">API reference</a>
-      <span>Read-only. Approvals and merges happen in GitHub.</span>
+      {% if operator %}<span>Operator mode as <span class="mono">{{ operator.login }}</span>. Launches spend ACUs; approvals and merges still happen in GitHub.</span>{% else %}<span>Read-only. Approvals and merges happen in GitHub.</span>{% endif %}
     </div>
   </aside>
 
@@ -38,6 +38,7 @@
       <div class="topbar-status">
         <span><span class="sr-only">Latest scan</span>{% if latest_run %}<a href="/runs/{{ latest_run.id }}" class="mono">{{ latest_run.external_run_id }}</a> {{ ui.run_status_badge(latest_run.status) }} {{ ui.gate_badge(latest_run.gate.passed, latest_run.gate.mode) }}{% else %}<span class="muted">No scans yet</span>{% endif %}</span>
         <span class="muted"><span class="sr-only">Last updated</span><time datetime="{{ last_updated.isoformat() if last_updated else '' }}">{{ last_updated|dt }} UTC</time></span>
+        {% if operator %}<span class="mode-tag">Operator</span>{% endif %}
       </div>
     </header>
 

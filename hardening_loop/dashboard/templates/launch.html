@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Launch Devin · Work item #{{ wi.id }}{% endblock %}
+{% block content %}
+{{ ui.page_header("Launch Devin for work item #" ~ wi.id, wi.title ~ ". Devin gets the " ~ (wi.kind|kind_label).text|lower ~ " playbook, a cap of " ~ (wi.acu_cap|num(0)) ~ " ACU, and must open a pull request against " ~ preview.repo ~ " " ~ preview.branch ~ ".", crumbs=[("Work items", "/issues"), ("Work item #" ~ wi.id, "/issues/" ~ wi.id), ("Launch", None)]) }}
+
+<section class="stats compact" aria-label="Launch check">
+  {{ ui.stat("State", ui.state_badge(wi.state)) }}
+  {{ ui.stat("Severity", ui.severity_badge(wi.severity)) }}
+  {{ ui.stat("ACU cap", preview.acu_cap|num(0)) }}
+  {{ ui.stat("Session slots", preview.active_sessions ~ " of " ~ preview.max_concurrent_sessions ~ " in use") }}
+  {{ ui.stat("ACU committed after launch", (preview.acu_committed_after|num(0)) ~ " of " ~ (preview.global_acu_budget|num(0))) }}
+  {{ ui.stat("Findings", members|length) }}
+</section>
+
+{% if preview.eligible %}
+<div class="card launch-card">
+  <div class="card-body">
+    <p>Launching does the following, in order, and stops at the first refusal:</p>
+    <ol class="steps">
+      {% if preview.action.value == "relaunch" %}<li>Clears the retry counter and blocked reason (recorded as a human retry).</li>{% endif %}
+      {% if preview.needs_issue %}<li>Opens the tracking issue in <span class="mono">{{ preview.repo }}</span>.</li>{% else %}<li>Uses the existing tracking issue <a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>.</li>{% endif %}
+      {% if preview.needs_dispatch_approval %}<li>Adds the <span class="mono">dispatch:approved</span> label: this severity is not dispatched automatically, so your click is the approval.</li>{% endif %}
+      <li>Comments on the issue that <span class="mono">{{ operator_login }}</span> launched from the dashboard.</li>
+      <li>Creates one Devin session tagged <span class="mono">wi-{{ wi.id }}</span> (or adopts one that already carries that tag) with the {{ (wi.acu_cap|num(0)) }} ACU cap.</li>
+    </ol>
+    <p class="small muted">Review, approval and merge of the resulting pull request stay in GitHub. Closure still needs a later source-matching scan of <span class="mono">{{ preview.branch }}</span> that no longer reports these findings.{% if not live %} This server is wired to local GitHub and Devin doubles, so nothing leaves this machine.{% endif %}</p>
+    <form method="post" action="/operator/launch/{{ wi.id }}" class="launch-form">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label class="check"><input type="checkbox" name="confirm" value="{{ confirm_value }}" required> I want to spend up to {{ wi.acu_cap|num(0) }} ACU on this work item now.</label>
+      <div class="actions">
+        <button class="btn btn-primary" type="submit">{{ "Relaunch Devin" if preview.action.value == "relaunch" else "Launch Devin" }}</button>
+        <a href="/issues/{{ wi.id }}">Cancel</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% else %}
+<div class="notice notice-warning" role="status">
+  <p><strong>Cannot launch.</strong> {{ launch_block_text[preview.block] }}</p>
+  <p><a href="/issues/{{ wi.id }}">Back to the work item</a></p>
+</div>
+{% endif %}
+
+<section class="section" aria-labelledby="findings-heading">
+  {{ ui.section_head("Findings in this work item", id="findings-heading", count=members|length) }}
+  {% with findings=members, hide_work_item=True %}{% include "_findings_table.html" %}{% endwith %}
+</section>
+{% endblock %}

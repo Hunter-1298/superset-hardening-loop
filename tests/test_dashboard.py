@@ -315,7 +315,11 @@ def test_every_route_is_get_only(client: TestClient) -> None:
     for route in routes:
         if isinstance(route, Route):
             assert route.methods is not None and route.methods <= {"GET", "HEAD"}, route.path
-            paths.append(route.path.replace("{run_id}", "1").replace("{wi_id}", "2"))
+            paths.append(
+                route.path.replace("{run_id}", "1")
+                .replace("{wi_id}", "2")
+                .replace("{finding_id}", "1")
+            )
         elif isinstance(route, Mount):
             paths.append(route.path + "/dashboard.css")
     assert "/" in paths and "/api/metrics" in paths and "/static/dashboard.css" in paths
@@ -335,7 +339,7 @@ def test_layout_navigation_and_header(client: TestClient) -> None:
     assert '<nav id="primary-nav" aria-label="Primary">' in html
     nav = html[html.index('<nav id="primary-nav"') : html.index("</nav>")]
     labels = re.findall(r"<span>([^<]+)</span></a>", nav)
-    assert labels == ["Overview", "Work items", "Scans", "Findings", "Pull requests", "Report"]
+    assert labels == ["Overview", "CVEs", "Work items", "Scans", "Pull requests", "Report"]
     assert 'href="/runs" aria-current="page"' in nav
     assert nav.count('aria-current="page"') == 1
     # compact context header: repository, branch, latest scan status, last updated
@@ -357,7 +361,7 @@ def test_layout_navigation_and_header(client: TestClient) -> None:
         ("/", "Overview"),
         ("/issues", "Work items"),
         ("/runs", "Scans"),
-        ("/findings", "Findings"),
+        ("/findings", "CVEs"),
         ("/prs", "Pull requests"),
         ("/report", "Run report"),
     ],

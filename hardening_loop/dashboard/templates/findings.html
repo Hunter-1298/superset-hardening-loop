@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}Findings · Superset hardening loop{% endblock %}
+{% block title %}CVEs · Superset hardening loop{% endblock %}
 {% block content %}
 {% set active = [] %}
 {% for k, v in filters.items() if v is not none and v != "" %}{% set _ = active.append(k) %}{% endfor %}
-{{ ui.page_header("Findings", total ~ " normalized finding" ~ ("" if total == 1 else "s") ~ " from the raw scans, each with the work item that owns it.") }}
+{{ ui.page_header("CVEs", total ~ " normalized finding" ~ ("" if total == 1 else "s") ~ " from the raw Trivy and Grype scans. Open one for its full record and the work item that owns it.") }}
 
 <section class="section" aria-label="Findings">
 <form class="filters" method="get" action="/findings" role="search" aria-label="Filter findings">

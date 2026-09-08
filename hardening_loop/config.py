@@ -55,6 +55,14 @@ class Settings(BaseSettings):
 
     replay_mode: bool = False
 
+    # Operator mode (`serve --operator`): the dashboard gains one write action, "Launch Devin".
+    # `operator_login` is recorded on every launch (GitHub comment + event); it must be set
+    # explicitly so the audit trail never guesses who clicked. `auto_dispatch` keeps the scheduled
+    # loop from creating sessions on its own, so only explicit launches spend ACUs unless enabled.
+    operator_mode: bool = False
+    operator_login: str | None = None
+    auto_dispatch: bool = False
+
     # Location of the committed `fixtures/` tree (baseline scan evidence, source snapshots).
     # Defaults to the checkout root for an editable install; the image sets HL_REPO_ROOT=/app.
     repo_root: Path = Path(__file__).resolve().parents[1]

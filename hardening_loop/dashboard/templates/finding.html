@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block title %}{{ f.vuln_id }} · {{ f.pkg_name or f.resource or "finding" }}{% endblock %}
+{% block content %}
+{% set scanners = "both" if f.reported_by_trivy and f.reported_by_grype else ("trivy_only" if f.reported_by_trivy else ("grype_only" if f.reported_by_grype else "config")) %}
+{% set subject = f.pkg_name or f.resource or "unknown resource" %}
+
+{% call ui.page_header(f.vuln_id, (detail.title or f.title or "No title recorded by either scanner.") ~ " " ~ (f.severity|severity_label).text ~ " in " ~ subject ~ (" " ~ f.pkg_version if f.pkg_version else "") ~ ", " ~ (f.layer|layer_label|lower) ~ " layer.", crumbs=[("CVEs", "/findings"), (f.vuln_id, None)]) %}
+  {% if detail.primary_url %}<a href="{{ detail.primary_url }}" rel="noopener">Advisory</a>{% endif %}
+  {% if wi %}<a href="/issues/{{ wi.id }}">Work item #{{ wi.id }}</a>{% endif %}
+  {% if wi and wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a>{% endif %}
+  {% if wi and wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a>{% endif %}
+{% endcall %}
+
+<section class="stats compact" aria-label="Status">
+  {{ ui.stat("Severity", ui.severity_badge(f.severity)) }}
+  {{ ui.stat("State", ui.finding_state_badge(f.state)) }}
+  {{ ui.stat("Kind", ui.kind_badge(f.kind)) }}
+  {{ ui.stat("Reported by", (scanners|scanner_label)) }}
+  {% if detail.epss %}{{ ui.stat("EPSS", (detail.epss.score * 100)|num(1) ~ "%", note=("p" ~ (detail.epss.percentile * 100)|num(0)) if detail.epss.percentile is not none else none) }}{% endif %}
+  {% set top = detail.best_cvss %}
+  {% if top %}{{ ui.stat("CVSS " ~ top.version, top.base_score|num(1), note=top.source ~ " via " ~ top.scanner) }}{% endif %}
+  {% if wi %}{{ ui.stat("Work item", ui.state_badge(wi.state), href="/issues/" ~ wi.id) }}{% endif %}
+</section>
+
+{% if wi %}
+{% with launch=launch, wi=wi %}{% include "_launch_panel.html" %}{% endwith %}
+{% elif f.kind is none %}
+<div class="notice" role="note"><p><strong>Unclassified.</strong> {{ f.unclassified_reason or "No classification rule matched." }} Unclassified findings stay visible and are never dispatched.</p></div>
+{% endif %}
+
+{% if next_action %}
+<div class="notice notice-{{ 'danger' if wi.state.value in ('needs_human', 'failed') else 'warning' }}" role="status">
+  <p><strong>Next human action.</strong> {{ next_action }}</p>
+</div>
+{% endif %}
+
+<div class="grid grid-main">
+  <div class="stack">
+    <section class="card" aria-labelledby="desc-heading">
+      {{ ui.section_head("Description", id="desc-heading") }}
+      <div class="card-body">
+        {% if detail.description %}<p class="prose">{{ detail.description }}</p>{% elif detail.synthetic %}<p class="muted">Replay double: the synthetic scanner record carries identifiers, severity and fix versions only, no advisory text.</p>{% else %}<p class="muted">Neither scanner recorded a description.</p>{% endif %}
+        {% if detail.message %}<p class="prose mt">{{ detail.message }}</p>{% endif %}
+        {% if detail.resolution %}<p class="mt"><strong>Resolution.</strong> {{ detail.resolution }}</p>{% endif %}
+        <dl class="kv mt">
+          {% if detail.cwes %}<dt>CWE</dt><dd class="mono">{{ detail.cwes|join(", ") }}</dd>{% endif %}
+          <dt>Published</dt><dd>{% if detail.published %}<time datetime="{{ detail.published }}">{{ detail.published[:10] }}</time>{% else %}—{% endif %}</dd>
+          <dt>Modified</dt><dd>{% if detail.modified %}<time datetime="{{ detail.modified }}">{{ detail.modified[:10] }}</time>{% else %}—{% endif %}</dd>
+          {% if detail.epss %}<dt>EPSS</dt><dd>{{ (detail.epss.score * 100)|num(2) }}% probability of exploitation{% if detail.epss.percentile is not none %}, {{ (detail.epss.percentile * 100)|num(0) }}th percentile{% endif %}{% if detail.epss.date %} <span class="muted">as of {{ detail.epss.date }}</span>{% endif %}</dd>{% endif %}
+        </dl>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="cvss-heading">
+      {{ ui.section_head("CVSS", id="cvss-heading", count=detail.cvss|length) }}
+      {% if detail.cvss %}
+      <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th scope="col">Version</th><th scope="col">Source</th><th scope="col" class="num">Base</th><th scope="col" class="num">Exploitability</th><th scope="col" class="num">Impact</th><th scope="col">Vector</th></tr></thead>
+        <tbody>
+        {% for c in detail.cvss %}
+        <tr>
+          <td>{{ c.version }}</td>
+          <td>{{ c.source }} <span class="muted small">({{ c.scanner }})</span></td>
+          <td class="num">{{ c.base_score|num(1) }}</td>
+          <td class="num">{{ c.exploitability_score|num(1) }}</td>
+          <td class="num">{{ c.impact_score|num(1) }}</td>
+          <td class="mono small">{{ c.vector or "—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <div class="card-body">{{ ui.empty("No CVSS data recorded", compact=True) }}</div>
+      {% endif %}
+    </section>
+
+    <section class="card" aria-labelledby="scanners-heading">
+      {{ ui.section_head("Scanner evidence", id="scanners-heading", count=detail.scanners|length) }}
+      <div class="card-body">
+        {% if f.severity_disagreement %}<p class="small"><strong>Severity disagreement.</strong> {% for s, v in f.severity_by_scanner.items() %}{{ s }} says {{ (v|severity_label).text }}{% if not loop.last %}; {% endif %}{% endfor %}.</p>{% endif %}
+        {% if detail.scanners %}
+        <div class="grid grid-2 mt">
+          {% for s in detail.scanners %}
+          <dl class="kv" aria-label="{{ s.scanner }} record">
+            <dt>Scanner</dt><dd><strong>{{ s.scanner }}</strong></dd>
+            {% set sev = s.severity or f.severity_by_scanner.get(s.scanner) %}
+            {% set fixes = s.fixed_versions or f.fix_versions_by_scanner.get(s.scanner, []) %}
+            <dt>Severity</dt><dd>{{ (sev|severity_label).text if sev else "—" }}</dd>
+            <dt>Fixed in</dt><dd class="mono">{{ fixes|join(", ") or "—" }}</dd>
+            {% if s.fix_state %}<dt>Fix state</dt><dd>{{ s.fix_state }}</dd>{% endif %}
+            {% if s.risk is not none %}<dt>Risk score</dt><dd>{{ s.risk|num(2) }}</dd>{% endif %}
+            {% if s.matched_by %}<dt>Matched by</dt><dd class="mono">{{ s.matched_by }}</dd>{% endif %}
+            {% if s.version_constraint %}<dt>Constraint</dt><dd class="mono">{{ s.version_constraint }}</dd>{% endif %}
+            {% if s.purl %}<dt>PURL</dt><dd class="mono">{{ s.purl }}</dd>{% endif %}
+            {% if s.locations %}<dt>Locations</dt><dd class="mono">{{ s.locations|join(", ") }}</dd>{% endif %}
+            {% if s.layer_id %}<dt>Layer</dt><dd class="mono">{{ s.layer_id }}</dd>{% endif %}
+            {% if s.namespace %}<dt>Namespace</dt><dd class="mono">{{ s.namespace }}</dd>{% endif %}
+            {% if s.data_source %}<dt>Data source</dt><dd><a href="{{ s.data_source }}" rel="noopener" class="mono">{{ s.data_source }}</a></dd>{% endif %}
+            {% if s.fingerprint %}<dt>Fingerprint</dt><dd class="mono">{{ s.fingerprint }}</dd>{% endif %}
+          </dl>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="muted">No raw scanner record is stored for this finding.</p>
+        {% endif %}
+        {% if detail.cause %}
+        <details class="disclosure mt">
+          <summary>Configuration cause</summary>
+          <div class="disclosure-body"><pre>{{ detail.cause|tojson(indent=2) }}</pre></div>
+        </details>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="refs-heading">
+      {{ ui.section_head("References", id="refs-heading", count=detail.references|length) }}
+      <div class="card-body">
+        {% if detail.references %}
+        <ul class="list-plain list-rows refs">
+          {% for r in detail.references %}<li><a href="{{ r.url }}" rel="noopener" class="mono small">{{ r.url }}</a> <span class="muted small">{{ r.scanners|join(", ") }}</span></li>{% endfor %}
+        </ul>
+        {% else %}
+        <p class="muted">No references recorded.</p>
+        {% endif %}
+      </div>
+    </section>
+  </div>
+
+  <div class="stack">
+    <section class="card" aria-labelledby="pkg-heading">
+      {{ ui.section_head("Package and image", id="pkg-heading") }}
+      <div class="card-body">
+        <dl class="kv">
+          <dt>{{ "Resource" if f.resource else "Package" }}</dt><dd class="mono">{{ subject }}</dd>
+          {% if f.pkg_version %}<dt>Installed</dt><dd class="mono">{{ f.pkg_version }}</dd>{% endif %}
+          <dt>Fix available</dt><dd class="mono">{% for s, v in f.fix_versions_by_scanner.items() %}{{ s }}: {{ v|join(", ") or "—" }}{% if not loop.last %}<br>{% endif %}{% else %}—{% endfor %}</dd>
+          {% if f.bound_blocked %}<dt>Upper bound</dt><dd>A pyproject upper bound blocks the upgrade; treated as a high-risk dependency upgrade.</dd>{% endif %}
+          <dt>Ecosystem</dt><dd>{{ f.ecosystem.value }}</dd>
+          <dt>Layer</dt><dd>{{ f.layer|layer_label }}</dd>
+          <dt>Image</dt><dd class="mono">{{ f.image_target.value if f.image_target else "—" }} · {{ f.platform }}</dd>
+          {% if f.purl %}<dt>PURL</dt><dd class="mono">{{ f.purl }}</dd>{% endif %}
+          <dt>Dedupe key</dt><dd class="mono">{{ f.dedupe_key }}</dd>
+          {% if f.classification_trace %}<dt>Classification</dt><dd class="mono">{{ f.classification_trace }}</dd>{% endif %}
+          <dt>First seen</dt><dd><a href="/runs/{{ f.first_seen_run_id }}">scan #{{ f.first_seen_run_id }}</a></dd>
+          <dt>Last seen</dt><dd><a href="/runs/{{ f.last_seen_run_id }}">scan #{{ f.last_seen_run_id }}</a></dd>
+          {% if f.closed_by_run_id %}<dt>Closed by</dt><dd><a href="/runs/{{ f.closed_by_run_id }}">scan #{{ f.closed_by_run_id }}</a></dd>{% endif %}
+          {% if f.opening_db_built_at %}<dt>Vuln DB built</dt><dd>{{ f.opening_db_built_at|dt }}</dd>{% endif %}
+        </dl>
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="remediation-heading">
+      {{ ui.section_head("Remediation", id="remediation-heading") }}
+      <div class="card-body">
+        {% if wi %}
+        <dl class="kv">
+          <dt>Work item</dt><dd><a href="/issues/{{ wi.id }}">#{{ wi.id }} {{ wi.title }}</a></dd>
+          <dt>State</dt><dd>{{ ui.state_badge(wi.state) }}</dd>
+          <dt>Verification</dt><dd>{{ (wi.verification_level|level_label).text }}</dd>
+          <dt>ACU cap</dt><dd>{{ wi.acu_cap|num(0) }}</dd>
+          <dt>Issue</dt><dd>{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>{% else %}<span class="muted">not opened yet</span>{% endif %}</dd>
+          {% if wi.blocked_reason %}<dt>Blocked</dt><dd>{{ wi.blocked_reason|blocked_reason }}</dd>{% endif %}
+        </dl>
+        {% if sessions %}
+        <h3 class="sub mt">Devin sessions</h3>
+        <ul class="list-plain list-rows">
+          {% for s in sessions %}<li>{% if s.url %}<a class="mono" href="{{ s.url }}" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %} · {{ (s.status|plain_label).text }}{% if s.status_detail %} <span class="muted">{{ s.status_detail }}</span>{% endif %} · {{ s.acus_consumed|num }} ACU</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if prs %}
+        <h3 class="sub mt">Pull requests</h3>
+        <ul class="list-plain list-rows">
+          {% for p in prs %}<li><a href="{{ p.url }}" rel="noopener">#{{ p.number }}</a> · {{ (p.state|pr_state).text }} · {{ (p.verification_level|level_label).text }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% else %}
+        <p class="muted">{% if f.kind is none %}Not grouped into a work item: unclassified findings are never dispatched.{% else %}Not grouped into a work item yet.{% endif %}</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="card" aria-labelledby="history-heading">
+      {{ ui.section_head("Sighting history", id="history-heading", count=history|length) }}
+      {% if history %}
+      <div class="table-wrap">
+      <table class="data">
+        <thead><tr><th scope="col">Scan</th><th scope="col">Branch</th><th scope="col">Trivy</th><th scope="col">Grype</th></tr></thead>
+        <tbody>
+        {% for run, rows in history %}
+        <tr>
+          <td>{% if run %}<a class="primary mono" href="/runs/{{ run.id }}">{{ run.external_run_id }}</a><span class="secondary">{{ run.ingested_at|dt }} · {{ (run.status|run_status).text }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="mono">{% if run %}{{ run.source_branch }} <span class="secondary">{{ run.source_sha|short }}</span>{% endif %}</td>
+          {% for scanner in ("trivy", "grype") %}
+          <td class="small">{% for s in rows if s.scanner.value == scanner %}<span class="nowrap">{{ s.mode.value }}: {{ "present" if s.present else "absent" }}{% if s.severity %} ({{ (s.severity|severity_label).text }}){% endif %}</span>{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">not run</span>{% endfor %}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      </div>
+      {% else %}
+      <div class="card-body">{{ ui.empty("No sightings recorded", compact=True) }}</div>
+      {% endif %}
+    </section>
+
+    {% if same_vuln %}
+    <section class="card" aria-labelledby="same-heading">
+      {{ ui.section_head("Same CVE elsewhere", id="same-heading", count=same_vuln|length) }}
+      <div class="card-body">
+        <ul class="list-plain list-rows">
+          {% for o in same_vuln %}<li><a href="/findings/{{ o.id }}" class="mono">{{ o.pkg_name or o.resource }}{% if o.pkg_version %} {{ o.pkg_version }}{% endif %}</a> · {{ o.layer|layer_label }} · {{ (o.state|finding_state).text }}</li>{% endfor %}
+        </ul>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+</div>
+
+<section class="section" aria-labelledby="events-heading">
+  {{ ui.section_head("Events", id="events-heading", count=events|length) }}
+  {% if events %}
+  <ol class="timeline">
+    {% for e in events %}
+    {% set lab = e.event|event_label %}
+    <li class="is-{{ lab.tone.value }}">
+      <div class="when">{{ e.ts|dt }} · {{ e.actor|actor_label }} · {{ e.entity_type|replace("_", " ") }}</div>
+      <div class="what">{{ lab.text }}</div>
+      {% if e.from_state or e.to_state %}<div class="transition">{{ e.from_state or "—" }} → {{ e.to_state }}</div>{% endif %}
+      {% if e.reason %}<div class="why mono">{{ e.reason }}</div>{% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  {{ ui.empty("No events yet", compact=True) }}
+  {% endif %}
+</section>
+{% endblock %}
