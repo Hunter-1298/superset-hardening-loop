@@ -46,7 +46,10 @@ def diff_policy_violations(files: Iterable[DiffFile], kind: Kind) -> list[str]:
             violations.append(f"VEX outside security/vex/proposed/: {n}")
     generated = [n for n in names if GENERATED_REQUIREMENTS.match(n)]
     sources = [n for n in names if REQUIREMENT_SOURCES.match(n)]
-    if generated and not sources:
+    # A dependency upgrade whose fix version already lies inside the declared range regenerates
+    # the pins without touching pyproject.toml or the *.in inputs; every other kind has no
+    # business changing generated pins on their own.
+    if generated and not sources and kind is not Kind.dependency_upgrade:
         violations.append(
             "generated requirements changed without pyproject.toml/*.in: " + ", ".join(generated)
         )
