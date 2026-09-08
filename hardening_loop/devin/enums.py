@@ -101,6 +101,13 @@ class SessionSnapshot(BaseModel):
         )
 
     @property
+    def is_final_report(self) -> bool:
+        """The session has delivered its verdict: it finished, or it declared `pr_opened` in its
+        structured output and is idling in `waiting_for_user` after posting the report. Only the
+        PR outcome counts here because it is checked against GitHub rather than trusted."""
+        return self.is_done or (self.is_waiting_for_user and self.outcome is Outcome.pr_opened)
+
+    @property
     def is_budget_stop(self) -> bool:
         return self.status_detail in BUDGET_STOP_DETAILS
 
