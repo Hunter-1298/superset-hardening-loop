@@ -182,23 +182,28 @@ class Orchestrator:
             log.warning(
                 "scan application failed this tick, continuing: %s", report.scan_apply_error
             )
-        report.work_items_created = len(self.create_work_items())
-        if auto_dispatch:
+        # A run still pending may hold the evidence that retires queued work, so while one is
+        # unapplied nothing new is grouped, filed or launched; crashed dispatches are recovered.
+        recover_only = report.scan_apply_error is not None
+        if not recover_only:
+            report.work_items_created = len(self.create_work_items())
+        created = issues = 0
+        if auto_dispatch and not recover_only:
             created, adopted, issues = self.dispatch()
         else:
-            issues = self.open_issues() if self.settings.auto_open_issues else 0
-            created = 0
+            if self.settings.auto_open_issues and not recover_only:
+                issues = self.open_issues()
             with session_scope(self.engine) as db:
                 adopted = self._recover_dispatching(db)
         report.sessions_created, report.sessions_adopted, report.issues_created = (
             created,
-            adopted,
+            len(adopted),
             issues,
         )
         if adopted:
             # An orphan recovered from a crash may already have finished while the controller was
             # down; polling it here evaluates its output instead of leaving it idle for a tick.
-            report.sessions_polled += self.poll_sessions()
+            report.sessions_polled += self.poll_sessions(only=adopted)
         return report
 
     # ------------------------------------------------------------------ events / transitions
@@ -489,12 +494,14 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ dispatch
 
-    def dispatch(self) -> tuple[int, int, int]:
-        """Create issues for queued items, then sessions for eligible items within capacity."""
+    def dispatch(self) -> tuple[int, list[int], int]:
+        """Create issues for queued items, then sessions for eligible items within capacity.
+        Returns the number of sessions created, the ids of work items whose existing session was
+        adopted, and the number of issues opened."""
         issues = self.open_issues()
-        created = adopted = 0
+        created = 0
         with session_scope(self.engine) as db:
-            adopted += self._recover_dispatching(db)
+            adopted = self._recover_dispatching(db)
             active = self._active_session_count(db)
             budget = self._acu_budget_position(db)
             candidates = db.exec(
@@ -529,19 +536,20 @@ class Orchestrator:
                 if outcome == "created":
                     created += 1
                 elif outcome == "adopted":
-                    adopted += 1
+                    adopted.append(wi.id or 0)
                 if outcome in ("created", "adopted"):
                     active += 1
                     budget = self._acu_budget_position(db)
         return created, adopted, issues
 
-    def _recover_dispatching(self, db: DbSession) -> int:
+    def _recover_dispatching(self, db: DbSession) -> list[int]:
         """Resume work items a crashed dispatch left in `dispatching` (the DB lock is committed
         before any Devin call, so a crash anywhere after it strands the item). `dispatch()` is the
         only writer of that state and ticks are serial, so anything in it at tick start is stale.
         Adopt the `wi-<id>`-tagged session if Devin holds one, otherwise release the lock through
-        the normal dispatch-failure path (retryable, bounded by `max_dispatch_failures`)."""
-        adopted = 0
+        the normal dispatch-failure path (retryable, bounded by `max_dispatch_failures`). Returns
+        the ids of the work items whose session was adopted."""
+        adopted: list[int] = []
         stuck = db.exec(select(WorkItem).where(WorkItem.state == WorkItemState.dispatching)).all()
         for wi in stuck:
             assert wi.id is not None
@@ -558,7 +566,7 @@ class Orchestrator:
             if outcome is None:
                 outcome = self._dispatch_failed(db, wi, "dispatching_recovered:no_session_at_devin")
             if outcome == "adopted":
-                adopted += 1
+                adopted.append(wi.id)
         return adopted
 
     def open_issues(self) -> int:
@@ -1000,15 +1008,18 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ sessions
 
-    def poll_sessions(self) -> int:
+    def poll_sessions(self, *, only: Sequence[int] | None = None) -> int:
+        """Poll the Devin session of every active work item, or of just the work items in `only`,
+        and apply what each snapshot says about the item."""
         polled = 0
         with session_scope(self.engine) as db:
-            items = db.exec(
-                select(WorkItem).where(
-                    WorkItem.state == WorkItemState.session_active,
-                    col(WorkItem.active_session_id).is_not(None),
-                )
-            ).all()
+            stmt = select(WorkItem).where(
+                WorkItem.state == WorkItemState.session_active,
+                col(WorkItem.active_session_id).is_not(None),
+            )
+            if only is not None:
+                stmt = stmt.where(col(WorkItem.id).in_(list(only)))
+            items = db.exec(stmt).all()
             for wi in items:
                 assert wi.active_session_id is not None
                 row = db.exec(

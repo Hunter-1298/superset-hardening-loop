@@ -167,6 +167,40 @@ def test_a_scan_that_retires_queued_work_is_spent_before_the_tick_can_dispatch_i
     assert w.issue_state(wi) == "closed"
 
 
+def test_a_run_whose_application_failed_holds_grouping_and_dispatch_until_it_is_spent(
+    w: World,
+) -> None:
+    """The pending run may be the very evidence that makes the queued work pointless, so a tick
+    that could not apply it neither groups the new finding it carries, nor files, nor launches
+    anything; the next tick that does apply it retires the stale item and only then moves on."""
+    w.orch.tick(auto_dispatch=False)
+    w.baseline("cryptography")
+    w.orch.tick(auto_dispatch=False)
+    wi = w.only_wi()
+    assert wi.state is WorkItemState.issue_open
+    w.clock.advance(minutes=30)
+    rid = w.ingest(w.closing_run(BASELINE_SHA, "pillow"))  # cryptography gone, pillow new
+    w.gh.fail_next["close_issue"] = FakeGitHubError("issues api unavailable")
+
+    report = w.tick()  # auto_dispatch=True
+    assert report.scan_apply_error == "FakeGitHubError: issues api unavailable"
+    assert report.scans_applied == 0 and report.sessions_polled == 0
+    assert (report.work_items_created, report.issues_created, report.sessions_created) == (0, 0, 0)
+    assert w.devin.sessions == {} and w.sessions() == []
+    assert [i.id for i in w.work_items()] == [wi.id], "pillow stays ungrouped"
+    assert w.state_of(wi.id or 0) is WorkItemState.issue_open
+    assert w.orch.pending_scan_runs() == [rid]
+
+    report = w.tick()  # the issues api recovers
+    assert report.scan_apply_error is None and report.scans_applied == 1
+    assert w.state_of(wi.id or 0) is WorkItemState.abandoned
+    assert w.issue_state(wi) == "closed"
+    assert report.work_items_created == 1 and report.sessions_created == 1
+    (pillow,) = [i for i in w.work_items() if i.id != wi.id]
+    assert pillow.state is WorkItemState.session_active
+    assert [s.work_item_id for s in w.sessions()] == [pillow.id], "the only session is pillow's"
+
+
 def _merged_item_awaiting_its_closing_scan(w: World) -> WorkItem:
     """A dependency work item taken through to a PR merged at `MERGE_SHA`."""
     w.baseline("cryptography")

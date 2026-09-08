@@ -77,8 +77,9 @@ has already reported or closed a finding cannot close or reopen that finding.
 
 A failure while applying a run (typically the GitHub issue call that finishes a closure) rolls that
 run's transaction back, leaves it pending for the next tick and is reported as
-`TickReport.scan_apply_error`; the rest of the tick, including the persisted metrics snapshot,
-still happens.
+`TickReport.scan_apply_error`. That tick still polls, recovers crashed dispatches and persists its
+metrics snapshot, but groups no new work items, opens no issues and launches no sessions: the
+unapplied run may be the evidence that retires the queued work, so nothing is spent until it is.
 
 An `incomplete` run (a runtime job failed, or the workflow conclusion is not `success`) is
 persisted with its raw evidence but never used by the closer as proof of absence.
