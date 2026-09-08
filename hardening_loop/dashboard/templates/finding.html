@@ -97,7 +97,7 @@
             {% if s.locations %}<dt>Locations</dt><dd class="mono">{{ s.locations|join(", ") }}</dd>{% endif %}
             {% if s.layer_id %}<dt>Layer</dt><dd class="mono">{{ s.layer_id }}</dd>{% endif %}
             {% if s.namespace %}<dt>Namespace</dt><dd class="mono">{{ s.namespace }}</dd>{% endif %}
-            {% if s.data_source %}<dt>Data source</dt><dd><a href="{{ s.data_source }}" rel="noopener" class="mono">{{ s.data_source }}</a></dd>{% endif %}
+            {% if s.data_source %}<dt>Data source</dt><dd>{% if s.data_source_url %}<a href="{{ s.data_source_url }}" rel="noopener" class="mono">{{ s.data_source }}</a>{% else %}<span class="mono">{{ s.data_source }}</span>{% endif %}</dd>{% endif %}
             {% if s.fingerprint %}<dt>Fingerprint</dt><dd class="mono">{{ s.fingerprint }}</dd>{% endif %}
           </dl>
           {% endfor %}

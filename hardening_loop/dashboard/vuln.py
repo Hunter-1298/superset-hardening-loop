@@ -43,6 +43,7 @@ class ScannerView:
     fixed_versions: tuple[str, ...]
     fix_state: str | None
     data_source: str | None
+    data_source_url: str | None
     namespace: str | None
     fingerprint: str | None
     matched_by: str | None
@@ -92,6 +93,11 @@ def _str(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _url(value: object) -> str | None:
+    text = _str(value)
+    return text if text and text.startswith(("http://", "https://")) else None
 
 
 def _float(value: object) -> float | None:
@@ -201,6 +207,7 @@ def _from_trivy(rec: dict[str, Any]) -> VulnDetail:
         fixed_versions=fixed_versions,
         fix_state=_str(rec.get("Status")),
         data_source=_str(data_source.get("Name") or data_source.get("ID")),
+        data_source_url=_url(data_source.get("URL")),
         namespace=_str(rec.get("SeveritySource")),
         fingerprint=_str(rec.get("Fingerprint")),
         matched_by=None,
@@ -305,6 +312,7 @@ def _from_grype(rec: dict[str, Any]) -> VulnDetail:
         fixed_versions=tuple(str(v) for v in _list(fix.get("versions")) if v),
         fix_state=_str(fix.get("state")),
         data_source=_str(vuln.get("dataSource")),
+        data_source_url=_url(vuln.get("dataSource")),
         namespace=_str(vuln.get("namespace")),
         fingerprint=None,
         matched_by=matched_by or None,

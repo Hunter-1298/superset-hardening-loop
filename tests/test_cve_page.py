@@ -92,7 +92,12 @@ def test_vuln_detail_merges_real_trivy_and_grype_records(baseline_engine: Engine
     assert by_scanner["trivy"].severity != by_scanner["grype"].severity  # real disagreement
     assert by_scanner["grype"].data_source and by_scanner["grype"].fix_state == "wont-fix"
     assert by_scanner["grype"].risk is not None
-    assert by_scanner["trivy"].data_source and by_scanner["trivy"].layer_id
+    assert by_scanner["trivy"].data_source == "Debian Security Tracker"
+    assert by_scanner["trivy"].data_source_url and by_scanner["trivy"].data_source_url.startswith(
+        "https://"
+    )
+    assert by_scanner["grype"].data_source_url == by_scanner["grype"].data_source
+    assert by_scanner["trivy"].layer_id
     assert by_scanner["trivy"].fingerprint  # Trivy's per-match fingerprint survives
     assert by_scanner["grype"].purl and by_scanner["grype"].purl.startswith("pkg:deb/")
     assert f.severity_by_scanner and f.fix_versions_by_scanner is not None
@@ -133,6 +138,9 @@ def test_cve_page_renders_real_evidence(
     assert "Scanners disagree" in body or "disagree" in body.lower()
     assert "pkg:deb/" in body  # purl
     assert 'rel="noopener"' in html and "https://" in html  # advisory references are links
+    assert not re.search(r'href="[^"]*Debian Security Tracker', html)  # names are never hrefs
+    for href in re.findall(r'<a href="([^"]+)" rel="noopener"', html):
+        assert href.startswith(("http://", "https://")), href
     assert "Replay double" not in body
     assert "fixture:" in body or BASELINE_SHA[:12] in body  # scan run identity
     assert "Not grouped into a work item" in body or "Work item #" in body
