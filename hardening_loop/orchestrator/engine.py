@@ -660,6 +660,7 @@ class Orchestrator:
         assert wi.id is not None
         budget = self._acu_budget_position(db)
         return launch_preview_for(
+            pending_scans=self._pending_scan_run_count(db),
             work_item_id=wi.id,
             state=wi.state,
             severity=wi.severity,
@@ -1724,6 +1725,11 @@ class Orchestrator:
         return ingested, rejected
 
     # ------------------------------------------------------------------ closure
+
+    def _pending_scan_run_count(self, db: DbSession) -> int:
+        return len(
+            db.exec(select(ScanRun.id).where(col(ScanRun.closure_applied_at).is_(None))).all()
+        )
 
     def pending_scan_runs(self) -> list[int]:
         """Ids of runs not yet evaluated as closing evidence, oldest scan first, so a backlog is

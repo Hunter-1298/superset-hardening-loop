@@ -115,6 +115,9 @@ LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
     LaunchBlock.closed: "This item is closed.",
     LaunchBlock.at_capacity: "Every concurrent session slot is in use.",
     LaunchBlock.over_budget: "This item's ACU cap would exceed the global ACU budget.",
+    LaunchBlock.scan_pending: (
+        "A scan of the branch is still waiting to be evaluated; it may already resolve this item."
+    ),
 }
 
 

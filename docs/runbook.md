@@ -80,6 +80,9 @@ run's transaction back, leaves it pending for the next tick and is reported as
 `TickReport.scan_apply_error`. That tick still polls, recovers crashed dispatches and persists its
 metrics snapshot, but groups no new work items, opens no issues and launches no sessions: the
 unapplied run may be the evidence that retires the queued work, so nothing is spent until it is.
+The same hold binds the dashboard: while any run is unapplied, the launch preview reports
+`scan_pending` and an operator launch is refused (no issue, label or session is created) until a
+tick has evaluated the run.
 
 An `incomplete` run (a runtime job failed, or the workflow conclusion is not `success`) is
 persisted with its raw evidence but never used by the closer as proof of absence.

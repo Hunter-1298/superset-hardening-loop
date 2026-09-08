@@ -33,6 +33,7 @@ class LaunchBlock(StrEnum):
     closed = "closed"
     at_capacity = "at_capacity"
     over_budget = "over_budget"
+    scan_pending = "scan_pending"  # an ingested scan of main is still owed its evaluation
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class LaunchPreview:
     global_acu_budget: float
     repo: str
     branch: str
+    pending_scans: int = 0
 
     @property
     def eligible(self) -> bool:
@@ -107,10 +109,15 @@ def preview(
     global_acu_budget: float,
     repo: str,
     branch: str,
+    pending_scans: int = 0,
 ) -> LaunchPreview:
+    """A launch is refused while any scan run awaits its closing evaluation: that run may be the
+    evidence that makes this very item obsolete, and the tick that applies it comes first."""
     action, block = action_for(state)
     if action is not None and block is None:
-        if active_sessions >= max_concurrent_sessions:
+        if pending_scans:
+            block = LaunchBlock.scan_pending
+        elif active_sessions >= max_concurrent_sessions:
             block = LaunchBlock.at_capacity
         elif acu_consumed + acu_outstanding + acu_cap > global_acu_budget:
             block = LaunchBlock.over_budget
@@ -129,6 +136,7 @@ def preview(
         global_acu_budget=global_acu_budget,
         repo=repo,
         branch=branch,
+        pending_scans=pending_scans,
     )
 
 

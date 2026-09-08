@@ -15,6 +15,7 @@ from hardening_loop.github.fake import FakeGitHubError
 from hardening_loop.metrics import metrics_history
 from hardening_loop.models.tables import WorkItem
 from hardening_loop.operator import OperatorContext
+from hardening_loop.orchestrator.launch import LaunchBlock
 from hardening_loop.replay.world import APPROVER, World, sha
 
 CVE = "CVE-2024-26130"  # cryptography seed
@@ -199,6 +200,60 @@ def test_a_run_whose_application_failed_holds_grouping_and_dispatch_until_it_is_
     (pillow,) = [i for i in w.work_items() if i.id != wi.id]
     assert pillow.state is WorkItemState.session_active
     assert [s.work_item_id for s in w.sessions()] == [pillow.id], "the only session is pillow's"
+
+
+def test_an_operator_launch_is_refused_while_a_scan_awaits_evaluation(w: World) -> None:
+    """The hold on unapplied scans binds the dashboard too: a run whose application failed still
+    stands between the operator and the launch button, because it may retire the very item."""
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+    ctx.tick()
+    w.baseline("cryptography")
+    ctx.tick()
+    wi = w.only_wi()
+    assert wi.state is WorkItemState.issue_open and ctx.preview(wi.id or 0).eligible
+    w.clock.advance(minutes=30)
+    rid = w.ingest(w.closing_run(BASELINE_SHA))  # cryptography gone from main
+    w.gh.fail_next["close_issue"] = FakeGitHubError("issues api unavailable")
+    assert ctx.tick().scan_apply_error is not None
+    issues_before = len(w.gh.issues)
+
+    pv = ctx.preview(wi.id or 0)
+    assert pv.block is LaunchBlock.scan_pending and pv.pending_scans == 1
+    res = ctx.launch(wi.id or 0)
+    assert (res.outcome, res.reason) == ("rejected", "scan_pending")
+    assert w.devin.sessions == {} and w.sessions() == []
+    assert len(w.gh.issues) == issues_before and w.issue_state(wi) == "open"
+    assert "operator_launch_refused" in w.event_names(wi.id or 0)
+    assert w.orch.pending_scan_runs() == [rid]
+
+    assert ctx.tick().scans_applied == 1
+    assert w.state_of(wi.id or 0) is WorkItemState.abandoned
+    assert ctx.preview(wi.id or 0).block is LaunchBlock.closed
+    assert w.devin.sessions == {}
+
+
+def test_a_launch_becomes_eligible_once_the_pending_scan_is_applied(w: World) -> None:
+    """A run ingested by the CLI waits for the next tick; until then the launch is held, and once
+    the tick has spent the run (here: it changes nothing) the same launch goes through."""
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+    ctx.tick()
+    w.baseline("cryptography")
+    ctx.tick()
+    wi = w.only_wi()
+    w.clock.advance(minutes=30)
+    w.ingest(w.closing_run(BASELINE_SHA, "cryptography"))  # still present: nothing to retire
+
+    assert ctx.preview(wi.id or 0).block is LaunchBlock.scan_pending
+    assert ctx.launch(wi.id or 0).outcome == "rejected"
+    assert w.devin.sessions == {}
+
+    assert ctx.tick().scans_applied == 1
+    assert w.orch.pending_scan_runs() == []
+    pv = ctx.preview(wi.id or 0)
+    assert pv.eligible and pv.pending_scans == 0
+    res = ctx.launch(wi.id or 0)
+    assert res.outcome == "created" and len(w.devin.sessions) == 1
+    assert w.state_of(wi.id or 0) is WorkItemState.session_active
 
 
 def _merged_item_awaiting_its_closing_scan(w: World) -> WorkItem:
