@@ -24,7 +24,7 @@ the dashboard and `doctor` output; `doctor` reports them as `set`/`unset` only.
 | `HL_REVIEW_TIMEOUT_MINUTES` | `30` | Devin Review pending/running longer than this escalates to `needs-human` |
 | `HL_ACU_COST_USD` | unset | when set, cost columns are populated in metrics, report and snapshots |
 | `HL_APPROVER_LOGINS` | `["Hunter-1298"]` | logins whose PR approval and VEX `x-approval` count |
-| `HL_REQUIRED_CHECK_NAMES` | `[]` | empty = every check run present on the PR head must pass |
+| `HL_REQUIRED_CHECK_NAMES` | `[]` | JSON list. Empty = every check run present on the PR head must pass, including the fork's unrelated upstream CI; live: the ten `security-scan` job names |
 | `HL_MAX_DISPATCH_FAILURES` | `3` | |
 | `HL_OPERATOR_LOGIN` | unset | required for `serve --operator`; live first run: `Hunter-1298` |
 | `HL_AUTO_DISPATCH` | `false` | `true` lets the scheduled loop create sessions on its own; live first run: `false` |
@@ -49,10 +49,13 @@ HL_MAX_CONCURRENT_SESSIONS=1
 HL_GLOBAL_ACU_BUDGET=5
 HL_SCAN_GATE_MODE=report
 HL_REPLAY_MODE=false
+HL_REQUIRED_CHECK_NAMES='["forbid-ignore-files","vex-lint","build-image","scan-lean-raw","scan-lean-policy","scan-ci-raw","policy-gate","lean-smoke","app-runs","scan-manifest"]'
 ```
 
 plus both credentials set, the database at the current schema, committed assets valid,
 exported schemas current, Devin assets synced, and baseline fixtures verified.
+`doctor --live` does not check `HL_REQUIRED_CHECK_NAMES`; set it anyway so that only the
+security-scan jobs decide whether a PR head is green.
 
 ## Fork repository settings (to be applied by a repository admin)
 
