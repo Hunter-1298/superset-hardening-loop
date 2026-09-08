@@ -20,7 +20,7 @@ from hardening_loop.db import open_database
 from hardening_loop.devin.fake import FakeDevin
 from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus, ScanRunStatus
 from hardening_loop.github.fake import FakeGitHub
-from hardening_loop.ingest.evidence import load_source_pyproject
+from hardening_loop.ingest.evidence import RUNTIME_RECORDS, load_source_pyproject, sha256_file
 from hardening_loop.ingest.intake import (
     IntakeExpectation,
     IntakeOutcome,
@@ -30,6 +30,7 @@ from hardening_loop.ingest.intake import (
 )
 from hardening_loop.models.tables import Finding, ScanIntake, ScanJob, ScanRun
 from hardening_loop.orchestrator.engine import Orchestrator
+from hardening_loop.replay.bundle import stage_runtime_records
 from tests.test_ci_helpers import _images, _stage_jobs
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +61,10 @@ def _bundle(
     expected: tuple[str, ...] = ("lean-raw", "lean-policy", "ci-raw")
     if drop is not None:
         expected = tuple(j for j in expected if j != drop.replace("/", "-"))
+    results = (
+        job_results if job_results is not None else {"lean-smoke": "success", "app-runs": "success"}
+    )
+    stage_runtime_records(out, _images(), results)
     write_scan_manifest(
         out,
         source_repo=source_repo,
@@ -75,15 +80,28 @@ def _bundle(
             ref=f"refs/heads/{source_branch}",
             gate_mode=GateMode.report,
             head_sha=head_sha,
-            job_results=job_results
-            if job_results is not None
-            else {"lean-smoke": "success", "app-runs": "success"},
+            job_results=results,
         ),
         expected_jobs=expected,
         gate_files={"lean-policy": gate},
+        attach_dirs=("runtime",) if results else (),
         now=datetime(2026, 9, 8, 3, tzinfo=UTC),
     )
     return out
+
+
+def _resign(tree: Path) -> None:
+    """Re-checksum a tree after editing files in place, as a producer that does not cross-check
+    its own runtime records would. Files removed from disk drop out of the inventory."""
+    manifest = json.loads((tree / "manifest.json").read_text())
+    files = {rel: sha256_file(tree / rel) for rel in manifest["files"] if (tree / rel).is_file()}
+    manifest["files"] = files
+    manifest["attachments"] = {
+        d: [rel for rel in listed if rel in files] for d, listed in manifest["attachments"].items()
+    }
+    (tree / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    files["manifest.json"] = sha256_file(tree / "manifest.json")
+    (tree / "SHA256SUMS").write_text("".join(f"{d}  {rel}\n" for rel, d in files.items()))
 
 
 @pytest.fixture
@@ -228,7 +246,74 @@ def test_missing_required_job_is_rejected(engine: Engine, gh: FakeGitHub, tmp_pa
 def test_missing_runtime_result_is_rejected(engine: Engine, gh: FakeGitHub, tmp_path: Path) -> None:
     tree = _bundle(tmp_path / "tree", job_results={"lean-smoke": "success"})
     _publish(gh, tree, head_sha=BASELINE_SHA)
-    _assert_rejected(engine, _service(engine, gh, tmp_path).poll(), "'app-runs' has no recorded")
+    out = _service(engine, gh, tmp_path).poll()
+    _assert_rejected(engine, out, "'app-runs' has no recorded")
+    assert any("'app-runs' has no attached record" in r for r in out[0].reasons)
+
+
+def test_runtime_success_without_attached_record_is_rejected(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """`job_results` says both runtime jobs passed but app-runs left no verdict file: the string is
+    a claim, the attached record is the proof, and without it the run is not ingested."""
+    tree = _bundle(tmp_path / "tree")
+    (tree / RUNTIME_RECORDS["app-runs"][0]).unlink()
+    _resign(tree)
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    _assert_rejected(
+        engine, _service(engine, gh, tmp_path).poll(), "'app-runs' has no attached record"
+    )
+
+
+def test_malformed_runtime_record_is_rejected(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    tree = _bundle(tmp_path / "tree")
+    (tree / RUNTIME_RECORDS["lean-smoke"][0]).write_text('{"ok": true}\n')
+    _resign(tree)
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    out = _service(engine, gh, tmp_path).poll()
+    _assert_rejected(engine, out, "failed verification")
+    assert any(
+        "lean-smoke.json: image_ref None is not a digest reference" in r for r in out[0].reasons
+    )
+
+
+def test_runtime_record_for_other_image_is_rejected(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """A well-formed passing verdict for some other digest than the one this run built and
+    scanned proves nothing about this run's image."""
+    tree = _bundle(tmp_path / "tree")
+    other = "ghcr.io/hunter-1298/superset@sha256:" + "f" * 64
+    stage_runtime_records(
+        tree,
+        _images(),
+        {"lean-smoke": "success", "app-runs": "success"},
+        image_refs={"app-runs": other},
+    )
+    _resign(tree)
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    _assert_rejected(
+        engine,
+        _service(engine, gh, tmp_path).poll(),
+        f"'app-runs' ran {other}, manifest ci image is sha256:{'b' * 64}",
+    )
+
+
+def test_job_result_success_contradicted_by_record_is_rejected(
+    engine: Engine, gh: FakeGitHub, tmp_path: Path
+) -> None:
+    tree = _bundle(tmp_path / "tree")
+    stage_runtime_records(tree, _images(), {"lean-smoke": "failure", "app-runs": "success"})
+    _resign(tree)
+    _publish(gh, tree, head_sha=BASELINE_SHA)
+    _assert_rejected(
+        engine,
+        _service(engine, gh, tmp_path).poll(),
+        "'lean-smoke' result claims success but runtime/lean-smoke/lean-smoke.json reports "
+        "failed_step='login'",
+    )
 
 
 def test_bundle_from_other_branch_is_rejected(
@@ -416,6 +501,82 @@ def test_tick_polls_scans_and_reports_counts(gh: FakeGitHub, tmp_path: Path) -> 
     assert (second.scans_ingested, second.scans_rejected) == (0, 0)
     assert second.work_items_created == 0
     assert len(_intakes(engine)) == 2
+
+
+def _closure_stamps(engine: Engine) -> list[datetime | None]:
+    with Session(engine) as db:
+        return [
+            r.closure_applied_at for r in db.exec(select(ScanRun).order_by(col(ScanRun.id))).all()
+        ]
+
+
+def test_run_ingested_by_the_service_alone_is_evaluated_by_the_next_tick(
+    gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """The `ingest` CLI is the intake service without an orchestrator: it persists the run and
+    stops. The next operator tick owes that run its closing evaluation and does it once."""
+    settings = Settings(
+        data_dir=tmp_path / "data", database_file="c.sqlite3", repo_root=ROOT, operator_mode=True
+    )
+    engine = open_database(settings.database_path)
+    _publish(gh, _bundle(tmp_path / "good"), head_sha=BASELINE_SHA)
+    svc = ScanIntakeService(
+        engine,
+        gh,
+        repo_root=ROOT,
+        evidence_dir=settings.data_dir / "evidence",
+        expect=IntakeExpectation(source_repo=FORK_REPO, source_branch="main"),
+    )
+    assert [o.status for o in svc.poll()] == [IntakeStatus.ingested]
+    assert _closure_stamps(engine) == [None]
+
+    orch = Orchestrator(engine, gh, FakeDevin(), settings)
+    first = orch.tick(auto_dispatch=False)
+    assert (first.scans_ingested, first.scans_rejected) == (0, 0), "already seen; not re-pulled"
+    stamps = _closure_stamps(engine)
+    assert stamps != [None]
+    orch.tick(auto_dispatch=False)
+    assert _closure_stamps(engine) == stamps
+    assert len(_intakes(engine)) == 1
+
+
+def test_run_that_outlived_a_crash_before_its_intake_record_is_recovered_and_evaluated(
+    gh: FakeGitHub, tmp_path: Path
+) -> None:
+    """`ScanRun` and `ScanIntake` are written in separate transactions. Losing the second leaves
+    a run the poller will meet again as `created=False`; it must still be evaluated exactly once
+    and end up with its intake row."""
+    settings = Settings(
+        data_dir=tmp_path / "data", database_file="c.sqlite3", repo_root=ROOT, operator_mode=True
+    )
+    engine = open_database(settings.database_path)
+    _publish(gh, _bundle(tmp_path / "good"), head_sha=BASELINE_SHA)
+    svc = ScanIntakeService(
+        engine,
+        gh,
+        repo_root=ROOT,
+        evidence_dir=settings.data_dir / "evidence",
+        expect=IntakeExpectation(source_repo=FORK_REPO, source_branch="main"),
+    )
+    assert svc.poll()[0].created
+    with Session(engine) as db:
+        for row in db.exec(select(ScanIntake)).all():
+            db.delete(row)
+        db.commit()
+    assert _intakes(engine) == [] and _closure_stamps(engine) == [None]
+
+    orch = Orchestrator(engine, gh, FakeDevin(), settings)
+    report = orch.tick(auto_dispatch=False)
+    assert (report.scans_ingested, report.scans_rejected) == (1, 0)
+    intakes = _intakes(engine)
+    assert len(intakes) == 1 and intakes[0].status is IntakeStatus.ingested
+    assert "scan run already present; no new rows written" in intakes[0].reasons
+    with Session(engine) as db:
+        assert len(db.exec(select(ScanRun)).all()) == 1
+    stamps = _closure_stamps(engine)
+    assert stamps != [None]
+    orch.tick(auto_dispatch=False)
+    assert _closure_stamps(engine) == stamps
 
 
 def test_ingest_cli_refuses_without_token(

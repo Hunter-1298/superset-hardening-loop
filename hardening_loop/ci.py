@@ -21,9 +21,11 @@ from typing import Any
 from hardening_loop.domain.enums import GateMode, ImageTarget, ScanMode, Trigger
 from hardening_loop.gate import GateVerdict, gate_verdict
 from hardening_loop.ingest.evidence import (
+    RUNTIME_RECORDS,
     SCAN_MANIFEST_SCHEMA,
     EvidenceError,
     ScanJobEvidence,
+    load_runtime_record,
     load_scan_job,
     sha256_file,
 )
@@ -426,6 +428,25 @@ def write_scan_manifest(
         attachments[rel_dir] = listed
     if controller_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", controller_sha):
         raise EvidenceError(f"controller sha {controller_sha!r} is not a full commit sha")
+    # A runtime job may only be recorded `success` when its own attached verdict says so for the
+    # image this run built; the manifest must not claim more than the evidence it carries.
+    for rt_job, (rel, target) in RUNTIME_RECORDS.items():
+        if run.job_results.get(rt_job) != "success":
+            continue
+        if rel not in files:
+            raise EvidenceError(f"{rt_job}: job result is success but {rel} is not attached")
+        record = load_runtime_record(out, rt_job)
+        image = images.get(target)
+        if image is None or record.digest != image.digest:
+            raise EvidenceError(
+                f"{rt_job}: {rel} ran {record.image_ref}, build pushed "
+                f"{image.digest if image else 'no ' + target.value + ' image'}"
+            )
+        if not record.passed:
+            raise EvidenceError(
+                f"{rt_job}: job result is success but {rel} reports "
+                f"failed_step={record.failed_step!r}"
+            )
 
     lean, ci = images.get(ImageTarget.lean), images.get(ImageTarget.ci)
     manifest: dict[str, Any] = {

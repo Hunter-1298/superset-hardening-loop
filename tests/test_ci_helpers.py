@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,13 @@ from hardening_loop.ci import (
 from hardening_loop.cli import main
 from hardening_loop.config import BASELINE_SHA, FORK_REPO
 from hardening_loop.domain.enums import GateMode, ImageTarget
-from hardening_loop.ingest.evidence import SCAN_MANIFEST_SCHEMA, EvidenceError, load_baseline
+from hardening_loop.ingest.evidence import (
+    SCAN_MANIFEST_SCHEMA,
+    EvidenceError,
+    load_baseline,
+    load_runtime_record,
+)
+from hardening_loop.replay.bundle import stage_runtime_records
 from hardening_loop.replay.synth import approved_vex
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "baseline" / BASELINE_SHA
@@ -329,24 +336,18 @@ def test_layer_delta_counts_only_ci_layers() -> None:
     assert delta["shared_layer_count"] == 2 and delta["lean_only_layers"] == []
 
 
-def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) -> None:
-    _stage_jobs(tmp_path)
+def _gate(tmp_path: Path) -> Path:
     gate = tmp_path / "gates" / "lean-policy.json"
     gate.parent.mkdir()
-    assert (
-        main(
-            [
-                "gate",
-                "--job",
-                str(tmp_path / "lean" / "policy"),
-                "--mode",
-                "report",
-                "--out",
-                str(gate),
-            ]
-        )
-        == 0
-    )
+    policy = str(tmp_path / "lean" / "policy")
+    assert main(["gate", "--job", policy, "--mode", "report", "--out", str(gate)]) == 0
+    return gate
+
+
+def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) -> None:
+    _stage_jobs(tmp_path)
+    gate = _gate(tmp_path)
+    stage_runtime_records(tmp_path, _images(), _run().job_results)
     manifest = write_scan_manifest(
         tmp_path,
         source_repo=FORK_REPO,
@@ -356,6 +357,7 @@ def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) ->
         images=_images(),
         run=_run(),
         gate_files={"lean-policy": gate},
+        attach_dirs=("runtime",),
     )
     assert manifest["schema"] == SCAN_MANIFEST_SCHEMA
     assert manifest["images"]["lean"]["image_id"] == LEAN_DIGEST
@@ -374,16 +376,18 @@ def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) ->
     assert loaded.run["run_id"] == 42 and loaded.gates["lean-policy"]["passed"] is True
     assert loaded.run["runtime_verified"] is True
     assert loaded.run["job_results"] == {"app-runs": "success", "lean-smoke": "success"}
+    assert {j: r.passed for j, r in loaded.runtime.items()} == {
+        "lean-smoke": True,
+        "app-runs": True,
+    }
+    assert loaded.runtime["lean-smoke"].digest == LEAN_DIGEST
+    assert loaded.runtime["app-runs"].digest == CI_DIGEST
 
 
 def test_write_scan_manifest_attaches_runtime_records_and_controller_sha(tmp_path: Path) -> None:
     _stage_jobs(tmp_path)
-    gate = tmp_path / "gates" / "lean-policy.json"
-    gate.parent.mkdir()
-    policy = str(tmp_path / "lean" / "policy")
-    assert main(["gate", "--job", policy, "--mode", "report", "--out", str(gate)]) == 0
-    (tmp_path / "runtime" / "lean-smoke").mkdir(parents=True)
-    (tmp_path / "runtime" / "lean-smoke" / "result.json").write_text('{"ok": true}\n')
+    gate = _gate(tmp_path)
+    stage_runtime_records(tmp_path, _images(), _run().job_results)
     (tmp_path / "runtime" / "app-runs" / "checks").mkdir(parents=True)
     (tmp_path / "runtime" / "app-runs" / "checks" / "login.json").write_text("{}\n")
     (tmp_path / "provenance").mkdir()
@@ -404,18 +408,110 @@ def test_write_scan_manifest_attaches_runtime_records_and_controller_sha(tmp_pat
     )
     assert manifest["controller_sha"] == controller
     assert manifest["attachments"] == {
-        "runtime": ["runtime/app-runs/checks/login.json", "runtime/lean-smoke/result.json"],
+        "runtime": [
+            "runtime/app-runs/app-runs.json",
+            "runtime/app-runs/checks/login.json",
+            "runtime/lean-smoke/lean-smoke.json",
+        ],
         "provenance": ["provenance/lean.jsonl"],
     }
-    for rel in ("runtime/lean-smoke/result.json", "provenance/lean.jsonl"):
+    for rel in ("runtime/lean-smoke/lean-smoke.json", "provenance/lean.jsonl"):
         assert rel in manifest["files"]
         assert f"  {rel}" in (tmp_path / "SHA256SUMS").read_text()
     load_baseline(tmp_path)
 
     # A byte changed in an attached record is caught like any scan file.
-    (tmp_path / "runtime" / "lean-smoke" / "result.json").write_text('{"ok": false}\n')
+    smoke = tmp_path / "runtime" / "lean-smoke" / "lean-smoke.json"
+    smoke.write_text(smoke.read_text().replace('"passed": true', '"passed": false'))
     with pytest.raises(EvidenceError):
         load_baseline(tmp_path)
+
+
+def test_write_scan_manifest_refuses_success_without_proving_record(tmp_path: Path) -> None:
+    """`job_results` saying success is a claim; the manifest only carries it when the job's own
+    verdict, for the image this run built, is attached and says the same."""
+    _stage_jobs(tmp_path)
+    gate = _gate(tmp_path)
+    kwargs: dict[str, Any] = dict(
+        source_repo=FORK_REPO,
+        source_branch="main",
+        source_sha=BASELINE_SHA,
+        platform="linux/amd64",
+        images=_images(),
+        run=_run(),
+        gate_files={"lean-policy": gate},
+    )
+    with pytest.raises(
+        EvidenceError, match=r"lean-smoke: job result is success but .* not attached"
+    ):
+        write_scan_manifest(tmp_path, **kwargs)
+
+    stage_runtime_records(tmp_path, _images(), {"lean-smoke": "success"})
+    with pytest.raises(EvidenceError, match=r"app-runs: job result is success but .* not attached"):
+        write_scan_manifest(tmp_path, attach_dirs=("runtime",), **kwargs)
+
+    # app-runs' own record says it failed at login even though the workflow result says success.
+    stage_runtime_records(tmp_path, _images(), {"lean-smoke": "success", "app-runs": "failure"})
+    with pytest.raises(
+        EvidenceError, match=r"app-runs: job result is success but .* failed_step='login'"
+    ):
+        write_scan_manifest(tmp_path, attach_dirs=("runtime",), **kwargs)
+
+    # A record for some other image than the one this run pushed.
+    other = "ghcr.io/hunter-1298/superset@sha256:" + "f" * 64
+    stage_runtime_records(tmp_path, _images(), _run().job_results, image_refs={"lean-smoke": other})
+    with pytest.raises(EvidenceError, match=r"lean-smoke: .* ran .*f{64}, build pushed .*a{64}"):
+        write_scan_manifest(tmp_path, attach_dirs=("runtime",), **kwargs)
+
+    # Malformed record.
+    (tmp_path / "runtime" / "lean-smoke" / "lean-smoke.json").write_text('{"ok": true}\n')
+    with pytest.raises(EvidenceError, match="image_ref None is not a digest reference"):
+        write_scan_manifest(tmp_path, attach_dirs=("runtime",), **kwargs)
+    assert not (tmp_path / "manifest.json").exists()
+
+    # A failed job with a matching failed record is recorded as such, not refused.
+    failed = {"lean-smoke": "success", "app-runs": "failure"}
+    stage_runtime_records(tmp_path, _images(), failed)
+    manifest = write_scan_manifest(
+        tmp_path, attach_dirs=("runtime",), **{**kwargs, "run": replace(_run(), job_results=failed)}
+    )
+    assert manifest["run"]["runtime_verified"] is False
+    assert load_baseline(tmp_path).runtime["app-runs"].failed_step == "login"
+
+
+@pytest.mark.parametrize(
+    ("doc", "needle"),
+    [
+        ("[]", "not a JSON object"),
+        ("{nope", "not JSON"),
+        ({"image_ref": "ghcr.io/x/y:latest", "passed": True, "checks": {}}, "digest reference"),
+        ({"image_ref": "r@sha256:" + "a" * 64, "passed": "yes", "checks": {}}, "not a boolean"),
+        ({"image_ref": "r@sha256:" + "a" * 64, "passed": True, "checks": []}, "checks is not"),
+        (
+            {"image_ref": "r@sha256:" + "a" * 64, "passed": True, "checks": {}, "failed_step": "x"},
+            "passed=true with failed_step",
+        ),
+        (
+            {
+                "image_ref": "r@sha256:" + "a" * 64,
+                "passed": False,
+                "checks": {},
+                "failed_step": None,
+            },
+            "passed=false without a failed_step",
+        ),
+    ],
+)
+def test_load_runtime_record_rejects_malformed(
+    tmp_path: Path, doc: str | dict[str, Any], needle: str
+) -> None:
+    path = tmp_path / "runtime" / "lean-smoke" / "lean-smoke.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(doc if isinstance(doc, str) else json.dumps(doc))
+    with pytest.raises(EvidenceError, match=needle):
+        load_runtime_record(tmp_path, "lean-smoke")
+    with pytest.raises(EvidenceError, match="no runtime record"):
+        load_runtime_record(tmp_path, "app-runs")
 
 
 def test_write_scan_manifest_refuses_bad_attachments(tmp_path: Path) -> None:

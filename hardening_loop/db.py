@@ -14,7 +14,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from hardening_loop.models import tables
 from hardening_loop.models.tables import utcnow
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # version -> SQL that brings a database at version-1 up to `version`. Only additive or renaming
 # statements; `create_all` afterwards adds any brand-new table.
@@ -32,6 +32,9 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
     4: ("ALTER TABLE scan_runs ADD COLUMN workflow JSON",),
     # 5 adds the `devin_assets` and `metrics_snapshots` tables only; `create_all` builds them.
     5: (),
+    # Runs already in the database are owed a closing evaluation on the next tick (NULL); the
+    # evaluation itself is a no-op for a run that could not close anything.
+    6: ("ALTER TABLE scan_runs ADD COLUMN closure_applied_at DATETIME",),
 }
 
 

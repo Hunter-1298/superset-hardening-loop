@@ -84,6 +84,9 @@ class ScanRun(SQLModel, table=True):
     is_baseline: bool = False
     # GitHub Actions run metadata from the evidence manifest (url, workflow_sha, job_results, ...).
     workflow: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+    # When the orchestrator evaluated this run as closing evidence (closure, regressions, drift).
+    # NULL means the evaluation is still owed, however the run got here (poll, CLI, crash window).
+    closure_applied_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
 
 
 class ScanIntake(SQLModel, table=True):

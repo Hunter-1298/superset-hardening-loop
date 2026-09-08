@@ -12,6 +12,7 @@ from typing import Any
 from hardening_loop.ci import RegistryImage, WorkflowRun, gate_job, write_scan_manifest
 from hardening_loop.config import BASELINE_SHA, FORK_REPO
 from hardening_loop.domain.enums import GateMode, ImageTarget
+from hardening_loop.ingest.evidence import RUNTIME_RECORDS
 
 LEAN_DIGEST = "sha256:" + "a" * 64
 CI_DIGEST = "sha256:" + "b" * 64
@@ -61,6 +62,36 @@ def registry_images() -> dict[ImageTarget, RegistryImage]:
     }
 
 
+def stage_runtime_records(
+    out: Path,
+    images: dict[ImageTarget, RegistryImage],
+    job_results: dict[str, str],
+    *,
+    image_refs: dict[str, str] | None = None,
+) -> None:
+    """Write the verdict each runtime job leaves under `runtime/<job>/`, shaped like lean_smoke.sh
+    and app_runs.py write it and consistent with `job_results` (a failed job names a failed step).
+    Jobs without a result leave no record, as when the job never ran. `image_refs` overrides the
+    image a record claims to have started."""
+    for job, (rel, target) in RUNTIME_RECORDS.items():
+        result = job_results.get(job)
+        if result is None:
+            continue
+        passed = result == "success"
+        image = images[target]
+        ref = (image_refs or {}).get(job) or f"{image.tag.rsplit(':', 1)[0]}@{image.digest}"
+        checks = {"init": "ok", "migrations": "4b2a8c9d3e1f (head)", "health": "200 OK after 6s"}
+        doc = {
+            "image_ref": ref,
+            "passed": passed,
+            "failed_step": None if passed else "login",
+            "checks": checks if passed else {"init": "ok", "health": "200 OK after 6s"},
+        }
+        path = out / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+
+
 def stage_evidence_bundle(
     out: Path,
     *,
@@ -95,6 +126,10 @@ def stage_evidence_bundle(
     gate.parent.mkdir()
     payload = gate_job(out / "lean" / "policy", GateMode.report).to_dict()
     gate.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    results = (
+        job_results if job_results is not None else {"lean-smoke": "success", "app-runs": "success"}
+    )
+    stage_runtime_records(out, registry_images(), results)
     write_scan_manifest(
         out,
         source_repo=source_repo,
@@ -110,12 +145,11 @@ def stage_evidence_bundle(
             ref=f"refs/heads/{source_branch}",
             gate_mode=GateMode.report,
             head_sha=head_sha,
-            job_results=job_results
-            if job_results is not None
-            else {"lean-smoke": "success", "app-runs": "success"},
+            job_results=results,
         ),
         expected_jobs=("lean-raw", "lean-policy", "ci-raw"),
         gate_files={"lean-policy": gate},
+        attach_dirs=("runtime",) if results else (),
         now=now or datetime(2026, 9, 8, 3, tzinfo=UTC),
     )
     return out

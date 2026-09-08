@@ -64,6 +64,13 @@ Rejection reasons and the fail-closed rules are documented at the top of
 `data/evidence/runs/<run id>/<attempt>/` for inspection. The operator poll loop performs the same intake
 on every tick.
 
+Intake only persists a run. Its closing evaluation (closures, regressions, database drift) happens
+on the next operator tick, which evaluates every `scan_runs` row whose `closure_applied_at` is still
+null, oldest scan first, and stamps it in the same transaction as its effects. A run brought in by
+the CLI, or one persisted just before a crash cut its intake record short, is therefore evaluated
+exactly once. An older run evaluated after a newer one has already reported or closed a finding
+cannot close or reopen that finding.
+
 An `incomplete` run (a runtime job failed, or the workflow conclusion is not `success`) is
 persisted with its raw evidence but never used by the closer as proof of absence.
 

@@ -1666,29 +1666,48 @@ class Orchestrator:
         )
 
     def poll_scans(self) -> tuple[int, int]:
-        """Bring unseen completed `security-scan` runs of the remediation branch in and evaluate
-        each newly created run as a closing run. Returns (ingested, rejected) for this tick; a run
-        seen before counts as neither. Without a fork token (replay, doubles) the double simply has
-        no runs scripted and this is a no-op."""
+        """Bring unseen completed `security-scan` runs of the remediation branch in, then evaluate
+        every persisted run still owed its closing evaluation. Returns (ingested, rejected) for
+        this tick; a run seen before counts as neither. Without a fork token (replay, doubles) the
+        double simply has no runs scripted and only the evaluation step does anything."""
         ingested = rejected = 0
         for outcome in self.scan_intake().poll():
             if outcome.status is IntakeStatus.rejected:
                 rejected += 1
-                continue
-            ingested += 1
-            if outcome.created and outcome.scan_run_id is not None:
-                self.apply_scan_run(outcome.scan_run_id)
+            else:
+                ingested += 1
+        self.apply_pending_scan_runs()
         return ingested, rejected
 
     # ------------------------------------------------------------------ closure
 
+    def pending_scan_runs(self) -> list[int]:
+        """Ids of runs not yet evaluated as closing evidence, oldest scan first, so a backlog is
+        replayed in the order the scans happened rather than the order they were noticed."""
+        with session_scope(self.engine) as db:
+            rows = db.exec(
+                select(ScanRun.id)
+                .where(col(ScanRun.closure_applied_at).is_(None))
+                .order_by(col(ScanRun.finished_at), col(ScanRun.ingested_at), col(ScanRun.id))
+            ).all()
+        return [r for r in rows if r is not None]
+
+    def apply_pending_scan_runs(self) -> dict[int, dict[str, int]]:
+        """Evaluate every run owed a closing evaluation, whether it arrived through the poller, the
+        `ingest` CLI, or was persisted just before a crash cut its intake record short. Each run
+        is marked applied in the same transaction as its effects, so a second call is a no-op."""
+        return {run_id: self.apply_scan_run(run_id) for run_id in self.pending_scan_runs()}
+
     def apply_scan_run(self, run_id: int) -> dict[str, int]:
-        """Evaluate one ingested run as a closing run for every finding it could close."""
+        """Evaluate one ingested run as a closing run for every finding it could close. A run
+        already applied is not evaluated again: the transitions it caused are recorded once."""
         counts: dict[str, int] = defaultdict(int)
         with session_scope(self.engine) as db:
             run = db.get(ScanRun, run_id)
             if run is None:
                 raise ValueError(f"scan run {run_id} not found")
+            if run.closure_applied_at is not None:
+                return {}
             jobs = list(db.exec(select(ScanJob).where(ScanJob.scan_run_id == run_id)).all())
             sightings = list(db.exec(select(Sighting).where(Sighting.scan_run_id == run_id)).all())
             closing_wis = db.exec(
@@ -1700,7 +1719,29 @@ class Orchestrator:
                 self._close_work_item(db, wi, run, jobs, sightings, counts)
             self._regressions(db, run, jobs, sightings, counts)
             self._drift(db, run, jobs, sightings, counts)
+            run.closure_applied_at = self.clock.now()
+            db.add(run)
         return dict(counts)
+
+    def _later_run_saw(self, db: DbSession, run: ScanRun, f: Finding) -> ScanRun | None:
+        """The latest run that already spoke for `f` (last reported it, or closed it) when that
+        scan finished after `run` did. An older run evaluated late (backlog, CLI ingest, recovery)
+        says nothing about what a later scan saw, so it must neither close nor reopen the
+        finding."""
+        if run.finished_at is None:
+            return None
+        latest: ScanRun | None = None
+        for rid in {f.last_seen_run_id, f.closed_by_run_id} - {None, run.id}:
+            other = db.get(ScanRun, rid)
+            if other is None or other.finished_at is None or other.finished_at <= run.finished_at:
+                continue
+            if (
+                latest is None
+                or latest.finished_at is None
+                or other.finished_at > latest.finished_at
+            ):
+                latest = other
+        return latest
 
     def _present_families(
         self, db: DbSession, sightings: list[Sighting]
@@ -1760,6 +1801,7 @@ class Orchestrator:
                 merge_sha=wi.merge_sha,
                 is_ancestor=self._is_ancestor,
                 require_policy=require_policy,
+                superseded_by=self._later_run_saw(db, run, f),
             )
             outcome = decide_outcome(
                 f,
@@ -1893,6 +1935,7 @@ class Orchestrator:
                 merge_sha=closing_run.source_sha if closing_run else None,
                 is_ancestor=self._is_ancestor,
                 require_policy=False,
+                superseded_by=self._later_run_saw(db, run, f),
             )
             if not validity.valid:
                 continue
@@ -1950,7 +1993,13 @@ class Orchestrator:
                     continue
                 touched_wis.add(f.work_item_id)
             validity = validate_closing_run(
-                run, jobs, f, merge_sha=None, is_ancestor=self._is_ancestor, require_policy=False
+                run,
+                jobs,
+                f,
+                merge_sha=None,
+                is_ancestor=self._is_ancestor,
+                require_policy=False,
+                superseded_by=self._later_run_saw(db, run, f),
             )
             if not validity.valid:
                 continue

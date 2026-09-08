@@ -279,6 +279,7 @@ def _downgrade_to_v2(path: Path) -> None:
             "DROP TABLE devin_assets",
             "DROP TABLE metrics_snapshots",
             "ALTER TABLE scan_runs DROP COLUMN workflow",
+            "ALTER TABLE scan_runs DROP COLUMN closure_applied_at",
             "ALTER TABLE work_items DROP COLUMN verification_depth",
             "ALTER TABLE work_items RENAME COLUMN lifecycle_level TO verification_level",
             "ALTER TABLE pull_requests DROP COLUMN verification_depth",
@@ -313,12 +314,12 @@ def test_opening_a_v2_database_migrates_it_in_place(tmp_path: Path) -> None:
     assert "verification_checks" not in _tables(path)
     assert "scan_intakes" not in _tables(path)
     assert {"devin_assets", "metrics_snapshots"}.isdisjoint(_tables(path))
-    assert "workflow" not in _columns(path, "scan_runs")
+    assert {"workflow", "closure_applied_at"}.isdisjoint(_columns(path, "scan_runs"))
 
     engine = open_database(path)  # init_db migrates before create_all
     with Session(engine) as db:
         versions = [v.version for v in db.exec(select(SchemaVersion).order_by(SchemaVersion.id))]  # type: ignore[arg-type]
-        assert versions == [2, 3, 4, 5] and SCHEMA_VERSION == 5
+        assert versions == [2, 3, 4, 5, 6] and SCHEMA_VERSION == 6
         # Repeat open is a no-op.
         assert migrate(engine) == []
     engine.dispose()
@@ -328,7 +329,7 @@ def test_opening_a_v2_database_migrates_it_in_place(tmp_path: Path) -> None:
     assert "verification_level" not in wi_cols
     assert {"lifecycle_level", "verification_depth", "depth_rungs", "review_id"} <= pr_cols
     assert "verification_checks" in _tables(path)
-    assert "workflow" in _columns(path, "scan_runs")
+    assert {"workflow", "closure_applied_at"} <= _columns(path, "scan_runs")
     assert "scan_intakes" in _tables(path)
     assert {"devin_assets", "metrics_snapshots"} <= _tables(path)
 
@@ -355,7 +356,7 @@ def test_failed_migration_step_rolls_back_ddl_and_version_together(
     with Session(engine) as db:
         versions = [v.version for v in db.exec(select(SchemaVersion).order_by(SchemaVersion.id))]  # type: ignore[arg-type]
     engine.dispose()
-    assert versions == [2, 3, 4, 5]
+    assert versions == [2, 3, 4, 5, 6]
     assert "lifecycle_level" in _columns(path, "work_items")
 
 

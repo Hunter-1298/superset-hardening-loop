@@ -24,7 +24,10 @@ Fail-closed rules (any one rejects the bundle; the raw files stay on disk under 
 * `source_sha` not a descendant of the 6.1.0 baseline commit (ancestry is asked of GitHub);
 * platform other than the expected one; any required scan job (`lean-raw`, `lean-policy`,
   `ci-raw`) missing; a scan job whose evidence lacks either scanner;
-* a required runtime job (`lean-smoke`, `app-runs`) with no recorded result.
+* a required runtime job (`lean-smoke`, `app-runs`) with no recorded result, or without its
+  attached, checksummed verdict (`runtime/<job>/<job>.json`), or whose verdict is malformed, names
+  an image other than the manifest's digest for that target, or reports a failure while
+  `run.job_results` claims `success`. The job-result string alone never proves a runtime job.
 
 A run whose runtime jobs *failed* (result recorded, not `success`) or whose workflow conclusion is
 not `success` is ingested with its raw evidence and persisted `incomplete`; the closer never
@@ -52,9 +55,11 @@ from hardening_loop.domain.enums import GateMode, IntakeStatus, Scanner, Trigger
 from hardening_loop.github.artifacts import ArtifactError
 from hardening_loop.github.protocol import ArtifactInfo, GitHubClient, WorkflowRunInfo
 from hardening_loop.ingest.evidence import (
+    RUNTIME_RECORDS,
     SCAN_MANIFEST_SCHEMA,
     BaselineManifest,
     EvidenceError,
+    RuntimeRecord,
     load_baseline,
     load_source_pyproject,
 )
@@ -181,10 +186,53 @@ def validate_bundle(
 
     job_results = dict(run_meta.get("job_results") or {})
     for name in expect.required_runtime_jobs:
-        if name not in job_results:
+        claimed = job_results.get(name)
+        if claimed is None:
             reasons.append(f"runtime job {name!r} has no recorded result")
+        record = manifest.runtime.get(name)
+        if record is None:
+            rel = RUNTIME_RECORDS[name][0] if name in RUNTIME_RECORDS else "<unknown>"
+            reasons.append(f"runtime job {name!r} has no attached record ({rel})")
+            continue
+        reasons.extend(runtime_record_problems(manifest, record, claimed))
 
     return manifest, reasons
+
+
+def runtime_record_problems(
+    manifest: BaselineManifest, record: RuntimeRecord, claimed: str | None
+) -> list[str]:
+    """Why an attached runtime verdict does not back the run: it started an image other than the
+    manifest's digest for that target, or the workflow claims `success` for a job whose own record
+    says otherwise. A record that passed under a job GitHub marks failed is not a problem here: the
+    job result stays as recorded and the run is persisted incomplete."""
+    problems: list[str] = []
+    target = RUNTIME_RECORDS[record.job][1].value
+    expected = str((manifest.images.get(target) or {}).get("image_id") or "")
+    if record.digest != expected:
+        problems.append(
+            f"runtime job {record.job!r} ran {record.image_ref}, manifest {target} image is "
+            f"{expected or 'absent'}"
+        )
+    if claimed == "success" and not record.passed:
+        problems.append(
+            f"runtime job {record.job!r} result claims success but {record.path} reports "
+            f"failed_step={record.failed_step!r}"
+        )
+    return problems
+
+
+def proven_job_results(manifest: BaselineManifest) -> dict[str, str]:
+    """`run.job_results` with `success` kept only where the attached verdict proves it; anything
+    claimed but unproven is recorded as `unproven`, which persists the run incomplete."""
+    results = {str(k): str(v) for k, v in (manifest.run.get("job_results") or {}).items()}
+    for name, result in list(results.items()):
+        if result != "success" or name not in RUNTIME_RECORDS:
+            continue
+        record = manifest.runtime.get(name)
+        if record is None or runtime_record_problems(manifest, record, result):
+            results[name] = "unproven"
+    return results
 
 
 def run_meta_for(
@@ -193,7 +241,7 @@ def run_meta_for(
     *,
     repo: str,
 ) -> RunMeta:
-    job_results = {str(k): str(v) for k, v in (manifest.run.get("job_results") or {}).items()}
+    job_results = proven_job_results(manifest)
     job_results["workflow"] = run.conclusion or run.status or "unknown"
     return RunMeta(
         external_run_id=external_run_id(repo, run),
