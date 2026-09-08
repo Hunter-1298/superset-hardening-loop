@@ -11,6 +11,7 @@ Replay mode is incompatible with live clients by construction: `build_live_orche
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import secrets
 import threading
@@ -36,6 +37,23 @@ log = logging.getLogger("hardening_loop.operator")
 
 class OperatorConfigError(RuntimeError):
     pass
+
+
+def require_loopback_bind(host: str) -> None:
+    """The launch route is unauthenticated beyond its CSRF token and is served over plain HTTP,
+    so operator mode only binds loopback. Anything else must sit behind an authenticating
+    TLS proxy, which is a deliberate deployment decision rather than a default."""
+    if host.strip().lower() == "localhost":
+        return
+    try:
+        if ipaddress.ip_address(host.strip().strip("[]")).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise OperatorConfigError(
+        f"operator mode binds loopback only (got --host {host!r}); the launch route has no "
+        "authentication of its own, so put an authenticating TLS proxy in front instead"
+    )
 
 
 def build_live_orchestrator(settings: Settings, *, engine: Engine | None = None) -> Orchestrator:

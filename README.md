@@ -34,6 +34,9 @@ goes through the same orchestrator path as automatic dispatch (issue creation, `
 for lower severities, concurrency and ACU budget limits, duplicate-session reconciliation) and
 leaves an "operator launched" comment on the issue; approvals and merges stay in GitHub, and the
 server polls the session, PR, CI, Devin Review and rescans on `HL_POLL_INTERVAL_SECONDS`.
+The launch route has no login of its own, so operator mode refuses to bind anything but loopback;
+serve it remotely only behind an authenticating TLS proxy. Launch posts with a foreign `Origin` or
+`Sec-Fetch-Site` are refused before the CSRF token is checked.
 
 ```bash
 hardening-loop serve --operator --doubles --operator-login you   # in-memory GitHub/Devin doubles, no spend

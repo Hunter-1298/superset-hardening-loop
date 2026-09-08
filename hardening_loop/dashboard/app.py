@@ -10,13 +10,14 @@ explicit confirmation step and a CSRF check. Merges and dispositions still happe
 from __future__ import annotations
 
 import hmac
+import logging
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exception_handlers import http_exception_handler
@@ -56,7 +57,7 @@ from hardening_loop.models.tables import (
     WorkItem,
 )
 from hardening_loop.operator import OperatorContext
-from hardening_loop.orchestrator.launch import LaunchBlock
+from hardening_loop.orchestrator.launch import LaunchBlock, LaunchResult
 from hardening_loop.report.run_report import (
     ReportBody,
     build_report,
@@ -68,6 +69,7 @@ from hardening_loop.report.run_report import (
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 LAUNCH_PATH = re.compile(r"^/operator/launch/\d+$")
 CONFIRM_VALUE = "launch"
+log = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_ROWS = 2000
@@ -106,6 +108,16 @@ LAUNCH_BLOCK_TEXT: dict[LaunchBlock, str] = {
     LaunchBlock.at_capacity: "Every concurrent session slot is in use.",
     LaunchBlock.over_budget: "This item's ACU cap would exceed the global ACU budget.",
 }
+
+
+def _same_origin(request: Request) -> bool:
+    """Browsers send `Origin` on every form POST; when present it must name this server.
+    Requests without either header (curl, older clients) are left to the CSRF token."""
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    host = request.headers.get("host", "")
+    return bool(host) and urlsplit(origin).netloc.lower() == host.lower()
 
 
 def _launch_block(reason: str) -> LaunchBlock | None:
@@ -796,6 +808,8 @@ def create_app(
             fetch_site = request.headers.get("sec-fetch-site")
             if fetch_site not in (None, "same-origin", "none"):
                 raise HTTPException(403, "cross-site launch request refused")
+            if not _same_origin(request):
+                raise HTTPException(403, "launch request origin does not match this server")
             if not request.headers.get("content-type", "").startswith(
                 "application/x-www-form-urlencoded"
             ):
@@ -810,6 +824,9 @@ def create_app(
                 result = await run_in_threadpool(ctx.launch, wi_id)
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
+            except Exception as exc:
+                log.exception("operator launch of work item %s raised", wi_id)
+                result = LaunchResult("failed", wi_id, f"{exc.__class__.__name__}: {exc}"[:300])
             status = 200 if result.ok else (409 if result.outcome == "rejected" else 502)
             with session_scope(engine) as db:
                 wi = db.get(WorkItem, wi_id)
