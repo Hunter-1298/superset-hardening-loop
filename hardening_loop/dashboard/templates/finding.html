@@ -8,7 +8,7 @@
 {% for s, v in f.fix_versions_by_scanner.items() %}{% for x in v if x not in fixes %}{% set _ = fixes.append(x) %}{% endfor %}{% endfor %}
 {% set top = detail.best_cvss %}
 {% call ui.page_header(f.vuln_id, detail.title or f.title or "No title recorded by either scanner.", crumbs=[("Vulnerabilities", "/findings"), (f.vuln_id, None)]) %}
-  {% if detail.primary_url %}<a href="{{ detail.primary_url }}" rel="noopener">Advisory</a>{% endif %}
+  {% if detail.primary_url %}<a href="{{ detail.primary_url }}" target="_blank" rel="noopener">Advisory</a>{% endif %}
 {% endcall %}
 
 <div class="fact-row" aria-label="Status">
@@ -41,9 +41,9 @@
     {% with launch=launch, wi=wi %}{% include "_launch_panel.html" %}{% endwith %}
     <ul class="action-links" aria-label="GitHub and Devin">
       <li><a href="/issues/{{ wi.id }}">Work item #{{ wi.id }}</a></li>
-      {% if wi.issue_url %}<li><a href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a></li>{% endif %}
-      {% if wi.pr_url %}<li><a href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a></li>{% endif %}
-      {% for s in sessions if s.url %}<li><a href="{{ s.url }}" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a></li>{% endfor %}
+      {% if wi.issue_url %}<li><a href="{{ wi.issue_url }}" target="_blank" rel="noopener">GitHub issue #{{ wi.issue_number }}</a></li>{% endif %}
+      {% if wi.pr_url %}<li><a href="{{ wi.pr_url }}" target="_blank" rel="noopener">Pull request #{{ wi.pr_number }}</a></li>{% endif %}
+      {% for s in sessions if s.url %}<li><a href="{{ s.url }}" target="_blank" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a></li>{% endfor %}
     </ul>
   </div>
 </section>
@@ -116,7 +116,7 @@
             {% if s.locations %}<dt>Locations</dt><dd class="mono">{{ s.locations|join(", ") }}</dd>{% endif %}
             {% if s.layer_id %}<dt>Layer</dt><dd class="mono">{{ s.layer_id }}</dd>{% endif %}
             {% if s.namespace %}<dt>Namespace</dt><dd class="mono">{{ s.namespace }}</dd>{% endif %}
-            {% if s.data_source %}<dt>Data source</dt><dd>{% if s.data_source_url %}<a href="{{ s.data_source_url }}" rel="noopener" class="mono">{{ s.data_source }}</a>{% else %}<span class="mono">{{ s.data_source }}</span>{% endif %}</dd>{% endif %}
+            {% if s.data_source %}<dt>Data source</dt><dd>{% if s.data_source_url %}<a href="{{ s.data_source_url }}" target="_blank" rel="noopener" class="mono">{{ s.data_source }}</a>{% else %}<span class="mono">{{ s.data_source }}</span>{% endif %}</dd>{% endif %}
             {% if s.fingerprint %}<dt>Fingerprint</dt><dd class="mono">{{ s.fingerprint }}</dd>{% endif %}
           </dl>
           {% endfor %}
@@ -138,7 +138,7 @@
       <div class="card-body">
         {% if detail.references %}
         <ul class="list-plain list-rows refs">
-          {% for r in detail.references %}<li><a href="{{ r.url }}" rel="noopener" class="mono small">{{ r.url }}</a> <span class="muted small">{{ r.scanners|join(", ") }}</span></li>{% endfor %}
+          {% for r in detail.references %}<li><a href="{{ r.url }}" target="_blank" rel="noopener" class="mono small">{{ r.url }}</a> <span class="muted small">{{ r.scanners|join(", ") }}</span></li>{% endfor %}
         </ul>
         {% else %}
         <p class="muted">No references recorded.</p>
@@ -180,19 +180,19 @@
           <dt>Lifecycle</dt><dd>{{ (wi.lifecycle_level|lifecycle_label).text }}</dd>
           <dt>Verified depth</dt><dd>{{ (wi.verification_depth|depth_label).text }}</dd>
           <dt>ACU cap</dt><dd>{{ wi.acu_cap|num(0) }}</dd>
-          <dt>Issue</dt><dd>{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>{% else %}<span class="muted">not opened yet</span>{% endif %}</dd>
+          <dt>Issue</dt><dd>{% if wi.issue_url %}<a href="{{ wi.issue_url }}" target="_blank" rel="noopener">#{{ wi.issue_number }}</a>{% else %}<span class="muted">not opened yet</span>{% endif %}</dd>
           {% if wi.blocked_reason and (wi.state|stage_of).value == "attention" %}<dt>Blocked</dt><dd>{{ wi.blocked_reason|blocked_reason }}</dd>{% endif %}
         </dl>
         {% if sessions %}
         <h3 class="sub mt">Devin sessions</h3>
         <ul class="list-plain list-rows">
-          {% for s in sessions %}<li>{% if s.url %}<a class="mono" href="{{ s.url }}" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %} · {{ (s.status|plain_label).text }}{% if s.status_detail %} <span class="muted">{{ s.status_detail }}</span>{% endif %} · {{ s.acus_consumed|num }} ACU</li>{% endfor %}
+          {% for s in sessions %}<li>{% if s.url %}<a class="mono" href="{{ s.url }}" target="_blank" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %} · {{ (s.status|plain_label).text }}{% if s.status_detail %} <span class="muted">{{ s.status_detail }}</span>{% endif %} · {{ s.acus_consumed|num }} ACU</li>{% endfor %}
         </ul>
         {% endif %}
         {% if prs %}
         <h3 class="sub mt">Pull requests</h3>
         <ul class="list-plain list-rows">
-          {% for p in prs %}<li><a href="{{ p.url }}" rel="noopener">#{{ p.number }}</a> · {{ (p.state|pr_state).text }} · {{ (p.lifecycle_level|lifecycle_label).text }} · {{ (p.verification_depth|depth_label).text }}</li>{% endfor %}
+          {% for p in prs %}<li><a href="{{ p.url }}" target="_blank" rel="noopener">#{{ p.number }}</a> · {{ (p.state|pr_state).text }} · {{ (p.lifecycle_level|lifecycle_label).text }} · {{ (p.verification_depth|depth_label).text }}</li>{% endfor %}
         </ul>
         {% endif %}
         {% else %}

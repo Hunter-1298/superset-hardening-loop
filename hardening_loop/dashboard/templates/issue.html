@@ -15,7 +15,7 @@
     <div class="action-now">
       <span class="action-stage">{{ ui.badge(stage_lab) }} <span class="secondary">{{ (wi.state|wi_state).text }}</span></span>
       {% if next_action %}
-      <p class="action-next" role="status"><strong>Next human action.</strong> {{ next_action }}{% if wi.pr_url or wi.issue_url %} Act in GitHub on {% if wi.pr_url %}<a href="{{ wi.pr_url }}" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} or {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}; this dashboard does not approve or merge.{% endif %}</p>
+      <p class="action-next" role="status"><strong>Next human action.</strong> {{ next_action }}{% if wi.pr_url or wi.issue_url %} Act in GitHub on {% if wi.pr_url %}<a href="{{ wi.pr_url }}" target="_blank" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} or {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" target="_blank" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}; this dashboard does not approve or merge.{% endif %}</p>
       {% elif stage.value == "ready" %}
       <p class="action-next">{% if launch and launch.eligible %}Nothing is running yet. Launch Devin to open the GitHub issue, start one session and get a pull request against <span class="mono">{{ wi.source_branch }}</span>.{% elif launch %}Queued and waiting.{% else %}Queued and waiting for an operator to launch Devin.{% endif %}</p>
       {% else %}
@@ -26,9 +26,9 @@
   <div class="action-side">
     {% include "_launch_panel.html" %}
     <ul class="action-links" aria-label="GitHub and Devin">
-      {% if wi.issue_url %}<li><a href="{{ wi.issue_url }}" rel="noopener">GitHub issue #{{ wi.issue_number }}</a></li>{% endif %}
-      {% if wi.pr_url %}<li><a href="{{ wi.pr_url }}" rel="noopener">Pull request #{{ wi.pr_number }}</a></li>{% endif %}
-      {% for s in sessions if s.url %}<li><a href="{{ s.url }}" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a></li>{% endfor %}
+      {% if wi.issue_url %}<li><a href="{{ wi.issue_url }}" target="_blank" rel="noopener">GitHub issue #{{ wi.issue_number }}</a></li>{% endif %}
+      {% if wi.pr_url %}<li><a href="{{ wi.pr_url }}" target="_blank" rel="noopener">Pull request #{{ wi.pr_number }}</a></li>{% endif %}
+      {% for s in sessions if s.url %}<li><a href="{{ s.url }}" target="_blank" rel="noopener">Devin session{% if sessions|length > 1 %} {{ loop.index }}{% endif %}</a></li>{% endfor %}
       {% if not wi.issue_url and not wi.pr_url and not sessions %}<li class="muted">No issue, session or pull request yet</li>{% endif %}
     </ul>
     <dl class="action-facts">
@@ -107,7 +107,7 @@
       {{ ui.section_head("Verification depth", id="depth-heading") }}
       <div class="card-body">
         {% if current_pr %}
-        <p class="small muted">Rungs proven by complete CI evidence on head {{ ui.sha(current_pr.head_sha) }} of <a href="{{ current_pr.url }}" rel="noopener">#{{ current_pr.number }}</a>. Devin's own test claims are listed but never raise the depth.</p>
+        <p class="small muted">Rungs proven by complete CI evidence on head {{ ui.sha(current_pr.head_sha) }} of <a href="{{ current_pr.url }}" target="_blank" rel="noopener">#{{ current_pr.number }}</a>. Devin's own test claims are listed but never raise the depth.</p>
         <ol class="ladder">
           {% for d in depth_levels %}
           {% set rung = current_pr.depth_rungs.get(d.name) %}
@@ -118,7 +118,7 @@
             {% if recs %}
             <ul class="list-plain small">
               {% for c in recs %}
-              <li>{% if c.url %}<a href="{{ c.url }}" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %} · {{ (c.status|check_status).text }}{% if c.source.value == "devin_claim" %} <span class="muted">(Devin claim)</span>{% endif %}{% if c.detail %} <span class="mono muted">{{ c.detail }}</span>{% endif %}</li>
+              <li>{% if c.url %}<a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %} · {{ (c.status|check_status).text }}{% if c.source.value == "devin_claim" %} <span class="muted">(Devin claim)</span>{% endif %}{% if c.detail %} <span class="mono muted">{{ c.detail }}</span>{% endif %}</li>
               {% endfor %}
             </ul>
             {% endif %}
@@ -152,13 +152,13 @@
     <tbody>
     {% for s in sessions %}
     <tr>
-      <td>{% if s.url %}<a class="mono" href="{{ s.url }}" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %}{% if s.playbook_id %}<span class="secondary mono">playbook {{ s.playbook_id }}</span>{% endif %}</td>
+      <td>{% if s.url %}<a class="mono" href="{{ s.url }}" target="_blank" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %}{% if s.playbook_id %}<span class="secondary mono">playbook {{ s.playbook_id }}</span>{% endif %}</td>
       <td>{{ ui.badge(s.status|plain_label) }}</td>
       <td class="mono">{{ s.status_detail or "—" }}</td>
       <td class="num">{{ s.acus_consumed|num }}</td>
       <td class="num">{{ s.max_acu_limit|num(0) }}</td>
       <td class="num">{{ s.messages_sent }}</td>
-      <td>{% for p in s.pull_requests %}<a href="{{ p.pr_url }}" rel="noopener">{{ p.pr_url|replace("https://github.com/", "") }}</a>{% if p.pr_state %} <span class="muted small">({{ (p.pr_state|pr_state).text }})</span>{% endif %}<br>{% else %}<span class="muted">—</span>{% endfor %}</td>
+      <td>{% for p in s.pull_requests %}<a href="{{ p.pr_url }}" target="_blank" rel="noopener">{{ p.pr_url|replace("https://github.com/", "") }}</a>{% if p.pr_state %} <span class="muted small">({{ (p.pr_state|pr_state).text }})</span>{% endif %}<br>{% else %}<span class="muted">—</span>{% endfor %}</td>
       <td class="w-date">{{ s.created_at|dt }}</td>
       <td class="w-date">{{ s.finished_at|dt }}</td>
     </tr>
@@ -196,7 +196,7 @@
     <tbody>
     {% for p in prs %}
     <tr>
-      <td><a class="primary" href="{{ p.url }}" rel="noopener">#{{ p.number }}</a><span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
+      <td><a class="primary" href="{{ p.url }}" target="_blank" rel="noopener">#{{ p.number }}</a><span class="secondary mono">{{ p.head_branch }} → {{ p.base_branch }}</span></td>
       <td>{{ ui.pr_state_badge(p.state) }}</td>
       <td>{{ ui.level_badge(p.lifecycle_level) }}</td>
       <td>{{ ui.depth_badge(p.verification_depth) }}</td>
@@ -219,7 +219,7 @@
       {% for c in checks %}
       <tr>
         <td>{{ ui.sha(c.head_sha) }}</td>
-        <td>{% if c.url %}<a href="{{ c.url }}" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}</td>
+        <td>{% if c.url %}<a href="{{ c.url }}" target="_blank" rel="noopener">{{ c.name }}</a>{% else %}{{ c.name }}{% endif %}</td>
         <td>{{ ui.check_badge(c.conclusion) }}</td>
         <td class="mono">{{ c.status }}</td>
         <td class="w-date">{{ c.observed_at|dt }}</td>

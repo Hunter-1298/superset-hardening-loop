@@ -5,8 +5,8 @@
 {{ ui.page_header("Devin " ~ ("launched" if result.outcome == "created" else "session adopted"), "Work item #" ~ result.work_item_id ~ (" · " ~ wi.title if wi else "") ~ ". The controller now polls the session, then its pull request, CI and review until a human merges and a rescan confirms the fix.", crumbs=[("Work items", "/issues"), ("Work item #" ~ result.work_item_id, "/issues/" ~ result.work_item_id), ("Launched", None)]) }}
 <div class="notice notice-success" role="status">
   <p><strong>{{ "Session created." if result.outcome == "created" else "Existing session adopted." }}</strong>
-  {% if result.session_url %}<a href="{{ result.session_url }}" rel="noopener">Open the Devin session</a>{% elif result.session_id %}<span class="mono">{{ result.session_id }}</span>{% endif %}
-  {% if result.issue_url %} · <a href="{{ result.issue_url }}" rel="noopener">Tracking issue</a>{% endif %}</p>
+  {% if result.session_url %}<a href="{{ result.session_url }}" target="_blank" rel="noopener">Open the Devin session</a>{% elif result.session_id %}<span class="mono">{{ result.session_id }}</span>{% endif %}
+  {% if result.issue_url %} · <a href="{{ result.issue_url }}" target="_blank" rel="noopener">Tracking issue</a>{% endif %}</p>
   <p><a href="/issues/{{ result.work_item_id }}">Follow progress on the work item</a>.</p>
 </div>
 {% else %}
@@ -14,7 +14,7 @@
 <div class="notice notice-{{ 'warning' if result.outcome == 'rejected' else 'danger' }}" role="alert">
   <p><strong>{{ "Refused." if result.outcome == "rejected" else "Failed." }}</strong> {% if block %}{{ launch_block_text[block] }}{% else %}<span class="mono">{{ result.reason }}</span>{% endif %}</p>
   {% if result.outcome != "rejected" %}<p>The failure is recorded on the work item. If the item is now marked as needing attention, fix the cause in GitHub and relaunch.</p>{% endif %}
-  <p><a href="/issues/{{ result.work_item_id }}">Back to the work item</a>{% if result.issue_url %} · <a href="{{ result.issue_url }}" rel="noopener">Tracking issue</a>{% endif %}</p>
+  <p><a href="/issues/{{ result.work_item_id }}">Back to the work item</a>{% if result.issue_url %} · <a href="{{ result.issue_url }}" target="_blank" rel="noopener">Tracking issue</a>{% endif %}</p>
 </div>
 {% endif %}
 
@@ -22,7 +22,7 @@
 <section class="section" aria-labelledby="sessions-heading">
   {{ ui.section_head("Devin sessions for this work item", id="sessions-heading", count=sessions|length) }}
   <ul class="list-plain list-rows">
-    {% for s in sessions %}<li>{% if s.url %}<a class="mono" href="{{ s.url }}" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %} · {{ (s.status|plain_label).text }}{% if s.status_detail %} <span class="muted">{{ s.status_detail }}</span>{% endif %} · limit {{ s.max_acu_limit|num(0) }} ACU · started {{ s.created_at|dt }}</li>{% endfor %}
+    {% for s in sessions %}<li>{% if s.url %}<a class="mono" href="{{ s.url }}" target="_blank" rel="noopener">{{ s.devin_id }}</a>{% else %}<span class="mono">{{ s.devin_id }}</span>{% endif %} · {{ (s.status|plain_label).text }}{% if s.status_detail %} <span class="muted">{{ s.status_detail }}</span>{% endif %} · limit {{ s.max_acu_limit|num(0) }} ACU · started {{ s.created_at|dt }}</li>{% endfor %}
   </ul>
 </section>
 {% endif %}

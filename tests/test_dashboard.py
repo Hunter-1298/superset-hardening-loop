@@ -283,7 +283,7 @@ def test_issue_page_lists_session_prs_and_regression_lineage(
         moved = db.exec(select(Finding).where(Finding.work_item_id == regression_id)).all()
         assert moved
     html = client.get("/issues/2").text
-    assert f'<a href="{pr_url}" rel="noopener">' in html
+    assert f'<a href="{pr_url}" target="_blank" rel="noopener">' in html
     origin_html = client.get(f"/issues/{origin_id}").text
     assert f'href="/issues/{regression_id}"' in origin_html
     assert f'id="findings-heading">Findings <span class="count">{len(moved)}</span>' in origin_html
