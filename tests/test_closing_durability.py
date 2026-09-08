@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from hardening_loop.config import BASELINE_SHA
-from hardening_loop.domain.enums import FindingState
-from hardening_loop.replay.world import World
+from hardening_loop.domain.enums import FindingState, WorkItemState
+from hardening_loop.replay.world import APPROVER, World, sha
 
 CVE = "CVE-2024-26130"  # cryptography seed
 
@@ -59,6 +59,53 @@ def test_direct_application_is_idempotent(w: World) -> None:
     assert w.orch.apply_pending_scan_runs() == {w.run_ids["replay-baseline"]: {}}
     assert len(w.events("finding", f.id)) == events
     assert w.finding_by_vuln(CVE).state is FindingState.fixed
+
+
+def test_merge_and_post_merge_scan_noticed_in_the_same_tick_close_the_work_item(w: World) -> None:
+    """GitHub merges the PR and the scan of the merge commit finishes before the controller's
+    next tick. That one tick must observe the merge first and then spend the scan as closing
+    evidence; consuming the scan against the pre-merge state would leave the item waiting for
+    a rescan that already happened."""
+    w.baseline("cryptography")
+    w.tick()
+    wi = w.only_wi()
+    _url, number = w.devin_opens_pr(
+        wi,
+        {
+            "packages": [{"name": "cryptography", "from": "42.0.4", "to": "42.0.5"}],
+            "regenerated_with": "./scripts/uv-pip-compile.sh",
+        },
+        files=["pyproject.toml", "requirements/base.txt", "requirements/development.txt"],
+        acus=1.5,
+    )
+    w.tick()
+    head = w.gh.prs[number].head_sha
+    w.ci(head)
+    w.tick()
+    w.review_done(head)
+    w.tick()
+    wi = w.wi(wi.id or 0)
+    assert wi.state is WorkItemState.ready_for_human
+    w.gh.approve(number, APPROVER, at=w.clock.now())
+    w.tick()
+
+    # Between two ticks: the human merges and the nightly scan of main at the merge commit runs.
+    merge_sha = sha("merge-before-tick")
+    w.gh.merge(number, merge_sha, at=w.clock.now())
+    w.clock.advance(minutes=20)
+    rid = w.ingest(w.closing_run(merge_sha))
+    assert w.state_of(wi.id or 0) is WorkItemState.ready_for_human
+    assert _applied(w)[-1] is False
+
+    report = w.tick()
+    assert report.scans_applied >= 1
+    assert _applied(w)[-1] is True
+    wi = w.wi(wi.id or 0)
+    assert wi.state is WorkItemState.verified, wi.state
+    f = w.finding_by_vuln(CVE)
+    assert f.state is FindingState.fixed and f.closed_by_run_id == rid
+    assert w.issue_state(wi) == "closed"
+    assert w.gh.never_merged_or_approved()
 
 
 def test_backlog_is_evaluated_in_scan_order_and_an_older_run_cannot_outvote_a_newer_one(

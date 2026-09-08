@@ -117,6 +117,7 @@ class AcuBudgetPosition:
 class TickReport:
     scans_ingested: int = 0
     scans_rejected: int = 0
+    scans_applied: int = 0
     work_items_created: int = 0
     issues_created: int = 0
     sessions_created: int = 0
@@ -181,6 +182,10 @@ class Orchestrator:
         report.sessions_polled = self.poll_sessions()
         report.prs_polled = self.poll_pull_requests()
         report.labels_applied = self.poll_human_labels()
+        # Closing evidence is weighed after the PR poll so a scan of main that finished after a
+        # merge is judged against the merged state; regressions it reopens are grouped below.
+        report.scans_applied = len(self.apply_pending_scan_runs())
+        report.work_items_created += len(self.create_work_items())
         return report
 
     # ------------------------------------------------------------------ events / transitions
@@ -1681,17 +1686,17 @@ class Orchestrator:
         )
 
     def poll_scans(self) -> tuple[int, int]:
-        """Bring unseen completed `security-scan` runs of the remediation branch in, then evaluate
-        every persisted run still owed its closing evaluation. Returns (ingested, rejected) for
-        this tick; a run seen before counts as neither. Without a fork token (replay, doubles) the
-        double simply has no runs scripted and only the evaluation step does anything."""
+        """Bring unseen completed `security-scan` runs of the remediation branch in. Intake only:
+        the closing evaluation of persisted runs is `apply_pending_scan_runs`, which the tick runs
+        after the PR poll so a post-merge scan is weighed against the post-merge state. Returns
+        (ingested, rejected) for this tick; a run seen before counts as neither. Without a fork
+        token (replay, doubles) the double simply has no runs scripted."""
         ingested = rejected = 0
         for outcome in self.scan_intake().poll():
             if outcome.status is IntakeStatus.rejected:
                 rejected += 1
             else:
                 ingested += 1
-        self.apply_pending_scan_runs()
         return ingested, rejected
 
     # ------------------------------------------------------------------ closure
