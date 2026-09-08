@@ -20,8 +20,10 @@ from hardening_loop.negative import (
     CASES,
     CHECK_BUILD,
     CHECK_MANIFEST,
+    CHECK_SCAN_MATRIX_TEMPLATE,
     CHECK_SMOKE,
     REGRESSION_PIN,
+    SCAN_MATRIX_LEGS,
     MutationError,
     NegativeRunner,
     all_expected_completed,
@@ -170,6 +172,33 @@ def test_evaluate_strict_on_missing_pending_and_wrong() -> None:
 
     _, failures = evaluate(case, [r for r in runs if r.name != CHECK_MANIFEST])
     assert f"{CHECK_MANIFEST}: no check run reported" in failures
+
+
+def test_broken_build_accepts_unexpanded_skipped_scan_matrix() -> None:
+    """When build-image fails GitHub never expands the scan matrix; it reports a single skipped
+    check under the literal template name, which must count as every leg skipped."""
+    case = CASES["broken-build"]
+    runs = [
+        _run(CHECK_BUILD, "failure"),
+        _run("forbid-ignore-files", "success"),
+        _run("vex-lint", "success"),
+        _run(CHECK_SCAN_MATRIX_TEMPLATE, "skipped"),
+        _run("policy-gate", "skipped"),
+        _run(CHECK_SMOKE, "skipped"),
+        _run("app-runs", "skipped"),
+        _run(CHECK_MANIFEST, "skipped"),
+    ]
+    assert all_expected_completed(case, runs)
+    results, failures = evaluate(case, runs)
+    assert failures == []
+    assert all(results[leg] == "skipped" for leg in SCAN_MATRIX_LEGS)
+    assert CHECK_SCAN_MATRIX_TEMPLATE not in results
+
+    # anything but a skip under the template name is not evidence about the legs
+    runs[3] = _run(CHECK_SCAN_MATRIX_TEMPLATE, "failure")
+    assert not all_expected_completed(case, runs)
+    _, failures = evaluate(case, runs)
+    assert failures == [f"{leg}: no check run reported" for leg in SCAN_MATRIX_LEGS]
 
 
 def test_evaluate_prefers_completed_rerun_over_stale_pending() -> None:

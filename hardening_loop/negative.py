@@ -46,6 +46,10 @@ CHECK_GATE = "policy-gate"
 CHECK_SMOKE = "lean-smoke"
 CHECK_APP_RUNS = "app-runs"
 CHECK_MANIFEST = "scan-manifest"
+# When `build-image` fails, the scan matrix is never expanded: GitHub reports one skipped check
+# run under the literal template name instead of one per leg.
+CHECK_SCAN_MATRIX_TEMPLATE = "scan-${{ matrix.target }}-${{ matrix.mode }}"
+SCAN_MATRIX_LEGS: tuple[str, ...] = (CHECK_SCAN_LEAN_RAW, CHECK_SCAN_LEAN_POLICY, CHECK_SCAN_CI_RAW)
 ALL_CHECKS: tuple[str, ...] = (
     CHECK_BUILD,
     CHECK_IGNORE,
@@ -291,10 +295,30 @@ class CaseReport:
         }
 
 
+def expand_matrix(runs: list[CheckRun]) -> list[CheckRun]:
+    """Replace a skipped, unexpanded scan-matrix check run with one skipped run per leg so the
+    expectation table can be evaluated by leg name. Any other conclusion under the template name
+    is left as-is (and therefore reported as a missing leg)."""
+    out: list[CheckRun] = []
+    for run in runs:
+        if (
+            run.name == CHECK_SCAN_MATRIX_TEMPLATE
+            and run.status == "completed"
+            and run.conclusion == "skipped"
+        ):
+            out.extend(
+                CheckRun(name=leg, status=run.status, conclusion=run.conclusion)
+                for leg in SCAN_MATRIX_LEGS
+            )
+        else:
+            out.append(run)
+    return out
+
+
 def evaluate(case: NegativeCase, runs: list[CheckRun]) -> tuple[dict[str, str | None], list[str]]:
     """Compare completed check runs with the expectation table. Missing expected checks fail."""
     by_name: dict[str, CheckRun] = {}
-    for run in runs:
+    for run in expand_matrix(runs):
         prev = by_name.get(run.name)
         if prev is None or (prev.status != "completed" and run.status == "completed"):
             by_name[run.name] = run
@@ -312,7 +336,7 @@ def evaluate(case: NegativeCase, runs: list[CheckRun]) -> tuple[dict[str, str | 
 
 
 def all_expected_completed(case: NegativeCase, runs: list[CheckRun]) -> bool:
-    names = {r.name for r in runs if r.status == "completed"}
+    names = {r.name for r in expand_matrix(runs) if r.status == "completed"}
     return all(name in names for name in case.expect)
 
 
