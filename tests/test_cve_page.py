@@ -139,7 +139,7 @@ def test_cve_page_renders_real_evidence(
     assert "pkg:deb/" in body  # purl
     assert 'rel="noopener"' in html and "https://" in html  # advisory references are links
     assert not re.search(r'href="[^"]*Debian Security Tracker', html)  # names are never hrefs
-    for href in re.findall(r'<a href="([^"]+)" rel="noopener"', html):
+    for href in re.findall(r'<a href="([^"]+)" target="_blank" rel="noopener"', html):
         assert href.startswith(("http://", "https://")), href
     assert "Replay double" not in body
     assert "fixture:" in body or BASELINE_SHA[:12] in body  # scan run identity

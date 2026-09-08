@@ -18,7 +18,7 @@
       <div class="disclosure-body">
         <ol class="steps">
           {% if preview.action.value == "relaunch" %}<li>Clears the retry counter and blocked reason (recorded as a human retry).</li>{% endif %}
-          {% if preview.needs_issue %}<li>Opens the tracking issue in <span class="mono">{{ preview.repo }}</span>.</li>{% else %}<li>Uses the existing tracking issue <a href="{{ wi.issue_url }}" rel="noopener">#{{ wi.issue_number }}</a>.</li>{% endif %}
+          {% if preview.needs_issue %}<li>Opens the tracking issue in <span class="mono">{{ preview.repo }}</span>.</li>{% else %}<li>Uses the existing tracking issue <a href="{{ wi.issue_url }}" target="_blank" rel="noopener">#{{ wi.issue_number }}</a>.</li>{% endif %}
           {% if preview.needs_dispatch_approval %}<li>Adds the <span class="mono">dispatch:approved</span> label: this severity is not dispatched automatically, so your click is the approval.</li>{% endif %}
           <li>Comments on the issue that <span class="mono">{{ operator_login }}</span> launched from the dashboard.</li>
           <li>Creates one Devin session tagged <span class="mono">wi-{{ wi.id }}</span> (or adopts one that already carries that tag) with the {{ (wi.acu_cap|num(0)) }} ACU cap, and stops at the first refusal.</li>

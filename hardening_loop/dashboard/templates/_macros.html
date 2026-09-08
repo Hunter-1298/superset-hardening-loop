@@ -64,7 +64,7 @@
 {%- endmacro %}
 
 {% macro external_link(href, text) -%}
-<a href="{{ href }}" rel="noopener">{{ text }}<span class="sr-only"> (opens GitHub or Devin)</span></a>
+<a href="{{ href }}" target="_blank" rel="noopener">{{ text }}<span class="sr-only"> (opens in a new tab)</span></a>
 {%- endmacro %}
 
 {# Six-stage happy path with the item's current position; attention/closed items sit beside it. #}
@@ -90,7 +90,7 @@
   {% elif preview and not preview.eligible %}<a class="next-text muted" href="/operator/launch/{{ w.id }}">Launch blocked · {{ block_short[preview.block] }}</a>
   {% else %}<a class="btn btn-launch btn-sm" href="/operator/launch/{{ w.id }}">Launch Devin</a>{% endif %}
 {% elif stage.value == "review" and w.pr_url %}
-  <a href="{{ w.pr_url }}" rel="noopener">Review PR #{{ w.pr_number }}</a>
+  <a href="{{ w.pr_url }}" target="_blank" rel="noopener">Review PR #{{ w.pr_number }}</a>
 {% elif action %}
   <span class="next-text">{{ action }}</span>
 {% else %}
@@ -100,8 +100,8 @@
 
 {# Compact GitHub/Devin link row. #}
 {% macro links(w, session_url=None) -%}
-{% if w.issue_url %}<a href="{{ w.issue_url }}" rel="noopener">Issue #{{ w.issue_number }}</a>{% endif %}
-{% if w.pr_url %}<a href="{{ w.pr_url }}" rel="noopener">PR #{{ w.pr_number }}</a>{% endif %}
-{% if session_url %}<a href="{{ session_url }}" rel="noopener">Devin session</a>{% endif %}
+{% if w.issue_url %}<a href="{{ w.issue_url }}" target="_blank" rel="noopener">Issue #{{ w.issue_number }}</a>{% endif %}
+{% if w.pr_url %}<a href="{{ w.pr_url }}" target="_blank" rel="noopener">PR #{{ w.pr_number }}</a>{% endif %}
+{% if session_url %}<a href="{{ session_url }}" target="_blank" rel="noopener">Devin session</a>{% endif %}
 {% if not w.issue_url and not w.pr_url and not session_url %}<span class="muted">—</span>{% endif %}
 {%- endmacro %}
