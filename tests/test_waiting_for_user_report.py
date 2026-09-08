@@ -19,6 +19,7 @@ from hardening_loop.replay.world import World, sha
 
 CVE = "CVE-2024-26130"  # cryptography seed
 FILES = ["pyproject.toml", "requirements/base.txt", "requirements/development.txt"]
+PINS_ONLY = ["requirements/base.txt", "requirements/development.txt"]
 
 
 @pytest.fixture
@@ -26,7 +27,9 @@ def w(tmp_path: Path) -> World:
     return World(tmp_path / "replay.sqlite3")
 
 
-def _report_without_finishing(w: World, wi: WorkItem, **output: Any) -> tuple[str, int]:
+def _report_without_finishing(
+    w: World, wi: WorkItem, files: list[str] = FILES, **output: Any
+) -> tuple[str, int]:
     """Devin opens the PR, updates its structured output, posts the report as a message to the
     user and idles: exactly what the live session did."""
     assert wi.active_session_id is not None
@@ -34,7 +37,7 @@ def _report_without_finishing(w: World, wi: WorkItem, **output: Any) -> tuple[st
         title=f"fix: {wi.title}"[:100],
         head_ref=f"devin/{wi.id}-{wi.kind.value}",
         head_sha=sha(f"pr-head-{wi.id}"),
-        files=FILES,
+        files=files,
     )
     number = int(url.rsplit("/", 1)[1])
     out: dict[str, Any] = {
@@ -160,7 +163,8 @@ def test_report_read_late_from_a_suspended_session_after_human_retry(w: World) -
     w.tick()
     assert w.state_of(wi.id or 0) is WorkItemState.needs_human
 
-    url, number = _report_without_finishing(w, wi)
+    # The fix version lay inside the declared range, so only the regenerated pins changed.
+    url, number = _report_without_finishing(w, wi, files=PINS_ONLY)
     w.devin.set_state(
         sid, DevinStatus.suspended, DevinStatusDetail.inactivity, acus=1.2, pull_requests=[url]
     )
