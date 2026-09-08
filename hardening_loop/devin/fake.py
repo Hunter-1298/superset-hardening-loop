@@ -3,9 +3,11 @@ sees `SessionSnapshot`s. Records every message and every create request (prompt,
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from hardening_loop.devin.enums import (
@@ -14,7 +16,15 @@ from hardening_loop.devin.enums import (
     SessionPullRequest,
     SessionSnapshot,
 )
-from hardening_loop.devin.protocol import CreateSessionRequest, ReviewSnapshot, ReviewStatus
+from hardening_loop.devin.protocol import (
+    CreateSessionRequest,
+    NoteRecord,
+    NoteUpsert,
+    PlaybookRecord,
+    PlaybookUpsert,
+    ReviewSnapshot,
+    ReviewStatus,
+)
 
 
 class FakeDevinError(RuntimeError):
@@ -60,6 +70,8 @@ class FakeDevin:
         self.pr_heads: dict[str, str] = {}
         self.head_resolver: Callable[[str], str | None] | None = None
         self.reviews: dict[tuple[str, str], _Review] = {}
+        self.playbooks: dict[str, PlaybookRecord] = {}
+        self.notes: dict[str, NoteRecord] = {}
         self.fail_next: dict[str, Exception] = {}
         # Methods that kill the controller before running / after taking effect (once each).
         self.crash_before: set[str] = set()
@@ -244,6 +256,77 @@ class FakeDevin:
         if r.status is ReviewStatus.pending:
             r.status = ReviewStatus.running
         return self._review_snap(r)
+
+    # ------------------------------------------------------------- assets
+
+    def list_playbooks(self) -> list[PlaybookRecord]:
+        self._touch("list_playbooks", "")
+        return list(self.playbooks.values())
+
+    def create_playbook(self, spec: PlaybookUpsert) -> PlaybookRecord:
+        self._touch("create_playbook", spec.title)
+        if spec.macro and any(p.macro == spec.macro for p in self.playbooks.values()):
+            raise FakeDevinError(f"macro {spec.macro} already taken (409)")
+        pid = f"playbook-fake{len(self.playbooks) + 1:04d}"
+        rec = PlaybookRecord(playbook_id=pid, **spec.model_dump())
+        self.playbooks[pid] = rec
+        self._crash_after("create_playbook")
+        return rec
+
+    def update_playbook(self, playbook_id: str, spec: PlaybookUpsert) -> PlaybookRecord:
+        self._touch("update_playbook", playbook_id)
+        if playbook_id not in self.playbooks:
+            raise FakeDevinError(f"unknown playbook {playbook_id} (404)")
+        rec = PlaybookRecord(playbook_id=playbook_id, **spec.model_dump())
+        self.playbooks[playbook_id] = rec
+        return rec
+
+    def list_notes(self) -> list[NoteRecord]:
+        self._touch("list_notes", "")
+        return list(self.notes.values())
+
+    def create_note(self, spec: NoteUpsert) -> NoteRecord:
+        self._touch("create_note", spec.name)
+        nid = f"note-fake{len(self.notes) + 1:04d}"
+        rec = NoteRecord(note_id=nid, **spec.model_dump())
+        self.notes[nid] = rec
+        self._crash_after("create_note")
+        return rec
+
+    def update_note(self, note_id: str, spec: NoteUpsert) -> NoteRecord:
+        self._touch("update_note", note_id)
+        if note_id not in self.notes:
+            raise FakeDevinError(f"unknown note {note_id} (404)")
+        rec = NoteRecord(note_id=note_id, **spec.model_dump())
+        self.notes[note_id] = rec
+        return rec
+
+    # The asset store can outlive one process so `assets sync --doubles` behaves like the real org
+    # across invocations (second run is a no-op) without any network.
+
+    def save_assets(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "playbooks": [p.model_dump() for p in self.playbooks.values()],
+                    "notes": [n.model_dump() for n in self.notes.values()],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def load_assets(self, path: Path) -> None:
+        if not path.exists():
+            return
+        data = json.loads(path.read_text(encoding="utf-8"))
+        self.playbooks = {
+            p["playbook_id"]: PlaybookRecord.model_validate(p) for p in data.get("playbooks", [])
+        }
+        self.notes = {n["note_id"]: NoteRecord.model_validate(n) for n in data.get("notes", [])}
 
     @staticmethod
     def _review_snap(r: _Review) -> ReviewSnapshot:

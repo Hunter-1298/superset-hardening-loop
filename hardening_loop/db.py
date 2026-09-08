@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from hardening_loop.models import tables
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # version -> SQL that brings a database at version-1 up to `version`. Only additive or renaming
 # statements; `create_all` afterwards adds any brand-new table.
@@ -29,6 +29,8 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "UPDATE events SET event = 'lifecycle_level' WHERE event = 'verification_level'",
     ),
     4: ("ALTER TABLE scan_runs ADD COLUMN workflow JSON",),
+    # 5 adds the `devin_assets` table only; `create_all` builds it.
+    5: (),
 }
 
 

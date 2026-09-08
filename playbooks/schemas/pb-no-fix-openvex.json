@@ -1,0 +1,249 @@
+{
+  "$id": "https://hardening-loop/schemas/pb-no-fix-openvex.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pr_opened"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "pr_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pr_url"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "blocked"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "blocked_reason": {
+            "minLength": 10,
+            "type": "string"
+          }
+        },
+        "required": [
+          "blocked_reason"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "no_change_needed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "minLength": 10,
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "evidence_urls"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "pr_opened"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "proposed_vex_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reachability",
+          "proposed_vex_path",
+          "justification"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "base_branch": {
+      "const": "main",
+      "type": "string"
+    },
+    "blocked_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "evidence_urls": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "findings_addressed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "findings_not_addressed": {
+      "items": {
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "justification": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "pr_opened",
+        "blocked",
+        "no_change_needed"
+      ],
+      "type": "string"
+    },
+    "pr_url": {
+      "pattern": "^https://github.com/[^/]+/[^/]+/pull/[0-9]+$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "proposed_vex_path": {
+      "pattern": "^security/vex/proposed/",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reachability": {
+      "properties": {
+        "call_sites": {
+          "items": {
+            "properties": {
+              "file": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "symbol": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file",
+              "line",
+              "symbol"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "imports_found": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "runtime_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "verdict": {
+          "enum": [
+            "reachable",
+            "unreachable",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "imports_found",
+        "call_sites",
+        "runtime_paths",
+        "verdict"
+      ],
+      "type": "object"
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tests_run": {
+      "items": {
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "exit_code": {
+            "type": "integer"
+          },
+          "log_attachment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "command",
+          "exit_code"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "outcome",
+    "base_branch",
+    "findings_addressed",
+    "findings_not_addressed"
+  ],
+  "title": "pb-no-fix-openvex structured output",
+  "type": "object"
+}

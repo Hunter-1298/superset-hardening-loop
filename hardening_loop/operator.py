@@ -23,6 +23,7 @@ from sqlmodel import select
 
 from hardening_loop.config import BASELINE_SHA, Settings
 from hardening_loop.db import open_database, session_scope
+from hardening_loop.devin.assets import load_assets, persisted_assets
 from hardening_loop.devin.fake import FakeDevin
 from hardening_loop.devin.rest import DevinRest
 from hardening_loop.github.fake import FakeGitHub
@@ -69,11 +70,26 @@ def build_live_orchestrator(settings: Settings, *, engine: Engine | None = None)
         raise OperatorConfigError(
             "HL_OPERATOR_LOGIN (the GitHub login recorded on every launch) is required"
         )
+    engine = engine or open_database(settings.database_path)
+    assets = persisted_assets(engine, load_assets(settings.repo_root))
+    if not assets.ok:
+        raise OperatorConfigError(
+            "Devin assets are not in sync with the committed playbooks/knowledge "
+            f"(missing={assets.missing}, drifted={assets.drifted}); "
+            "run `hardening-loop assets sync`"
+        )
     gh = GitHubRest(settings.github_token, api_base=settings.github_api_base)
     devin = DevinRest(
         settings.devin_api_key, settings.devin_org_id, api_base=settings.devin_api_base
     )
-    return Orchestrator(engine or open_database(settings.database_path), gh, devin, settings)
+    return Orchestrator(
+        engine,
+        gh,
+        devin,
+        settings,
+        playbook_ids=assets.playbook_ids,
+        knowledge_ids=assets.knowledge_ids,
+    )
 
 
 def build_doubles_orchestrator(settings: Settings, *, engine: Engine | None = None) -> Orchestrator:

@@ -57,6 +57,71 @@ class ReviewSnapshot(BaseModel):
     created_at: datetime
 
 
+class PlaybookUpsert(BaseModel):
+    """Body of `POST`/`PUT .../playbooks`: exactly the fields the API compares."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title: str
+    body: str
+    macro: str | None = None
+    structured_output_schema: dict[str, Any] | None = None
+
+
+class PlaybookRecord(BaseModel):
+    """`PlaybookResponse` (the fields the syncer reads)."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    playbook_id: str
+    title: str
+    body: str
+    macro: str | None = None
+    structured_output_schema: dict[str, Any] | None = None
+
+    def matches(self, want: PlaybookUpsert) -> bool:
+        return (
+            self.title == want.title
+            and self.body == want.body
+            and (self.macro or None) == (want.macro or None)
+            and (self.structured_output_schema or None) == (want.structured_output_schema or None)
+        )
+
+
+class NoteUpsert(BaseModel):
+    """Body of `POST`/`PUT .../knowledge/notes`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    body: str
+    trigger: str
+    pinned_repo: str | None = None
+    is_enabled: bool = True
+
+
+class NoteRecord(BaseModel):
+    """`KnowledgeNoteResponse` (the fields the syncer reads)."""
+
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    note_id: str
+    name: str
+    body: str
+    trigger: str
+    pinned_repo: str | None = None
+    is_enabled: bool = True
+
+    def matches(self, want: NoteUpsert) -> bool:
+        return (
+            self.name == want.name
+            and self.body == want.body
+            and self.trigger == want.trigger
+            and (self.pinned_repo or None) == (want.pinned_repo or None)
+            and self.is_enabled == want.is_enabled
+        )
+
+
 class DevinClient(Protocol):
     def create_session(self, request: CreateSessionRequest) -> SessionSnapshot: ...
     def get_session(self, session_id: str) -> SessionSnapshot: ...
@@ -66,3 +131,9 @@ class DevinClient(Protocol):
     def last_user_facing_question(self, session_id: str) -> str | None: ...
     def trigger_review(self, pr_url: str) -> ReviewSnapshot: ...
     def get_review(self, pr_url: str, commit_sha: str) -> ReviewSnapshot | None: ...
+    def list_playbooks(self) -> list[PlaybookRecord]: ...
+    def create_playbook(self, spec: PlaybookUpsert) -> PlaybookRecord: ...
+    def update_playbook(self, playbook_id: str, spec: PlaybookUpsert) -> PlaybookRecord: ...
+    def list_notes(self) -> list[NoteRecord]: ...
+    def create_note(self, spec: NoteUpsert) -> NoteRecord: ...
+    def update_note(self, note_id: str, spec: NoteUpsert) -> NoteRecord: ...

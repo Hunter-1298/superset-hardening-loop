@@ -390,3 +390,20 @@ class FixtureMeta(SQLModel, table=True):
     captured_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     manifest: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     sha256sums_verified: bool = False
+
+
+class DevinAsset(SQLModel, table=True):
+    """One synced Devin org asset (playbook or knowledge note). `content_sha256` is the hash of the
+    exact upsert body last confirmed at Devin, so `doctor` can detect local drift without a call and
+    `assets sync` can prove a repeat run is a no-op."""
+
+    __tablename__ = "devin_assets"
+    __table_args__ = (UniqueConstraint("asset_kind", "slug", name="uq_devin_assets_kind_slug"),)
+    id: int | None = Field(default=None, primary_key=True)
+    asset_kind: str  # "playbook" | "knowledge"
+    slug: str
+    remote_id: str
+    title: str
+    content_sha256: str
+    last_action: str  # created | updated | unchanged | adopted
+    synced_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)

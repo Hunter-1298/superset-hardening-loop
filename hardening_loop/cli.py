@@ -1,9 +1,11 @@
-"""`hardening-loop` command line: replay, report, serve, plus the CI helpers the fork's
-`security-scan` workflow runs (gate, vex-lint, forbid-ignore-files, scan-manifest).
+"""`hardening-loop` command line: replay, report, serve, doctor, assets, schemas, plus the CI
+helpers the fork's `security-scan` workflow runs (gate, vex-lint, forbid-ignore-files,
+scan-manifest).
 
 Only `serve --operator` (without `--doubles`) can spend ACUs: it runs the poll loop with live
-clients and lets an operator launch a Devin session from the dashboard. Every other command,
-including plain `serve`, is read-only and never talks to GitHub or Devin."""
+clients and lets an operator launch a Devin session from the dashboard. `assets sync` and `ingest`
+make authenticated calls but create no sessions. Every other command, including plain `serve` and
+`doctor`, never talks to GitHub or Devin."""
 
 from __future__ import annotations
 
@@ -28,6 +30,11 @@ from hardening_loop.ci import (
 from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
 from hardening_loop.db import open_database
+from hardening_loop.devin.assets import AssetError, AssetSyncer, load_assets
+from hardening_loop.devin.fake import FakeDevin
+from hardening_loop.devin.rest import DevinError, DevinRest
+from hardening_loop.devin.schemas import export_schemas
+from hardening_loop.doctor import run_doctor
 from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus
 from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
@@ -143,6 +150,72 @@ def cmd_serve(args: argparse.Namespace) -> int:
         uvicorn.run(app, host=host, port=port)
     finally:
         runtime.stop()
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    report = run_doctor(settings, live=args.live)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.render())
+    return 0 if report.ok else 1
+
+
+def cmd_assets_sync(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    try:
+        bundle = load_assets(settings.repo_root)
+    except AssetError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    fake_store: Path | None = None
+    if args.doubles:
+        fake = FakeDevin()
+        fake_store = settings.database_path.with_name("fake-devin-assets.json")
+        fake.load_assets(fake_store)
+        devin: DevinRest | FakeDevin = fake
+    else:
+        if settings.devin_api_key is None:
+            print("error: HL_DEVIN_API_KEY is required (or pass --doubles)", file=sys.stderr)
+            return 2
+        devin = DevinRest(
+            settings.devin_api_key, settings.devin_org_id, api_base=settings.devin_api_base
+        )
+    engine = open_database(settings.database_path)
+    try:
+        report = AssetSyncer(devin, engine, bundle).sync(dry_run=args.dry_run)
+    except (AssetError, DevinError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        if isinstance(devin, FakeDevin) and fake_store is not None and not args.dry_run:
+            devin.save_assets(fake_store)
+    for a in report.actions:
+        print(f"{a.action:13} {a.asset_kind:9} {a.slug:28} {a.remote_id or '-'}")
+    print(
+        f"assets sync: {report.writes} write(s)"
+        + (" (dry run)" if report.dry_run else "")
+        + ("; no-op" if report.noop else "")
+    )
+    if args.expect_noop and not report.noop:
+        print("error: --expect-noop but the sync made changes", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_schemas_export(args: argparse.Namespace) -> int:
+    settings = _settings_for(None)
+    directory = Path(args.out) if args.out else settings.repo_root / "playbooks" / "schemas"
+    stale = export_schemas(directory, write=not args.check)
+    if args.check:
+        if stale:
+            print(f"stale exported schemas: {stale}; run `hardening-loop schemas export`")
+            return 1
+        print(f"exported schemas in {directory} match schemas.py")
+        return 0
+    print(f"wrote {len(stale)} schema file(s) to {directory}" if stale else "schemas unchanged")
     return 0
 
 
@@ -439,6 +512,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--operator-login", help="overrides HL_OPERATOR_LOGIN")
     s.set_defaults(fn=cmd_serve)
+
+    d = sub.add_parser("doctor", help="no-spend preflight: settings, database, assets, fixtures")
+    d.add_argument("--db")
+    d.add_argument("--live", action="store_true", help="require the bounded first-live-run profile")
+    d.add_argument("--json", action="store_true")
+    d.set_defaults(fn=cmd_doctor)
+
+    assets = sub.add_parser("assets", help="Devin org assets (playbooks, knowledge)")
+    assets_sub = assets.add_subparsers(dest="assets_command", required=True)
+    asy = assets_sub.add_parser(
+        "sync", help="create/update Devin playbooks and knowledge from the committed files"
+    )
+    asy.add_argument("--db")
+    asy.add_argument("--dry-run", action="store_true", help="list actions, write nothing")
+    asy.add_argument(
+        "--doubles", action="store_true", help="sync against the in-memory Devin double"
+    )
+    asy.add_argument(
+        "--expect-noop", action="store_true", help="exit 1 if anything was created or updated"
+    )
+    asy.set_defaults(fn=cmd_assets_sync)
+
+    sch = sub.add_parser("schemas", help="structured-output schemas")
+    sch_sub = sch.add_subparsers(dest="schemas_command", required=True)
+    sx = sch_sub.add_parser("export", help="write playbooks/schemas/*.json from schemas.py")
+    sx.add_argument("--out")
+    sx.add_argument("--check", action="store_true", help="exit 1 if the export is stale")
+    sx.set_defaults(fn=cmd_schemas_export)
 
     ing = sub.add_parser(
         "ingest", help="fetch completed fork security-scan evidence into the database (idempotent)"
