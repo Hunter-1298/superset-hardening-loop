@@ -43,7 +43,13 @@ from hardening_loop.domain.enums import (
     VerificationDepth,
     WorkItemState,
 )
-from hardening_loop.metrics import Metrics, RunSummary, compute_metrics, summarize_run
+from hardening_loop.metrics import (
+    Metrics,
+    RunSummary,
+    compute_metrics,
+    metrics_history,
+    summarize_run,
+)
 from hardening_loop.models.lineage import regression_descendants
 from hardening_loop.models.tables import (
     Event,
@@ -948,6 +954,13 @@ def create_app(
     @app.get("/api/metrics", response_model=Metrics)
     def api_metrics() -> Metrics:
         return metrics()
+
+    @app.get("/api/metrics/history")
+    def api_metrics_history(limit: int = Query(default=50, ge=1, le=500)) -> list[dict[str, Any]]:
+        return [
+            s.model_dump(mode="json", exclude={"body"})
+            for s in metrics_history(engine, limit=limit)
+        ]
 
     @app.get("/api/report", response_model=ReportBody)
     def api_report(live: bool = Query(default=False)) -> ReportBody:

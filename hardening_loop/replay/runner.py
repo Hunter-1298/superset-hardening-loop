@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hardening_loop.db import rollback_journal_mode
+from hardening_loop.metrics import snapshot_metrics
 from hardening_loop.replay.netguard import NetworkAttemptError, no_network
 from hardening_loop.replay.scenarios import SCENARIOS
 from hardening_loop.replay.world import ScenarioResult, World
@@ -42,6 +43,13 @@ def run_scenario(name: str, out_dir: Path) -> ScenarioResult:
             result.expect("no outbound network", False, str(exc))
         except Exception:
             result.expect("scenario ran without exception", False, traceback.format_exc())
+        else:
+            snapshot_metrics(
+                world.engine,
+                trigger=f"replay:{name}",
+                acu_cost_usd=world.settings.acu_cost_usd,
+                now=world.clock.now(),
+            )
         finally:
             world.engine.dispose()  # checkpoints the WAL so the .sqlite3 file is self-contained
         result.network_attempts = list(guard.attempts)

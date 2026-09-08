@@ -40,6 +40,7 @@ from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
 from hardening_loop.ingest.intake import IntakeExpectation, IntakeOutcome, ScanIntakeService
 from hardening_loop.logging_utils import configure_logging
+from hardening_loop.metrics import metrics_history, snapshot_metrics
 from hardening_loop.negative import CASES, MutationError, NegativeRunner, mutate
 from hardening_loop.operator import (
     OperatorConfigError,
@@ -161,6 +162,38 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     else:
         print(report.render())
     return 0 if report.ok else 1
+
+
+def cmd_metrics_snapshot(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    if args.acu_cost_usd is not None:
+        settings = settings.model_copy(update={"acu_cost_usd": args.acu_cost_usd})
+    engine = open_database(settings.database_path)
+    row = snapshot_metrics(
+        engine, trigger=args.trigger, acu_cost_usd=settings.acu_cost_usd, now=datetime.now(UTC)
+    )
+    print(
+        f"metrics_snapshots.id={row.id} open_high_critical={row.open_high_critical} "
+        f"needs_human={row.needs_human} active_sessions={row.active_sessions} "
+        f"verified_prs={row.verified_prs} acus_total={row.acus_total:g}"
+    )
+    return 0
+
+
+def cmd_metrics_history(args: argparse.Namespace) -> int:
+    settings = _settings_for(Path(args.db) if args.db else None)
+    engine = open_database(settings.database_path)
+    rows = metrics_history(engine, limit=args.limit)
+    if args.json:
+        print(json.dumps([r.model_dump(mode="json", exclude={"body"}) for r in rows], indent=2))
+        return 0
+    for r in rows:
+        print(
+            f"{r.id:>5}  {r.taken_at.isoformat(timespec='seconds')}  {r.trigger:<9} "
+            f"hc={r.open_high_critical:<4} human={r.needs_human:<3} active={r.active_sessions:<2} "
+            f"verified={r.verified_prs:<3} acu={r.acus_total:g}"
+        )
+    return 0
 
 
 def cmd_assets_sync(args: argparse.Namespace) -> int:
@@ -533,6 +566,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--expect-noop", action="store_true", help="exit 1 if anything was created or updated"
     )
     asy.set_defaults(fn=cmd_assets_sync)
+
+    met = sub.add_parser("metrics", help="persisted metrics snapshots")
+    met_sub = met.add_subparsers(dest="metrics_command", required=True)
+    ms = met_sub.add_parser("snapshot", help="compute the metrics and store one snapshot row")
+    ms.add_argument("--db")
+    ms.add_argument("--trigger", default="manual")
+    ms.add_argument("--acu-cost-usd", type=float)
+    ms.set_defaults(fn=cmd_metrics_snapshot)
+    mh = met_sub.add_parser("history", help="list persisted snapshots, newest first")
+    mh.add_argument("--db")
+    mh.add_argument("--limit", type=int, default=20)
+    mh.add_argument("--json", action="store_true")
+    mh.set_defaults(fn=cmd_metrics_history)
 
     sch = sub.add_parser("schemas", help="structured-output schemas")
     sch_sub = sch.add_subparsers(dest="schemas_command", required=True)

@@ -16,6 +16,7 @@ import logging
 import secrets
 import threading
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy.engine import Engine
@@ -28,6 +29,7 @@ from hardening_loop.devin.fake import FakeDevin
 from hardening_loop.devin.rest import DevinRest
 from hardening_loop.github.fake import FakeGitHub
 from hardening_loop.github.rest import GitHubRest
+from hardening_loop.metrics import snapshot_metrics
 from hardening_loop.models.tables import ScanRun
 from hardening_loop.orchestrator.engine import Orchestrator, TickReport
 from hardening_loop.orchestrator.launch import LaunchPreview, LaunchResult
@@ -139,8 +141,17 @@ class OperatorContext:
             return self.orchestrator.launch(work_item_id, operator=self.login)
 
     def tick(self) -> TickReport:
+        """One control-loop iteration followed by a persisted metrics snapshot, so the trend
+        survives restarts even when nothing else changed."""
         with self.lock:
-            return self.orchestrator.tick(auto_dispatch=self.auto_dispatch)
+            report = self.orchestrator.tick(auto_dispatch=self.auto_dispatch)
+            snapshot_metrics(
+                self.engine,
+                trigger="tick",
+                acu_cost_usd=self.orchestrator.settings.acu_cost_usd,
+                now=datetime.now(UTC),
+            )
+            return report
 
     @classmethod
     def for_doubles(cls, orchestrator: Orchestrator, *, login: str) -> OperatorContext:

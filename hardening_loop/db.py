@@ -29,7 +29,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "UPDATE events SET event = 'lifecycle_level' WHERE event = 'verification_level'",
     ),
     4: ("ALTER TABLE scan_runs ADD COLUMN workflow JSON",),
-    # 5 adds the `devin_assets` table only; `create_all` builds it.
+    # 5 adds the `devin_assets` and `metrics_snapshots` tables only; `create_all` builds them.
     5: (),
 }
 

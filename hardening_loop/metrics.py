@@ -28,6 +28,7 @@ from hardening_loop.domain.enums import (
 from hardening_loop.gate import GateVerdict, gate_verdict
 from hardening_loop.models.tables import (
     Finding,
+    MetricsSnapshot,
     PullRequest,
     ScanRun,
     Session,
@@ -409,6 +410,47 @@ def compute_metrics(engine: Engine, *, acu_cost_usd: float | None, now: datetime
     )
 
 
+# --------------------------------------------------------------------------- persisted snapshots
+
+
+def snapshot_metrics(
+    engine: Engine, *, trigger: str, acu_cost_usd: float | None, now: datetime
+) -> MetricsSnapshot:
+    """Compute the current metrics and persist them as one `metrics_snapshots` row. The headline
+    columns are denormalized for cheap trend queries; `body` keeps the full `Metrics` payload."""
+    m = compute_metrics(engine, acu_cost_usd=acu_cost_usd, now=now)
+    row = MetricsSnapshot(
+        taken_at=now,
+        trigger=trigger,
+        latest_main_run_id=m.latest_main_run_id,
+        open_high_critical=m.open_high_critical,
+        needs_human=m.needs_human,
+        active_sessions=m.active_sessions,
+        verified_prs=m.cost.verified_items,
+        acus_total=m.cost.acu_total,
+        cost_usd_total=m.cost.estimated_cost_total_usd,
+        body=m.model_dump(mode="json"),
+    )
+    with session_scope(engine) as db:
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        db.expunge(row)
+    return row
+
+
+def metrics_history(engine: Engine, *, limit: int = 200) -> list[MetricsSnapshot]:
+    """Newest-first persisted snapshots (headline columns only are meant for charts; `body` is
+    the full payload of each)."""
+    with session_scope(engine) as db:
+        rows = db.exec(
+            select(MetricsSnapshot).order_by(col(MetricsSnapshot.id).desc()).limit(limit)
+        ).all()
+        for r in rows:
+            db.expunge(r)
+        return list(rows)
+
+
 __all__ = [
     "CLOSING_FINDING_STATES",
     "OPEN_FINDING_STATES",
@@ -420,8 +462,10 @@ __all__ = [
     "Throughput",
     "Timing",
     "compute_metrics",
+    "metrics_history",
     "policy_counts_by_severity",
     "raw_counts_by_severity",
     "run_gate",
+    "snapshot_metrics",
     "summarize_run",
 ]

@@ -392,6 +392,25 @@ class FixtureMeta(SQLModel, table=True):
     sha256sums_verified: bool = False
 
 
+class MetricsSnapshot(SQLModel, table=True):
+    """`compute_metrics()` output captured at a point in time (every operator tick, `metrics
+    snapshot`, end of replay) so throughput, cost and verification trends survive restarts and
+    can be compared across runs instead of being recomputed from whatever the DB holds now."""
+
+    __tablename__ = "metrics_snapshots"
+    id: int | None = Field(default=None, primary_key=True)
+    taken_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
+    trigger: str
+    latest_main_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
+    open_high_critical: int
+    needs_human: int
+    active_sessions: int
+    verified_prs: int
+    acus_total: float
+    cost_usd_total: float | None = None
+    body: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+
+
 class DevinAsset(SQLModel, table=True):
     """One synced Devin org asset (playbook or knowledge note). `content_sha256` is the hash of the
     exact upsert body last confirmed at Devin, so `doctor` can detect local drift without a call and
