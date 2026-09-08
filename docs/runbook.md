@@ -97,7 +97,7 @@ failed scans prove nothing (replay R13, R18, R20; intake R21).
 
 1. Merge the remediation PR into fork `main` (human).
 2. `security-scan` runs on the push to `main` (or dispatch it: Actions → security-scan → Run
-   workflow, `controller_ref` = the pinned controller SHA).
+   workflow, leaving `controller_ref` empty so the committed pin is used).
 3. Confirm every job is green in the run: `forbid-ignore-files`, `vex-lint`, `build-image`,
    `scan-lean-raw`, `scan-lean-policy`, `scan-ci-raw`, `policy-gate`, `lean-smoke`,
    `app-runs`, `scan-manifest`.

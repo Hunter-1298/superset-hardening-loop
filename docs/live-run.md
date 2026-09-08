@@ -15,7 +15,8 @@ Every command below is run from the controller checkout with the virtualenv acti
 2. `hardening-loop replay --out data/replay` — every scenario passed, zero sockets opened.
 3. `docker compose run --rm replay` — the same inside `network_mode: none`.
 4. A fresh `security-scan` run of fork `main` that installed the controller from the immutable
-   controller SHA (`inputs.controller_ref` on `workflow_dispatch`), with every required job
+   controller SHA pinned in the fork's `CONTROLLER_REF` (recorded in the bundle's
+   `manifest.json` as `controller_sha`), with every required job
    green: `forbid-ignore-files`, `vex-lint`, `build-image`, `scan-lean-raw`, `scan-lean-policy`,
    `scan-ci-raw`, `policy-gate`, `lean-smoke`, `app-runs`, `scan-manifest`.
 5. That run's evidence artifact ingested locally, then ingested again:

@@ -67,11 +67,14 @@ never tries. Apply these in `Hunter-1298/superset`:
    `scan-ci-raw`, `policy-gate`, `lean-smoke`, `app-runs`, `scan-manifest`.
 3. **Branches → Add rule for `upstream-master`**: block force pushes, block deletion.
 4. **Actions → General**: allow GitHub Actions; workflow permissions "Read repository
-   contents and packages" (the `security-scan` workflow requests `packages: write` for GHCR
-   explicitly).
-5. **Actions → Variables** (optional): `HL_CONTROLLER_REF` overrides the controller ref the
-   `security-scan` workflow installs the CLI from (`inputs.controller_ref` → `vars.HL_CONTROLLER_REF`
-   → the workflow's committed default). Leave it unset so the committed pin is used.
+   contents and packages" (the `security-scan` workflow requests `packages: write`,
+   `id-token: write` and `attestations: write` for GHCR pushes and signed build provenance
+   explicitly, per job).
+5. **Controller pin**: `security-scan.yml` and `evidence-negatives.yml` install the CLI from the
+   full commit SHA in their `CONTROLLER_REF`; push, pull request and scheduled runs refuse any
+   other ref, and only a manual dispatch may pass `controller_ref` to try a branch (its evidence
+   is marked non-reproducible). Bumping the pin is a reviewed pull request in the fork; there is
+   no repository variable to set.
 6. **Labels**: create `hardening-loop`, `awaiting-dispatch-approval`, `dispatch:approved`,
    `needs-human`, `retry`, `disposition:approved`, `disagreement:resolved`, `risk:high`,
    `kind:dependency-upgrade`, `kind:no-fix-reachability`, `kind:container-hardening`,

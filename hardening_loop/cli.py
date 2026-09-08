@@ -485,6 +485,8 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
             run=run,
             expected_jobs=tuple(args.expect_job or DEFAULT_EXPECTED_JOBS),
             gate_files=gate_files,
+            attach_dirs=tuple(args.attach or ()),
+            controller_sha=args.controller_sha or None,
         )
     except EvidenceError as exc:
         print(f"::error::scan-manifest: {exc}")
@@ -494,6 +496,10 @@ def cmd_scan_manifest(args: argparse.Namespace) -> int:
         "### scan manifest\n\n"
         f"- source: `{args.source_repo}@{args.source_sha}` ({args.source_branch}, {args.event})\n"
         f"- jobs: `{', '.join(manifest['jobs'])}`\n"
+        + (f"- controller: `{manifest['controller_sha']}`\n" if manifest["controller_sha"] else "")
+        + "".join(
+            f"- attached {d}: {len(fs)} file(s)\n" for d, fs in manifest["attachments"].items()
+        )
         + "".join(
             f"- {t}: `{img['image_id']}` ({img['size_bytes']} bytes, user={img['config_user']})\n"
             for t, img in manifest["images"].items()
@@ -728,6 +734,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="JOB=RESULT",
         help="GitHub `needs.<job>.result` of a runtime job to record (repeatable)",
     )
+    sm.add_argument(
+        "--attach",
+        action="append",
+        metavar="DIR",
+        help="directory under --out whose files join the checksummed bundle (repeatable)",
+    )
+    sm.add_argument("--controller-sha", help="controller commit whose CLI produced this run")
     sm.set_defaults(fn=cmd_scan_manifest)
 
     neg = sub.add_parser("ci-negative", help="operator-triggered negative suite against the fork")

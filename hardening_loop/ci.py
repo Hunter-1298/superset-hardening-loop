@@ -349,6 +349,8 @@ def write_scan_manifest(
     run: WorkflowRun,
     expected_jobs: tuple[str, ...] = DEFAULT_EXPECTED_JOBS,
     gate_files: dict[str, Path] | None = None,
+    attach_dirs: tuple[str, ...] = (),
+    controller_sha: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Aggregate `<out>/<target>/<mode>/` job dirs into `<out>/manifest.json` + `SHA256SUMS`.
@@ -409,6 +411,21 @@ def write_scan_manifest(
         gates[name] = gate
         rel = gate_path.relative_to(out).as_posix()
         files[rel] = sha256_file(gate_path)
+    attachments: dict[str, list[str]] = {}
+    for rel_dir in attach_dirs:
+        base = out / rel_dir
+        if not base.is_dir():
+            raise EvidenceError(f"attach {rel_dir}: {base} is not a directory under {out}")
+        listed: list[str] = []
+        for f in sorted(p for p in base.rglob("*") if p.is_file()):
+            rel = f.relative_to(out).as_posix()
+            files[rel] = sha256_file(f)
+            listed.append(rel)
+        if not listed:
+            raise EvidenceError(f"attach {rel_dir}: no files under {base}")
+        attachments[rel_dir] = listed
+    if controller_sha is not None and not re.fullmatch(r"[0-9a-f]{40}", controller_sha):
+        raise EvidenceError(f"controller sha {controller_sha!r} is not a full commit sha")
 
     lean, ci = images.get(ImageTarget.lean), images.get(ImageTarget.ci)
     manifest: dict[str, Any] = {
@@ -427,6 +444,8 @@ def write_scan_manifest(
         "ci_layer_delta": layer_delta(lean, ci) if lean and ci else {},
         "gates": gates,
         "jobs": job_entries,
+        "attachments": attachments,
+        "controller_sha": controller_sha,
         "files": files,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")

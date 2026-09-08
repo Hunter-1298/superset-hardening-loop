@@ -376,6 +376,81 @@ def test_write_scan_manifest_roundtrips_through_load_baseline(tmp_path: Path) ->
     assert loaded.run["job_results"] == {"app-runs": "success", "lean-smoke": "success"}
 
 
+def test_write_scan_manifest_attaches_runtime_records_and_controller_sha(tmp_path: Path) -> None:
+    _stage_jobs(tmp_path)
+    gate = tmp_path / "gates" / "lean-policy.json"
+    gate.parent.mkdir()
+    policy = str(tmp_path / "lean" / "policy")
+    assert main(["gate", "--job", policy, "--mode", "report", "--out", str(gate)]) == 0
+    (tmp_path / "runtime" / "lean-smoke").mkdir(parents=True)
+    (tmp_path / "runtime" / "lean-smoke" / "result.json").write_text('{"ok": true}\n')
+    (tmp_path / "runtime" / "app-runs" / "checks").mkdir(parents=True)
+    (tmp_path / "runtime" / "app-runs" / "checks" / "login.json").write_text("{}\n")
+    (tmp_path / "provenance").mkdir()
+    (tmp_path / "provenance" / "lean.jsonl").write_text("{}\n")
+    controller = "c" * 40
+
+    manifest = write_scan_manifest(
+        tmp_path,
+        source_repo=FORK_REPO,
+        source_branch="main",
+        source_sha=BASELINE_SHA,
+        platform="linux/amd64",
+        images=_images(),
+        run=_run(),
+        gate_files={"lean-policy": gate},
+        attach_dirs=("runtime", "provenance"),
+        controller_sha=controller,
+    )
+    assert manifest["controller_sha"] == controller
+    assert manifest["attachments"] == {
+        "runtime": ["runtime/app-runs/checks/login.json", "runtime/lean-smoke/result.json"],
+        "provenance": ["provenance/lean.jsonl"],
+    }
+    for rel in ("runtime/lean-smoke/result.json", "provenance/lean.jsonl"):
+        assert rel in manifest["files"]
+        assert f"  {rel}" in (tmp_path / "SHA256SUMS").read_text()
+    load_baseline(tmp_path)
+
+    # A byte changed in an attached record is caught like any scan file.
+    (tmp_path / "runtime" / "lean-smoke" / "result.json").write_text('{"ok": false}\n')
+    with pytest.raises(EvidenceError):
+        load_baseline(tmp_path)
+
+
+def test_write_scan_manifest_refuses_bad_attachments(tmp_path: Path) -> None:
+    _stage_jobs(tmp_path)
+    for attach, controller, needle in (
+        (("missing",), None, "is not a directory"),
+        ((), "main", "not a full commit sha"),
+    ):
+        with pytest.raises(EvidenceError, match=needle):
+            write_scan_manifest(
+                tmp_path,
+                source_repo=FORK_REPO,
+                source_branch="main",
+                source_sha=BASELINE_SHA,
+                platform="linux/amd64",
+                images=_images(),
+                run=_run(),
+                attach_dirs=attach,
+                controller_sha=controller,
+            )
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(EvidenceError, match="no files under"):
+        write_scan_manifest(
+            tmp_path,
+            source_repo=FORK_REPO,
+            source_branch="main",
+            source_sha=BASELINE_SHA,
+            platform="linux/amd64",
+            images=_images(),
+            run=_run(),
+            attach_dirs=("empty",),
+        )
+    assert not (tmp_path / "manifest.json").exists()
+
+
 def _stale_gate(tmp_path: Path, **override: object) -> Path:
     _stage_jobs(tmp_path)
     gate = tmp_path / "gates" / "lean-policy.json"
