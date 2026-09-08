@@ -13,7 +13,7 @@ from sqlmodel import Session, SQLModel, create_engine, select
 
 from hardening_loop.models import tables
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # version -> SQL that brings a database at version-1 up to `version`. Only additive or renaming
 # statements; `create_all` afterwards adds any brand-new table.
@@ -28,6 +28,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         "ALTER TABLE pull_requests ADD COLUMN review_head_sha VARCHAR",
         "UPDATE events SET event = 'lifecycle_level' WHERE event = 'verification_level'",
     ),
+    4: ("ALTER TABLE scan_runs ADD COLUMN workflow JSON",),
 }
 
 

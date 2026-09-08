@@ -261,6 +261,11 @@ class ScanRunStatus(StrEnum):
     failed = "failed"
 
 
+class IntakeStatus(StrEnum):
+    ingested = "ingested"
+    rejected = "rejected"
+
+
 class Trigger(StrEnum):
     push = "push"
     pull_request = "pull_request"

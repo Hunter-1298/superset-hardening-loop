@@ -307,6 +307,7 @@ class SyntheticRun:
             is_baseline=self.is_baseline,
             run_attempt=self.run_attempt,
             scan_gate_mode=self.gate_mode,
+            primary_target=self.image_target,
         )
 
 

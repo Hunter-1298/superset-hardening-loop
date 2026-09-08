@@ -16,6 +16,7 @@ from hardening_loop.domain.enums import (
     FindingState,
     GateMode,
     ImageTarget,
+    IntakeStatus,
     Kind,
     Layer,
     LifecycleLevel,
@@ -81,6 +82,34 @@ class ScanRun(SQLModel, table=True):
     finished_at: datetime | None = Field(default=None, sa_type=UTCDateTime)
     ingested_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
     is_baseline: bool = False
+    # GitHub Actions run metadata from the evidence manifest (url, workflow_sha, job_results, ...).
+    workflow: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
+
+
+class ScanIntake(SQLModel, table=True):
+    """One attempt to bring a completed fork `security-scan` run into the controller. Every run
+    the poller sees gets exactly one row, so a rejected bundle stays visible with its reasons and
+    is never silently retried or silently skipped."""
+
+    __tablename__ = "scan_intakes"
+    id: int | None = Field(default=None, primary_key=True)
+    external_run_id: str = Field(index=True, unique=True)
+    source_repo: str
+    workflow_run_id: int
+    run_attempt: int
+    head_branch: str | None = None
+    head_sha: str | None = None
+    conclusion: str | None = None
+    url: str | None = None
+    artifact_id: int | None = None
+    artifact_name: str | None = None
+    artifact_digest: str | None = None  # digest GitHub reports for the artifact, when it does
+    bundle_sha256: str | None = None  # sha256 of the downloaded zip
+    bundle_path: str | None = None
+    status: IntakeStatus
+    reasons: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    scan_run_id: int | None = Field(default=None, foreign_key="scan_runs.id")
+    observed_at: datetime = Field(default_factory=utcnow, sa_type=UTCDateTime)
 
 
 class ScanJob(SQLModel, table=True):

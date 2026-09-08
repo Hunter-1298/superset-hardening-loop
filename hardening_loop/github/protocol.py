@@ -4,6 +4,7 @@ never knows which one it talks to."""
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -91,6 +92,32 @@ class BranchFile(BaseModel):
     content: str = Field(repr=False)
 
 
+class WorkflowRunInfo(BaseModel):
+    """One `GET /repos/{o}/{r}/actions/workflows/{file}/runs` entry."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    run_attempt: int
+    event: str
+    status: str  # queued | in_progress | completed | ...
+    conclusion: str | None  # success | failure | cancelled | ... (None until completed)
+    head_branch: str | None
+    head_sha: str
+    url: str
+    updated_at: datetime | None = None
+
+
+class ArtifactInfo(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    name: str
+    size_in_bytes: int
+    expired: bool = False
+    digest: str | None = None  # GitHub's reported artifact digest, when present
+
+
 class GitHubClient(Protocol):
     """Everything the orchestrator needs from GitHub. Every call is repo-allowlisted."""
 
@@ -117,3 +144,16 @@ class GitHubClient(Protocol):
     def compare(self, repo: str, base: str, head: str) -> Compare: ...
     def get_file(self, repo: str, path: str, ref: str) -> BranchFile | None: ...
     def branch_head(self, repo: str, branch: str) -> str: ...
+
+    # workflow runs and their evidence artifacts
+    def list_workflow_runs(
+        self,
+        repo: str,
+        workflow_file: str,
+        *,
+        head_sha: str | None = None,
+        branch: str | None = None,
+        status: str | None = None,
+    ) -> list[WorkflowRunInfo]: ...
+    def list_run_artifacts(self, repo: str, run_id: int) -> list[ArtifactInfo]: ...
+    def download_artifact(self, repo: str, artifact_id: int, dest: Path) -> Path: ...

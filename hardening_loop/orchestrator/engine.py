@@ -31,6 +31,7 @@ from hardening_loop.domain.enums import (
     ACTIVE_WORK_ITEM_STATES,
     FindingState,
     HumanLabel,
+    IntakeStatus,
     Kind,
     LifecycleLevel,
     Risk,
@@ -38,6 +39,7 @@ from hardening_loop.domain.enums import (
     WorkItemState,
 )
 from hardening_loop.github.protocol import CheckRun, CommitStatus, GitHubClient, PullRequestInfo
+from hardening_loop.ingest.intake import IntakeExpectation, ScanIntakeService
 from hardening_loop.models.tables import (
     Event,
     Finding,
@@ -113,6 +115,8 @@ class AcuBudgetPosition:
 
 @dataclass
 class TickReport:
+    scans_ingested: int = 0
+    scans_rejected: int = 0
     work_items_created: int = 0
     issues_created: int = 0
     sessions_created: int = 0
@@ -151,6 +155,7 @@ class Orchestrator:
         opened and crashed dispatches recovered, but no new session is created unless an operator
         launches one explicitly."""
         report = TickReport()
+        report.scans_ingested, report.scans_rejected = self.poll_scans()
         report.work_items_created = len(self.create_work_items())
         if auto_dispatch:
             created, adopted, issues = self.dispatch()
@@ -1548,6 +1553,34 @@ class Orchestrator:
                         n += 1
                         continue
         return n
+
+    # ------------------------------------------------------------------ scan intake
+
+    def scan_intake(self) -> ScanIntakeService:
+        return ScanIntakeService(
+            self.engine,
+            self.gh,
+            repo_root=self.settings.repo_root,
+            evidence_dir=self.settings.evidence_dir,
+            expect=IntakeExpectation(
+                source_repo=self.repo, source_branch=self.settings.remediation_branch
+            ),
+        )
+
+    def poll_scans(self) -> tuple[int, int]:
+        """Bring unseen completed `security-scan` runs of the remediation branch in and evaluate
+        each newly created run as a closing run. Returns (ingested, rejected) for this tick; a run
+        seen before counts as neither. Without a fork token (replay, doubles) the double simply has
+        no runs scripted and this is a no-op."""
+        ingested = rejected = 0
+        for outcome in self.scan_intake().poll():
+            if outcome.status is IntakeStatus.rejected:
+                rejected += 1
+                continue
+            ingested += 1
+            if outcome.created and outcome.scan_run_id is not None:
+                self.apply_scan_run(outcome.scan_run_id)
+        return ingested, rejected
 
     # ------------------------------------------------------------------ closure
 

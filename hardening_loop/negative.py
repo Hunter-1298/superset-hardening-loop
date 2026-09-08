@@ -408,24 +408,24 @@ class NegativeRunner:
 
     def _evidence_for(self, head_sha: str) -> Path | None:
         for run in self.gh.list_workflow_runs(self.repo, SECURITY_SCAN_WORKFLOW, head_sha=head_sha):
-            if run.get("head_sha") != head_sha:
+            if run.head_sha != head_sha:
                 continue
-            for artifact in self.gh.list_run_artifacts(self.repo, int(run["id"])):
-                if str(artifact["name"]).startswith(EVIDENCE_ARTIFACT_PREFIX):
-                    dest = self.work_dir / "evidence" / str(run["id"])
-                    return self.gh.download_artifact(self.repo, int(artifact["id"]), dest)
+            for artifact in self.gh.list_run_artifacts(self.repo, run.id):
+                if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+                    dest = self.work_dir / "evidence" / str(run.id)
+                    return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
     def _latest_main_evidence(self) -> Path | None:
         for run in self.gh.list_workflow_runs(
             self.repo, SECURITY_SCAN_WORKFLOW, branch=self.base_branch
         ):
-            if run.get("conclusion") != "success":
+            if run.conclusion != "success":
                 continue
-            for artifact in self.gh.list_run_artifacts(self.repo, int(run["id"])):
-                if str(artifact["name"]).startswith(EVIDENCE_ARTIFACT_PREFIX):
-                    dest = self.work_dir / "evidence" / f"main-{run['id']}"
-                    return self.gh.download_artifact(self.repo, int(artifact["id"]), dest)
+            for artifact in self.gh.list_run_artifacts(self.repo, run.id):
+                if artifact.name.startswith(EVIDENCE_ARTIFACT_PREFIX):
+                    dest = self.work_dir / "evidence" / f"main-{run.id}"
+                    return self.gh.download_artifact(self.repo, artifact.id, dest)
         return None
 
     def _compare_counts(self, head_sha: str) -> dict[str, Any]:

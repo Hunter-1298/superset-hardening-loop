@@ -28,9 +28,10 @@ from hardening_loop.ci import (
 from hardening_loop.config import Settings
 from hardening_loop.dashboard.app import build_report_for, create_app
 from hardening_loop.db import open_database
-from hardening_loop.domain.enums import GateMode, ImageTarget
+from hardening_loop.domain.enums import GateMode, ImageTarget, IntakeStatus
 from hardening_loop.github.rest import GitHubError, GitHubRest
 from hardening_loop.ingest.evidence import EvidenceError
+from hardening_loop.ingest.intake import IntakeExpectation, IntakeOutcome, ScanIntakeService
 from hardening_loop.logging_utils import configure_logging
 from hardening_loop.negative import CASES, MutationError, NegativeRunner, mutate
 from hardening_loop.operator import (
@@ -143,6 +144,82 @@ def cmd_serve(args: argparse.Namespace) -> int:
     finally:
         runtime.stop()
     return 0
+
+
+def _intake_line(o: IntakeOutcome) -> str:
+    verb = (
+        "seen before"
+        if o.seen_before
+        else ("ingested" if o.status is IntakeStatus.ingested else "REJECTED")
+    )
+    tail = f" scan_run={o.scan_run_id}" if o.scan_run_id is not None else ""
+    reasons = "".join(f"\n  - {r}" for r in o.reasons)
+    return f"{o.external_run_id}: {verb}{tail}{reasons}"
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    """Pull completed `security-scan` evidence from the fork's Actions into the database. Read-only
+    against GitHub (runs, artifacts, compare, one file); never touches Devin. Exit 1 when any
+    bundle was rejected, so a CI caller notices, 0 when everything was ingested or seen before."""
+    settings = _settings_for(Path(args.db) if args.db else None)
+    if settings.replay_mode:
+        print("error: replay databases never ingest live evidence", file=sys.stderr)
+        return 2
+    if settings.github_token is None:
+        print("error: HL_GITHUB_TOKEN is required to read the fork's Actions", file=sys.stderr)
+        return 2
+    gh = GitHubRest(settings.github_token, api_base=settings.github_api_base)
+    svc = ScanIntakeService(
+        open_database(settings.database_path),
+        gh,
+        repo_root=settings.repo_root,
+        evidence_dir=settings.evidence_dir,
+        expect=IntakeExpectation(
+            source_repo=settings.fork_repo, source_branch=settings.remediation_branch
+        ),
+    )
+    try:
+        if args.run_id is not None:
+            run = svc.find_run(args.run_id)
+            if run is None:
+                print(
+                    f"error: no completed security-scan run {args.run_id} in {settings.fork_repo}",
+                    file=sys.stderr,
+                )
+                return 2
+            outcomes = [svc.ingest_workflow_run(run)]
+        else:
+            outcomes = svc.poll(limit=args.limit)
+    except GitHubError as exc:
+        print(f"error: GitHub: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        gh.close()
+    if not outcomes:
+        print("nothing new: every completed run on the remediation branch is already recorded")
+    for o in outcomes:
+        print(_intake_line(o))
+    if args.json:
+        Path(args.json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json).write_text(
+            json.dumps(
+                [
+                    {
+                        "external_run_id": o.external_run_id,
+                        "status": o.status.value,
+                        "seen_before": o.seen_before,
+                        "created": o.created,
+                        "scan_run_id": o.scan_run_id,
+                        "reasons": o.reasons,
+                    }
+                    for o in outcomes
+                ],
+                indent=2,
+            )
+            + "\n"
+        )
+    fresh_rejects = [o for o in outcomes if o.status is IntakeStatus.rejected and not o.seen_before]
+    return 1 if fresh_rejects else 0
 
 
 def _step_summary(markdown: str) -> None:
@@ -362,6 +439,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--operator-login", help="overrides HL_OPERATOR_LOGIN")
     s.set_defaults(fn=cmd_serve)
+
+    ing = sub.add_parser(
+        "ingest", help="fetch completed fork security-scan evidence into the database (idempotent)"
+    )
+    ing.add_argument("--db", default=None, help="controller SQLite path (default: settings)")
+    ing.add_argument("--run-id", type=int, default=None, help="one Actions run id (default: poll)")
+    ing.add_argument("--limit", type=int, default=10, help="max completed runs to consider")
+    ing.add_argument("--json", default=None, help="also write the outcomes to this path")
+    ing.set_defaults(fn=cmd_ingest)
 
     g = sub.add_parser("gate", help="apply SCAN_GATE_MODE to one policy scan job directory")
     g.add_argument("--job", required=True, help="scan_image.sh output dir (mode=policy)")
