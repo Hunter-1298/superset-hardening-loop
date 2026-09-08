@@ -893,17 +893,15 @@ def r16(w: World, r: ScenarioResult) -> None:
         (crypto.state, paramiko.state),
         (WorkItemState.issue_open, WorkItemState.issue_open),
     )
-    # The running session has barely spent anything; its remaining cap stays committed. (Dispatch
-    # precedes polling within a tick, so the 0.2 ACU shows up in the next tick's arithmetic.)
+    # The running session has barely spent anything; its remaining cap stays committed.
     w.session_state(pillow, DevinStatus.running, DevinStatusDetail.working, acus=0.2)
-    w.tick()
     rep = w.tick()
     r.eq("low consumption does not free the budget", rep.sessions_created, 0)
     r.eq("cryptography still waiting", w.state_of(crypto.id or 0), WorkItemState.issue_open)
     deferrals = [e for e in w.events("work_item", crypto.id) if e.event == "budget_deferred"]
     r.expect(
         "deferral reason shows consumed + outstanding + cap > budget",
-        len(deferrals) >= 3
+        len(deferrals) >= 2
         and "consumed=0.20+outstanding=4.80+cap=5>budget=8" in (deferrals[-1].reason or ""),
         [e.reason for e in deferrals],
     )
@@ -912,9 +910,8 @@ def r16(w: World, r: ScenarioResult) -> None:
     # only what it consumed stays counted, so cryptography fits (1.5 + 5 <= 8) while paramiko
     # (cap 8) does not: consumed ACUs are counted once, not once per active session.
     w.session_state(pillow, DevinStatus.exit, DevinStatusDetail.finished, acus=1.5)
-    w.tick()
+    rep = w.tick()  # the poll that releases the reservation precedes this tick's dispatch
     r.eq("first session escalated", w.state_of(pillow.id or 0), WorkItemState.needs_human)
-    rep = w.tick()
     r.eq("budget freed -> exactly one more dispatched", rep.sessions_created, 1)
     r.eq("cryptography active", w.state_of(crypto.id or 0), WorkItemState.session_active)
     r.eq("paramiko still waiting", w.state_of(paramiko.id or 0), WorkItemState.issue_open)

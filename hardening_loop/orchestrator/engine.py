@@ -126,6 +126,7 @@ class TickReport:
     prs_polled: int = 0
     labels_applied: int = 0
     scan_intake_error: str | None = None
+    scan_apply_error: str | None = None
 
 
 class Orchestrator:
@@ -166,6 +167,21 @@ class Orchestrator:
             # retried next tick: intake stays fail-closed.
             report.scan_intake_error = f"{type(exc).__name__}: {exc}"
             log.warning("scan intake failed this tick, continuing: %s", report.scan_intake_error)
+        report.sessions_polled = self.poll_sessions()
+        report.prs_polled = self.poll_pull_requests()
+        report.labels_applied = self.poll_human_labels()
+        # Closing evidence is weighed after the PR poll, so a scan of main that finished after a
+        # merge is judged against the merged state, and before grouping and dispatch, so queued
+        # work the scan proves unnecessary is closed instead of launched.
+        try:
+            report.scans_applied = len(self.apply_pending_scan_runs())
+        except Exception as exc:
+            # Each run is stamped applied in the same transaction as its effects, so a run whose
+            # evaluation failed (e.g. a GitHub issue call) is rolled back and retried next tick.
+            report.scan_apply_error = f"{type(exc).__name__}: {exc}"
+            log.warning(
+                "scan application failed this tick, continuing: %s", report.scan_apply_error
+            )
         report.work_items_created = len(self.create_work_items())
         if auto_dispatch:
             created, adopted, issues = self.dispatch()
@@ -179,13 +195,10 @@ class Orchestrator:
             adopted,
             issues,
         )
-        report.sessions_polled = self.poll_sessions()
-        report.prs_polled = self.poll_pull_requests()
-        report.labels_applied = self.poll_human_labels()
-        # Closing evidence is weighed after the PR poll so a scan of main that finished after a
-        # merge is judged against the merged state; regressions it reopens are grouped below.
-        report.scans_applied = len(self.apply_pending_scan_runs())
-        report.work_items_created += len(self.create_work_items())
+        if adopted:
+            # An orphan recovered from a crash may already have finished while the controller was
+            # down; polling it here evaluates its output instead of leaving it idle for a tick.
+            report.sessions_polled += self.poll_sessions()
         return report
 
     # ------------------------------------------------------------------ events / transitions

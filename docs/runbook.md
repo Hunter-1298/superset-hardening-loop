@@ -67,12 +67,18 @@ on every tick.
 Intake only persists a run. Its closing evaluation (closures, regressions, database drift) happens
 on the next operator tick, which evaluates every `scan_runs` row whose `closure_applied_at` is still
 null, oldest scan first, and stamps it in the same transaction as its effects. Within a tick this
-evaluation runs after the session and PR polls, so a scan of `main` that finished after a merge
-the controller has not yet observed is weighed against the merged state and closes the work item
-in that same tick rather than being spent early and forcing another rescan. A run brought in by
-the CLI, or one persisted just before a crash cut its intake record short, is therefore evaluated
-exactly once. An older run evaluated after a newer one has already reported or closed a finding
-cannot close or reopen that finding.
+evaluation runs after the session and PR polls but before grouping and dispatch: a scan of `main`
+that finished after a merge the controller has not yet observed is weighed against the merged state
+and closes the work item in that same tick rather than being spent early and forcing another
+rescan, and a scan proving queued work already obsolete retires it before a session can be
+launched against it. A run brought in by the CLI, or one persisted just before a crash cut its
+intake record short, is therefore evaluated exactly once. An older run evaluated after a newer one
+has already reported or closed a finding cannot close or reopen that finding.
+
+A failure while applying a run (typically the GitHub issue call that finishes a closure) rolls that
+run's transaction back, leaves it pending for the next tick and is reported as
+`TickReport.scan_apply_error`; the rest of the tick, including the persisted metrics snapshot,
+still happens.
 
 An `incomplete` run (a runtime job failed, or the workflow conclusion is not `success`) is
 persisted with its raw evidence but never used by the closer as proof of absence.

@@ -11,9 +11,14 @@ import pytest
 
 from hardening_loop.config import BASELINE_SHA
 from hardening_loop.domain.enums import FindingState, WorkItemState
+from hardening_loop.github.fake import FakeGitHubError
+from hardening_loop.metrics import metrics_history
+from hardening_loop.models.tables import WorkItem
+from hardening_loop.operator import OperatorContext
 from hardening_loop.replay.world import APPROVER, World, sha
 
 CVE = "CVE-2024-26130"  # cryptography seed
+MERGE_SHA = sha("merge-closure-failure")
 
 
 @pytest.fixture
@@ -133,3 +138,90 @@ def test_backlog_is_evaluated_in_scan_order_and_an_older_run_cannot_outvote_a_ne
     latest = w.ingest(w.closing_run(BASELINE_SHA), "latest")
     assert w.orch.apply_pending_scan_runs() == {latest: {"fixed_by_drift": 1}}
     assert w.finding_by_vuln(CVE).state is FindingState.fixed
+
+
+def test_a_scan_that_retires_queued_work_is_spent_before_the_tick_can_dispatch_it(
+    w: World,
+) -> None:
+    """An operator tick groups the finding and opens its issue; before anything is launched a scan
+    of main shows the package is already gone. The next tick must spend that scan first: launching
+    the session and then discovering the work was obsolete bills ACUs for nothing."""
+    w.orch.tick(auto_dispatch=False)  # issue-only pass, one per settings.auto_open_issues
+    w.baseline("cryptography")
+    report = w.orch.tick(auto_dispatch=False)
+    assert report.issues_created == 1 and report.sessions_created == 0
+    wi = w.only_wi()
+    assert wi.state is WorkItemState.issue_open
+    assert w.issue_state(wi) == "open"
+
+    w.clock.advance(minutes=30)
+    rid = w.ingest(w.closing_run(BASELINE_SHA))  # cryptography gone from main
+
+    report = w.tick()  # auto_dispatch=True: the launch the scan makes pointless
+    assert report.scans_applied >= 1 and report.scan_apply_error is None
+    assert report.sessions_created == 0 and report.sessions_adopted == 0
+    assert w.sessions() == [] and w.devin.sessions == {}
+    assert w.state_of(wi.id or 0) is WorkItemState.abandoned
+    f = w.finding_by_vuln(CVE)
+    assert f.state is FindingState.fixed and f.closed_by_run_id == rid
+    assert w.issue_state(wi) == "closed"
+
+
+def _merged_item_awaiting_its_closing_scan(w: World) -> WorkItem:
+    """A dependency work item taken through to a PR merged at `MERGE_SHA`."""
+    w.baseline("cryptography")
+    w.tick()
+    wi = w.only_wi()
+    _url, number = w.devin_opens_pr(
+        wi,
+        {
+            "packages": [{"name": "cryptography", "from": "42.0.4", "to": "42.0.5"}],
+            "regenerated_with": "./scripts/uv-pip-compile.sh",
+        },
+        files=["pyproject.toml", "requirements/base.txt", "requirements/development.txt"],
+        acus=1.5,
+    )
+    w.tick()
+    head = w.gh.prs[number].head_sha
+    w.ci(head)
+    w.tick()
+    w.review_done(head)
+    w.tick()
+    w.gh.approve(number, APPROVER, at=w.clock.now())
+    w.tick()
+    w.gh.merge(number, MERGE_SHA, at=w.clock.now())
+    w.tick()
+    wi = w.wi(wi.id or 0)
+    assert wi.state is WorkItemState.merged
+    return wi
+
+
+def test_a_github_failure_during_closure_leaves_the_run_pending_without_losing_the_tick(
+    w: World,
+) -> None:
+    """The issue call that finishes a closure can fail. The run keeps its pending marker so the
+    evaluation is retried whole, and the rest of the tick — including the operator's metrics
+    snapshot — still happens instead of dying with the GitHub error."""
+    wi = _merged_item_awaiting_its_closing_scan(w)
+    w.clock.advance(minutes=20)
+    rid = w.ingest(w.closing_run(MERGE_SHA))
+    ctx = OperatorContext.for_doubles(w.orch, login=APPROVER)
+    w.gh.fail_next["close_issue"] = FakeGitHubError("issues api unavailable")
+
+    report = ctx.tick()
+    assert report.scan_apply_error == "FakeGitHubError: issues api unavailable"
+    assert report.scans_applied == 0
+    assert [r.trigger for r in metrics_history(w.orch.engine)] == ["tick"], "metrics persisted"
+    assert _applied(w)[-1] is False, "the run is still owed an evaluation"
+    assert w.finding_by_vuln(CVE).state is FindingState.awaiting_rescan
+    assert w.state_of(wi.id or 0) is WorkItemState.merged, "the rolled-back closure left no trace"
+    assert w.orch.pending_scan_runs() == [rid]
+    assert w.issue_state(wi) == "open"
+
+    report = ctx.tick()  # the issues api recovers
+    assert report.scan_apply_error is None and report.scans_applied == 1
+    assert _applied(w)[-1] is True
+    f = w.finding_by_vuln(CVE)
+    assert f.state is FindingState.fixed and f.closed_by_run_id == rid
+    assert w.state_of(wi.id or 0) is WorkItemState.verified
+    assert w.issue_state(wi) == "closed"
