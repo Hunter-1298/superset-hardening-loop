@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Stop Devin · Work item #{{ wi.id }}{% endblock %}
+{% block content %}
+{{ ui.page_header("Stop Devin on work item #" ~ wi.id, wi.title ~ ".", crumbs=[("Work items", "/issues"), ("Work item #" ~ wi.id, "/issues/" ~ wi.id), ("Stop", None)]) }}
+
+{% if preview.eligible %}
+<section class="action-card tone-danger launch-confirm" aria-label="Confirm stop">
+  <div class="action-main">
+    <div class="fact-row">
+      {{ ui.severity_badge(wi.severity) }}
+      {{ ui.stage_badge(wi.state) }}
+      <span class="fact">{{ preview.acus_consumed|num }} of {{ preview.acu_cap|num(0) }} ACU used</span>
+    </div>
+    <p class="launch-lede">This terminates the Devin session {% if preview.session_url %}<a class="mono" href="{{ preview.session_url }}" target="_blank" rel="noopener">{{ preview.session_id }}</a>{% else %}<span class="mono">{{ preview.session_id }}</span>{% endif %} at Devin. A terminated session cannot be resumed; any work it has not pushed is lost. The work item moves to <strong>needs attention</strong> with your name on the reason, and can be relaunched later with a fresh session.{% if not live %} This server is wired to local GitHub and Devin doubles, so nothing leaves this machine.{% endif %}</p>
+    <details class="disclosure">
+      <summary>What stopping does, in order</summary>
+      <div class="disclosure-body">
+        <ol class="steps">
+          <li>Terminates the session at Devin and records its final ACU count.</li>
+          <li>Marks work item #{{ wi.id }} as needing attention, reason <span class="mono">operator_cancelled</span>, recorded by <span class="mono">{{ operator_login }}</span>.</li>
+          {% if wi.issue_url %}<li>Comments on <a href="{{ wi.issue_url }}" target="_blank" rel="noopener">issue #{{ wi.issue_number }}</a> and adds the <span class="mono">needs-human</span> label.</li>{% endif %}
+          <li>Releases the session slot and the item's outstanding ACU reservation.</li>
+        </ol>
+      </div>
+    </details>
+  </div>
+  <div class="action-side">
+    <form method="post" action="/operator/cancel/{{ wi.id }}" class="launch-form">
+      <input type="hidden" name="csrf" value="{{ csrf_token }}">
+      <label class="check"><input type="checkbox" name="confirm" value="{{ confirm_value }}" required> I understand the session cannot be resumed.</label>
+      <div class="actions">
+        <button class="btn btn-stop" type="submit">Stop Devin</button>
+        <a href="/issues/{{ wi.id }}">Keep it running</a>
+      </div>
+    </form>
+  </div>
+</section>
+{% else %}
+<div class="notice notice-warning" role="status">
+  <p><strong>Cannot stop.</strong> {{ cancel_block_text[preview.block] }}</p>
+  <p><a href="/issues/{{ wi.id }}">Back to the work item</a></p>
+</div>
+{% endif %}
+{% endblock %}

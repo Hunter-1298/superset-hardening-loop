@@ -141,3 +141,54 @@ def preview(
 
 
 __all__ = ["LaunchAction", "LaunchBlock", "LaunchPreview", "LaunchResult", "action_for", "preview"]
+
+
+class CancelBlock(StrEnum):
+    no_session = "no_session"  # nothing is running for this item
+    pr_recorded = "pr_recorded"  # the session already delivered a PR; act on the PR instead
+    not_active = "not_active"  # the item is not in a session-driven state
+
+
+@dataclass(frozen=True)
+class CancelPreview:
+    """Whether "Stop Devin" applies to a work item. Only an item whose session is still working
+    (`session_active`) can be stopped: once a PR is recorded the session has done its part and
+    the PR, not the session, is what a person acts on."""
+
+    work_item_id: int
+    state: WorkItemState
+    block: CancelBlock | None
+    session_id: str | None
+    session_url: str | None
+    acus_consumed: float
+    acu_cap: float
+
+    @property
+    def eligible(self) -> bool:
+        return self.block is None
+
+
+@dataclass(frozen=True)
+class CancelResult:
+    outcome: str  # cancelled | failed | rejected
+    work_item_id: int
+    reason: str
+    session_id: str | None = None
+    session_url: str | None = None
+    acus_consumed: float | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "cancelled"
+
+
+def cancel_block_for(
+    state: WorkItemState, *, has_session: bool, has_pr: bool
+) -> CancelBlock | None:
+    if state is not WorkItemState.session_active:
+        return CancelBlock.not_active
+    if not has_session:
+        return CancelBlock.no_session
+    if has_pr:
+        return CancelBlock.pr_recorded
+    return None

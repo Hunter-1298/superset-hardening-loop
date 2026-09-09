@@ -224,6 +224,18 @@ class FakeDevin:
             s.status_detail = DevinStatusDetail.working
             s.question = None
 
+    def terminate_session(self, session_id: str) -> SessionSnapshot:
+        self._touch("terminate_session", session_id)
+        s = self.sessions[session_id]
+        if s.status in (DevinStatus.exit, DevinStatus.error):
+            raise FakeDevinError(f"session {session_id} already exited")
+        s.status = DevinStatus.exit
+        s.status_detail = None
+        s.question = None
+        self.clock_seconds += 60
+        s.updated_at = self.clock_seconds
+        return self._snap(s)
+
     def list_sessions(self, *, tags: list[str]) -> list[SessionSnapshot]:
         self._touch("list_sessions", ",".join(tags))
         want = set(tags)

@@ -593,7 +593,7 @@ def test_work_items_table_structure(client: TestClient) -> None:
     cols = [
         re.sub(r"<[^>]+>", "", c).strip() for c in re.findall(r"<th[^>]*>(.*?)</th>", head, re.S)
     ]
-    assert cols[:3] == ["Work item", "Severity", "State"]
+    assert cols[:4] == ["Work item", "Fix", "Severity", "State"]
     # fingerprints belong to the detail page, not the list
     assert "fingerprint" not in html.lower()
 

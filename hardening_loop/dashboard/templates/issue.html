@@ -13,7 +13,7 @@
   <div class="action-main">
     {{ ui.stepper(wi.state) }}
     <div class="action-now">
-      <span class="action-stage">{{ ui.badge(stage_lab) }} <span class="secondary">{{ (wi.state|wi_state).text }}</span></span>
+      <span class="action-stage">{{ ui.badge(stage_lab) }} {{ ui.fixability_badge(wi.kind) }} <span class="secondary">{{ (wi.state|wi_state).text }}</span></span>
       {% if next_action %}
       <p class="action-next" role="status"><strong>Next human action.</strong> {{ next_action }}{% if wi.pr_url or wi.issue_url %} Act in GitHub on {% if wi.pr_url %}<a href="{{ wi.pr_url }}" target="_blank" rel="noopener">pull request #{{ wi.pr_number }}</a>{% endif %}{% if wi.pr_url and wi.issue_url %} or {% endif %}{% if wi.issue_url %}<a href="{{ wi.issue_url }}" target="_blank" rel="noopener">issue #{{ wi.issue_number }}</a>{% endif %}; this dashboard does not approve or merge.{% endif %}</p>
       {% elif stage.value == "ready" %}

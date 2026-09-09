@@ -35,6 +35,7 @@ class WorkItemEvent(StrEnum):
     rescan_shows_present = "rescan_shows_present"
     blocked = "blocked"  # any blocked_reason / needs_human predicate
     human_retry = "human_retry"
+    operator_cancelled = "operator_cancelled"  # an operator stopped the running session
     human_abandoned = "human_abandoned"
     human_resolved = "human_resolved"  # e.g. disagreement:resolved, disposition:approved
     superseded = "superseded"  # every member finding closed before any session ran
@@ -65,6 +66,7 @@ WORK_ITEM_TRANSITIONS: dict[tuple[WorkItemState, WorkItemEvent], WorkItemState] 
     (_W.dispatching, _E.blocked): _W.needs_human,
     (_W.session_active, _E.pr_opened): _W.pr_open,
     (_W.session_active, _E.blocked): _W.needs_human,
+    (_W.session_active, _E.operator_cancelled): _W.needs_human,
     (_W.session_active, _E.retries_exhausted): _W.failed,
     (_W.pr_open, _E.checks_started): _W.checks_running,
     (_W.pr_open, _E.blocked): _W.needs_human,

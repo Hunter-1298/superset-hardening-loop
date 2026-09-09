@@ -15,6 +15,7 @@ import ipaddress
 import logging
 import secrets
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -32,7 +33,12 @@ from hardening_loop.github.rest import GitHubRest
 from hardening_loop.metrics import snapshot_metrics
 from hardening_loop.models.tables import ScanRun
 from hardening_loop.orchestrator.engine import Orchestrator, TickReport
-from hardening_loop.orchestrator.launch import LaunchPreview, LaunchResult
+from hardening_loop.orchestrator.launch import (
+    CancelPreview,
+    CancelResult,
+    LaunchPreview,
+    LaunchResult,
+)
 from hardening_loop.replay.synth import CONFIG_SEEDS, SEEDS, SyntheticRun, ingest_synthetic
 
 log = logging.getLogger("hardening_loop.operator")
@@ -136,9 +142,21 @@ class OperatorContext:
         with self.lock:
             return self.orchestrator.launch_preview(work_item_id)
 
+    def previews(self, work_item_ids: Sequence[int]) -> dict[int, LaunchPreview]:
+        with self.lock:
+            return self.orchestrator.launch_previews(work_item_ids)
+
     def launch(self, work_item_id: int) -> LaunchResult:
         with self.lock:
             return self.orchestrator.launch(work_item_id, operator=self.login)
+
+    def cancel_preview(self, work_item_id: int) -> CancelPreview:
+        with self.lock:
+            return self.orchestrator.cancel_preview(work_item_id)
+
+    def cancel(self, work_item_id: int) -> CancelResult:
+        with self.lock:
+            return self.orchestrator.cancel(work_item_id, operator=self.login)
 
     def tick(self) -> TickReport:
         """One control-loop iteration followed by a persisted metrics snapshot, so the trend

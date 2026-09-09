@@ -111,6 +111,12 @@ class DevinRest:
             json={"message": message},
         )
 
+    def terminate_session(self, session_id: str) -> SessionSnapshot:
+        """`DELETE .../sessions/{id}`: permanently stops the session (it cannot be resumed) and
+        returns its final `SessionResponse`, ACUs included."""
+        data = self._request("DELETE", f"/organizations/{self._org}/sessions/{session_id}").json()
+        return _snapshot(data)
+
     def list_sessions(self, *, tags: list[str]) -> list[SessionSnapshot]:
         """All sessions carrying every tag in `tags` (the `SessionsQueryParams.tags` filter),
         following `end_cursor` pagination."""

@@ -13,6 +13,7 @@
 {% macro finding_state_badge(state) -%}{{ badge(state|finding_state) }}{%- endmacro %}
 {% macro severity_badge(sev) -%}{{ badge(sev|severity_label) }}{%- endmacro %}
 {% macro kind_badge(kind) -%}{{ plain(kind|kind_label) }}{%- endmacro %}
+{% macro fixability_badge(kind) -%}{{ badge(kind|fixability_label) }}{%- endmacro %}
 {% macro level_badge(level) -%}{{ plain(level|lifecycle_label, title=level|level) }}{%- endmacro %}
 {% macro depth_badge(depth) -%}{{ plain(depth|depth_label, title=(depth|depth_label).text) }}{%- endmacro %}
 {% macro run_status_badge(status) -%}{{ badge(status|run_status) }}{%- endmacro %}
@@ -89,6 +90,10 @@
   {% if not operator %}<span class="muted">Waiting for an operator</span>
   {% elif preview and not preview.eligible %}<a class="next-text muted" href="/operator/launch/{{ w.id }}">Launch blocked · {{ block_short[preview.block] }}</a>
   {% else %}<a class="btn btn-launch btn-sm" href="/operator/launch/{{ w.id }}">Launch Devin</a>{% endif %}
+{% elif w.state.value == "session_active" and operator and not w.pr_url %}
+  <span class="next-text">Devin working</span> <a class="btn btn-stop btn-sm" href="/operator/cancel/{{ w.id }}">Stop</a>
+{% elif stage.value == "pr" and w.pr_url %}
+  <a href="{{ w.pr_url }}" target="_blank" rel="noopener">PR #{{ w.pr_number }}</a> <span class="muted">· {{ (w.state|wi_state).text|lower }}</span>
 {% elif stage.value == "review" and w.pr_url %}
   <a href="{{ w.pr_url }}" target="_blank" rel="noopener">Review PR #{{ w.pr_number }}</a>
 {% elif action %}
