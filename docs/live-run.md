@@ -53,6 +53,7 @@ export HL_GLOBAL_ACU_BUDGET=5
 export HL_SCAN_GATE_MODE=report
 export HL_REPLAY_MODE=false
 export HL_DATA_DIR=data/live
+export HL_REQUIRED_CHECK_NAMES='["forbid-ignore-files","vex-lint","build-image","scan-lean-raw","scan-lean-policy","scan-ci-raw","policy-gate","lean-smoke","app-runs","scan-manifest"]'
 hardening-loop doctor --live
 ```
 
