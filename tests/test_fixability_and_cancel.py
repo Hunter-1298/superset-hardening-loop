@@ -92,15 +92,17 @@ def _gh(orch: Orchestrator) -> FakeGitHub:
 
 
 def _launch(client: TestClient, ctx: OperatorContext, wi_id: int | None) -> httpx.Response:
-    return client.post(
+    r: httpx.Response = client.post(
         f"/operator/launch/{wi_id}", data={"csrf": ctx.csrf_token, "confirm": "launch"}
     )
+    return r
 
 
 def _stop(client: TestClient, ctx: OperatorContext, wi_id: int | None, **kw: Any) -> httpx.Response:
     data = {"csrf": ctx.csrf_token, "confirm": "stop"}
     data.update(kw.pop("data", {}))
-    return client.post(f"/operator/cancel/{wi_id}", data=data, **kw)
+    r: httpx.Response = client.post(f"/operator/cancel/{wi_id}", data=data, **kw)
+    return r
 
 
 def _events(orch: Orchestrator, wi_id: int | None) -> list[Event]:

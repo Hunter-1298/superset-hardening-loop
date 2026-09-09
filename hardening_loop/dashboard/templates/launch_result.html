@@ -1,7 +1,13 @@
 {% extends "base.html" %}
-{% block title %}{{ "Devin launched" if result.ok else "Launch refused" }} · Work item #{{ result.work_item_id }}{% endblock %}
+{% block title %}{{ "Devin launched" if result.ok else ("Devin is already working" if already_working else "Launch refused") }} · Work item #{{ result.work_item_id }}{% endblock %}
 {% block content %}
-{% if result.ok %}
+{% if already_working %}
+{{ ui.page_header("Devin is already working on this item", "Work item #" ~ result.work_item_id ~ (" · " ~ wi.title if wi else "") ~ ". This request did not start a second session; the one below is doing the work.", crumbs=[("Work items", "/issues"), ("Work item #" ~ result.work_item_id, "/issues/" ~ result.work_item_id), ("Launch", None)]) }}
+<div class="notice notice-info" role="status">
+  <p><strong>Nothing to launch.</strong> {% if active_session.url %}<a href="{{ active_session.url }}" target="_blank" rel="noopener">Open the Devin session</a>{% else %}<span class="mono">{{ active_session.devin_id }}</span>{% endif %} · {{ (active_session.status|plain_label).text }}{% if active_session.status_detail %} <span class="muted">{{ active_session.status_detail }}</span>{% endif %} · {{ active_session.acus_consumed|num }} of {{ active_session.max_acu_limit|num(0) }} ACU used{% if result.issue_url %} · <a href="{{ result.issue_url }}" target="_blank" rel="noopener">Tracking issue</a>{% endif %}</p>
+  <p><a href="/issues/{{ result.work_item_id }}">Follow progress on the work item</a>{% if operator and wi and not wi.pr_url %} · <a href="/operator/cancel/{{ result.work_item_id }}">Stop Devin</a>{% endif %}.</p>
+</div>
+{% elif result.ok %}
 {{ ui.page_header("Devin " ~ ("launched" if result.outcome == "created" else "session adopted"), "Work item #" ~ result.work_item_id ~ (" · " ~ wi.title if wi else "") ~ ". The controller now polls the session, then its pull request, CI and review until a human merges and a rescan confirms the fix.", crumbs=[("Work items", "/issues"), ("Work item #" ~ result.work_item_id, "/issues/" ~ result.work_item_id), ("Launched", None)]) }}
 <div class="notice notice-success" role="status">
   <p><strong>{{ "Session created." if result.outcome == "created" else "Existing session adopted." }}</strong>

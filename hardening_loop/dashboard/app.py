@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.engine import Engine
 from sqlalchemy.sql import ColumnElement
+from sqlmodel import Session as DbSession
 from sqlmodel import and_, col, or_, select
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -548,6 +549,25 @@ def create_app(
 
     # ------------------------------------------------------------------------------ pages
 
+    def _in_flight(db: DbSession) -> tuple[list[WorkItem], dict[int, Session]]:
+        """Work items with a Devin session, PR or review under way, newest activity first,
+        plus the latest session row for the rows that will be shown."""
+        states = [s.value for stage in labels.IN_FLIGHT_STAGES for s in labels.STAGE_STATES[stage]]
+        items = sorted(
+            db.exec(select(WorkItem).where(col(WorkItem.state).in_(states))).all(),
+            key=lambda w: w.updated_at,
+            reverse=True,
+        )
+        shown_ids = [w.id for w in items[:IN_FLIGHT_ROWS] if w.id is not None]
+        session_by_wi: dict[int, Session] = {}
+        for s in db.exec(
+            select(Session)
+            .where(col(Session.work_item_id).in_(shown_ids))
+            .order_by(col(Session.id))
+        ).all():
+            session_by_wi[s.work_item_id] = s
+        return items, session_by_wi
+
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         m = metrics()
@@ -570,22 +590,7 @@ def create_app(
             ready_previews = launch_offers(ready_items)
             fix_next = operator_order(ready_items, ready_previews)
             launchable_total = sum(1 for p in ready_previews.values() if p.eligible)
-            in_flight_states = [
-                s.value for stage in labels.IN_FLIGHT_STAGES for s in labels.STAGE_STATES[stage]
-            ]
-            in_flight = sorted(
-                db.exec(select(WorkItem).where(col(WorkItem.state).in_(in_flight_states))).all(),
-                key=lambda w: w.updated_at,
-                reverse=True,
-            )
-            in_flight_ids = [w.id for w in in_flight[:IN_FLIGHT_ROWS] if w.id is not None]
-            session_by_wi: dict[int, Session] = {}
-            for s in db.exec(
-                select(Session)
-                .where(col(Session.work_item_id).in_(in_flight_ids))
-                .order_by(col(Session.id))
-            ).all():
-                session_by_wi[s.work_item_id] = s
+            in_flight, session_by_wi = _in_flight(db)
             recent_events = db.exec(
                 select(Event)
                 .where(Event.entity_type == "work_item")
@@ -910,12 +915,16 @@ def create_app(
             acu_by_wi: dict[int, float] = {}
             for s in sessions:
                 acu_by_wi[s.work_item_id] = acu_by_wi.get(s.work_item_id, 0.0) + s.acus_consumed
+            in_flight, session_by_wi = _in_flight(db)
             return render(
                 request,
                 "issues.html",
                 items=items,
                 total=total,
                 acu_by_wi=acu_by_wi,
+                in_flight=in_flight[:IN_FLIGHT_ROWS],
+                in_flight_total=len(in_flight),
+                session_by_wi=session_by_wi,
                 previews=previews,
                 launch_block_short=LAUNCH_BLOCK_SHORT,
                 acu_cost_usd=settings.acu_cost_usd,
@@ -1087,6 +1096,15 @@ def create_app(
                 sessions = db.exec(
                     select(Session).where(Session.work_item_id == wi_id).order_by(col(Session.id))
                 ).all()
+                block = _launch_block(result.reason)
+                active_session = next(
+                    (
+                        s
+                        for s in reversed(sessions)
+                        if wi is not None and s.devin_id == wi.active_session_id
+                    ),
+                    None,
+                )
                 return render(
                     request,
                     "launch_result.html",
@@ -1095,7 +1113,11 @@ def create_app(
                     result=result,
                     sessions=sessions,
                     launch_block_text=LAUNCH_BLOCK_TEXT,
-                    block=_launch_block(result.reason),
+                    block=block,
+                    active_session=active_session,
+                    already_working=(
+                        block is LaunchBlock.session_in_flight and active_session is not None
+                    ),
                 )
 
         def _guard_operator_post(request: Request, verb: str) -> None:
