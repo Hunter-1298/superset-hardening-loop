@@ -65,19 +65,20 @@
 
     <section class="card" aria-labelledby="fix-title">
       {{ ui.section_head("Fix next", id="fix-title", count=fix_next_total, more_href="/issues?stage=ready", more_text="All") }}
+      {% if launchable_total is not none and fix_next %}<p class="card-lede">{% if launchable_total %}{{ launchable_total }} of {{ fix_next_total }} can be launched right now; those come first.{% else %}None of the {{ fix_next_total }} waiting items can be launched right now.{% endif %}</p>{% endif %}
       {% if fix_next %}
-      <ol class="list-plain" aria-label="Ready to fix">
+      <ol class="list-plain" aria-label="Ready to fix, most fixable first">
         {% for w in fix_next %}
         <li class="queue-item">
           <div>
             <a class="title" href="/issues/{{ w.id }}">{{ w.title }}</a>
-            <div class="meta">{{ ui.severity_badge(w.severity) }} <span class="mono">#{{ w.id }}</span> · {{ (w.kind|kind_label).text }} · cap {{ w.acu_cap|num(0) }} ACU</div>
+            <div class="meta">{{ ui.fixability_badge(w.kind) }} {{ ui.severity_badge(w.severity) }} <span class="mono">#{{ w.id }}</span> · cap {{ w.acu_cap|num(0) }} ACU</div>
           </div>
           <div class="state">{{ ui.next_step(w, operator, previews, launch_block_short) }}</div>
         </li>
         {% endfor %}
       </ol>
-      {% if fix_next_total > fix_next|length %}<p class="card-note">Showing the {{ fix_next|length }} most severe of {{ fix_next_total }}.</p>{% endif %}
+      {% if fix_next_total > fix_next|length %}<p class="card-note">Showing the {{ fix_next|length }} most fixable of {{ fix_next_total }}.</p>{% endif %}
       {% else %}
       {{ ui.empty("Nothing waiting to be fixed", "Every grouped finding is with Devin, in review, or verified.", compact=True) }}
       {% endif %}
@@ -96,7 +97,7 @@
           <div class="meta">{{ ui.severity_badge(w.severity) }} <span class="mono">#{{ w.id }}</span>{% if s %} · {{ s.acus_consumed|num }} of {{ w.acu_cap|num(0) }} ACU{% endif %}</div>
           <div class="links small">{{ ui.links(w, s.url if s and s.url else None) }}</div>
         </div>
-        <div class="state">{{ ui.stage_badge(w.state) }}</div>
+        <div class="state">{{ ui.stage_badge(w.state) }}{% if operator and w.state.value == "session_active" and not w.pr_url %}<div class="links small"><a class="btn btn-stop btn-sm" href="/operator/cancel/{{ w.id }}">Stop</a></div>{% endif %}</div>
       </li>
       {% endfor %}
     </ol>

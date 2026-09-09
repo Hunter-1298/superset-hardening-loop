@@ -67,7 +67,13 @@ from hardening_loop.models.tables import (
     WorkItem,
 )
 from hardening_loop.operator import OperatorContext
-from hardening_loop.orchestrator.launch import LaunchBlock, LaunchPreview, LaunchResult
+from hardening_loop.orchestrator.launch import (
+    CancelBlock,
+    CancelResult,
+    LaunchBlock,
+    LaunchPreview,
+    LaunchResult,
+)
 from hardening_loop.report.run_report import (
     ReportBody,
     build_report,
@@ -78,7 +84,9 @@ from hardening_loop.report.run_report import (
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 LAUNCH_PATH = re.compile(r"^/operator/launch/\d+$")
+CANCEL_PATH = re.compile(r"^/operator/cancel/\d+$")
 CONFIRM_VALUE = "launch"
+CANCEL_CONFIRM_VALUE = "stop"
 log = logging.getLogger(__name__)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -139,6 +147,14 @@ LAUNCH_BLOCK_SHORT: dict[LaunchBlock, str] = {
     LaunchBlock.scan_pending: "Scan pending",
 }
 
+CANCEL_BLOCK_TEXT: dict[CancelBlock, str] = {
+    CancelBlock.no_session: "No Devin session is recorded for this item.",
+    CancelBlock.pr_recorded: (
+        "The session already opened a pull request; close or review the PR in GitHub instead."
+    ),
+    CancelBlock.not_active: "Only an item whose Devin session is still working can be stopped.",
+}
+
 
 def _same_origin(request: Request) -> bool:
     """Browsers send `Origin` on every form POST; when present it must name this server.
@@ -153,6 +169,13 @@ def _same_origin(request: Request) -> bool:
 def _launch_block(reason: str) -> LaunchBlock | None:
     try:
         return LaunchBlock(reason)
+    except ValueError:
+        return None
+
+
+def _cancel_block(reason: str) -> CancelBlock | None:
+    try:
+        return CancelBlock(reason)
     except ValueError:
         return None
 
@@ -294,6 +317,8 @@ def _templates() -> Jinja2Templates:
     env.filters["wi_state"] = labels.work_item_state
     env.filters["finding_state"] = labels.finding_state
     env.filters["kind_label"] = labels.kind
+    env.filters["fixability_label"] = labels.fixability
+    env.filters["fixability_of"] = labels.fixability_of
     env.filters["severity_label"] = labels.severity
     env.filters["lifecycle_label"] = labels.lifecycle
     env.filters["depth_label"] = labels.depth
@@ -323,6 +348,7 @@ def _templates() -> Jinja2Templates:
     env.globals["nav_items"] = NAV
     env.globals["nav_current"] = nav_current
     env.globals["kinds"] = list(Kind)
+    env.globals["fixabilities"] = list(labels.FIXABILITY_ORDER)
     env.globals["severities"] = list(Severity)
     env.globals["work_item_states"] = list(WorkItemState)
     env.globals["finding_states"] = list(FindingState)
@@ -439,7 +465,7 @@ def create_app(
         if (
             operator is not None
             and request.method == "POST"
-            and LAUNCH_PATH.match(request.url.path)
+            and (LAUNCH_PATH.match(request.url.path) or CANCEL_PATH.match(request.url.path))
         ):
             return await call_next(request)
         return JSONResponse(
@@ -478,11 +504,35 @@ def create_app(
         """Launch previews for the ready items in a list, keyed by work-item id."""
         if operator is None:
             return {}
-        return {
-            w.id: operator.preview(w.id)
+        ready = [
+            w.id
             for w in items
             if w.id is not None and labels.stage_of(w.state) is labels.Stage.ready
-        }
+        ]
+        return operator.previews(ready) if ready else {}
+
+    def cancel_offer(wi: WorkItem | None) -> Any:
+        """Preview for the "Stop Devin" affordance, or None outside operator mode."""
+        if operator is None or wi is None or wi.id is None:
+            return None
+        return operator.cancel_preview(wi.id)
+
+    def operator_order(
+        items: Sequence[WorkItem], previews: dict[int, LaunchPreview]
+    ) -> list[WorkItem]:
+        """Items in the order an operator reads them: running first, then the most fixable
+        launchable items, then blocked, attention, and done; severity breaks ties."""
+
+        def launchable(w: WorkItem) -> bool | None:
+            pv = previews.get(w.id) if w.id is not None else None
+            return None if pv is None else pv.eligible
+
+        return sorted(
+            items,
+            key=lambda w: labels.work_item_sort_key(
+                w.state, w.kind, w.severity.rank, w.id or 0, launchable(w)
+            ),
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def html_or_json_error(request: Request, exc: StarletteHTTPException) -> Response:
@@ -510,16 +560,16 @@ def create_app(
                 ).all(),
                 key=lambda w: (-w.severity.rank, -(w.id or 0)),
             )
-            fix_next = sorted(
-                db.exec(
-                    select(WorkItem).where(
-                        col(WorkItem.state).in_(
-                            [s.value for s in labels.STAGE_STATES[labels.Stage.ready]]
-                        )
+            ready_items = db.exec(
+                select(WorkItem).where(
+                    col(WorkItem.state).in_(
+                        [s.value for s in labels.STAGE_STATES[labels.Stage.ready]]
                     )
-                ).all(),
-                key=lambda w: (-w.severity.rank, w.id or 0),
-            )
+                )
+            ).all()
+            ready_previews = launch_offers(ready_items)
+            fix_next = operator_order(ready_items, ready_previews)
+            launchable_total = sum(1 for p in ready_previews.values() if p.eligible)
             in_flight_states = [
                 s.value for stage in labels.IN_FLIGHT_STAGES for s in labels.STAGE_STATES[stage]
             ]
@@ -559,7 +609,8 @@ def create_app(
                 queue_total=len(queue),
                 fix_next=fix_next[:FIX_NEXT_ROWS],
                 fix_next_total=len(fix_next),
-                previews=launch_offers(fix_next[:FIX_NEXT_ROWS]),
+                launchable_total=launchable_total if operator is not None else None,
+                previews=ready_previews,
                 launch_block_short=LAUNCH_BLOCK_SHORT,
                 in_flight=in_flight[:IN_FLIGHT_ROWS],
                 in_flight_total=len(in_flight),
@@ -796,6 +847,7 @@ def create_app(
         q: str | None = Query(default=None),
         queue: bool = Query(default=False),
         stage: str | None = Query(default=None),
+        fix: str | None = Query(default=None),
     ) -> HTMLResponse:
         state = state or None
         severity = severity or None
@@ -806,9 +858,17 @@ def create_app(
         if stage and wanted_stage is None:
             choices = ", ".join(s.value for s in labels.Stage)
             raise HTTPException(422, f"unknown stage {stage!r}; one of {choices}")
+        wanted_fix = labels.parse_fixability(fix)
+        if fix and wanted_fix is None:
+            choices = ", ".join(f.value for f in labels.Fixability)
+            raise HTTPException(422, f"unknown fixability {fix!r}; one of {choices}")
         needle = (q or "").strip()
         with session_scope(engine) as db:
             stmt = select(WorkItem)
+            if wanted_fix is not None:
+                stmt = stmt.where(
+                    col(WorkItem.kind).in_(list(labels.kinds_for_fixability(wanted_fix)))
+                )
             if queue:
                 stmt = stmt.where(
                     col(WorkItem.state).in_([s.value for s in labels.HUMAN_ACTION_STATES])
@@ -842,7 +902,9 @@ def create_app(
                         col(WorkItem.pr_number) == number,
                     ]
                 stmt = stmt.where(or_(*clauses))
-            items = db.exec(stmt.order_by(col(WorkItem.id).desc()).limit(MAX_ROWS)).all()
+            found = db.exec(stmt.order_by(col(WorkItem.id).desc()).limit(MAX_ROWS)).all()
+            previews = launch_offers(found)
+            items = operator_order(found, previews)
             total = len(db.exec(select(WorkItem.id)).all())
             sessions = db.exec(select(Session)).all()
             acu_by_wi: dict[int, float] = {}
@@ -854,7 +916,7 @@ def create_app(
                 items=items,
                 total=total,
                 acu_by_wi=acu_by_wi,
-                previews=launch_offers(items),
+                previews=previews,
                 launch_block_short=LAUNCH_BLOCK_SHORT,
                 acu_cost_usd=settings.acu_cost_usd,
                 filters={
@@ -866,6 +928,7 @@ def create_app(
                     "depth": depth or None,
                     "queue": "1" if queue else None,
                     "stage": wanted_stage.value if wanted_stage is not None else None,
+                    "fix": wanted_fix.value if wanted_fix is not None else None,
                 },
                 stage_counts=labels.stage_counts(
                     Counter(w.state.value for w in db.exec(select(WorkItem)).all())
@@ -970,6 +1033,8 @@ def create_app(
                 next_action=labels.next_human_action(wi.state, wi.blocked_reason, wi.pr_url),
                 launch=launch_offer(wi),
                 launch_block_text=LAUNCH_BLOCK_TEXT,
+                cancel=cancel_offer(wi),
+                cancel_block_text=CANCEL_BLOCK_TEXT,
             )
 
     # --------------------------------------------------------------------------- operator
@@ -1002,15 +1067,7 @@ def create_app(
 
         @app.post("/operator/launch/{wi_id}", response_class=HTMLResponse)
         async def launch_submit(request: Request, wi_id: int) -> HTMLResponse:
-            fetch_site = request.headers.get("sec-fetch-site")
-            if fetch_site not in (None, "same-origin", "none"):
-                raise HTTPException(403, "cross-site launch request refused")
-            if not _same_origin(request):
-                raise HTTPException(403, "launch request origin does not match this server")
-            if not request.headers.get("content-type", "").startswith(
-                "application/x-www-form-urlencoded"
-            ):
-                raise HTTPException(415, "launch form must be application/x-www-form-urlencoded")
+            _guard_operator_post(request, "launch")
             form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
             token = form.get("csrf", [""])[0]
             if not hmac.compare_digest(token, ctx.csrf_token):
@@ -1039,6 +1096,64 @@ def create_app(
                     sessions=sessions,
                     launch_block_text=LAUNCH_BLOCK_TEXT,
                     block=_launch_block(result.reason),
+                )
+
+        def _guard_operator_post(request: Request, verb: str) -> None:
+            fetch_site = request.headers.get("sec-fetch-site")
+            if fetch_site not in (None, "same-origin", "none"):
+                raise HTTPException(403, f"cross-site {verb} request refused")
+            if not _same_origin(request):
+                raise HTTPException(403, f"{verb} request origin does not match this server")
+            if not request.headers.get("content-type", "").startswith(
+                "application/x-www-form-urlencoded"
+            ):
+                raise HTTPException(415, f"{verb} form must be application/x-www-form-urlencoded")
+
+        @app.get("/operator/cancel/{wi_id}", response_class=HTMLResponse)
+        def cancel_confirm(request: Request, wi_id: int) -> HTMLResponse:
+            with session_scope(engine) as db:
+                wi = db.get(WorkItem, wi_id)
+                if wi is None:
+                    raise HTTPException(404, f"work item {wi_id} not found")
+                return render(
+                    request,
+                    "cancel.html",
+                    wi=wi,
+                    preview=ctx.cancel_preview(wi_id),
+                    cancel_block_text=CANCEL_BLOCK_TEXT,
+                    csrf_token=ctx.csrf_token,
+                    confirm_value=CANCEL_CONFIRM_VALUE,
+                    operator_login=ctx.login,
+                    live=ctx.live,
+                )
+
+        @app.post("/operator/cancel/{wi_id}", response_class=HTMLResponse)
+        async def cancel_submit(request: Request, wi_id: int) -> HTMLResponse:
+            _guard_operator_post(request, "cancel")
+            form = parse_qs((await request.body()).decode("utf-8", errors="replace"))
+            token = form.get("csrf", [""])[0]
+            if not hmac.compare_digest(token, ctx.csrf_token):
+                raise HTTPException(403, "invalid or missing CSRF token")
+            if form.get("confirm", [""])[0] != CANCEL_CONFIRM_VALUE:
+                raise HTTPException(400, "cancel not confirmed")
+            try:
+                result = await run_in_threadpool(ctx.cancel, wi_id)
+            except LookupError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except Exception as exc:
+                log.exception("operator cancel of work item %s raised", wi_id)
+                result = CancelResult("failed", wi_id, f"{exc.__class__.__name__}: {exc}"[:300])
+            status = 200 if result.ok else (409 if result.outcome == "rejected" else 502)
+            with session_scope(engine) as db:
+                wi = db.get(WorkItem, wi_id)
+                return render(
+                    request,
+                    "cancel_result.html",
+                    status_code=status,
+                    wi=wi,
+                    result=result,
+                    cancel_block_text=CANCEL_BLOCK_TEXT,
+                    block=_cancel_block(result.reason),
                 )
 
     @app.get("/prs", response_class=HTMLResponse)

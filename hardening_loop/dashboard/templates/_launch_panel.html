@@ -1,9 +1,12 @@
-{# Expects `launch` (LaunchPreview or None), `wi`, `launch_block_text`. Rendered only in operator mode. #}
+{# Expects `launch` (LaunchPreview or None), `cancel` (CancelPreview or None), `wi`, `launch_block_text`. Rendered only in operator mode. #}
 {% if launch %}
 <div class="launch-panel" role="region" aria-label="Launch Devin">
   {% if launch.eligible %}
   <a class="btn btn-launch" href="/operator/launch/{{ wi.id }}">{{ "Relaunch Devin" if launch.action.value == "relaunch" else "Launch Devin" }}</a>
   <p class="launch-terms">Up to {{ launch.acu_cap|num(0) }} ACU · {{ launch.active_sessions }} of {{ launch.max_concurrent_sessions }} session slots in use · {{ launch.acu_committed_after|num(0) }} of {{ launch.global_acu_budget|num(0) }} ACU committed after launch{% if launch.needs_issue %} · opens the GitHub issue first{% endif %}{% if launch.needs_dispatch_approval %} · your click approves dispatch{% endif %}</p>
+  {% elif cancel and cancel.eligible %}
+  <p class="launch-terms"><strong>Devin is already working on this item.</strong> {{ cancel.acus_consumed|num }} of {{ cancel.acu_cap|num(0) }} ACU used so far.{% if cancel.session_url %} <a href="{{ cancel.session_url }}" target="_blank" rel="noopener">Watch the session</a>.{% endif %}</p>
+  <a class="btn btn-stop" href="/operator/cancel/{{ wi.id }}">Stop Devin</a>
   {% else %}
   <p class="launch-terms"><strong>Launch unavailable.</strong> {{ launch_block_text[launch.block] }}</p>
   {% endif %}

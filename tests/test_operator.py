@@ -170,10 +170,14 @@ def test_plain_serve_rejects_launch_post(tmp_path: Path) -> None:
         r = c.post("/operator/launch/1", data={"csrf": "x", "confirm": "launch"})
         assert r.status_code == 405
         assert r.headers["allow"] == "GET, HEAD, OPTIONS"
+        assert c.get("/operator/cancel/1").status_code == 404
+        assert (
+            c.post("/operator/cancel/1", data={"csrf": "x", "confirm": "stop"}).status_code == 405
+        )
         assert c.get("/healthz").json()["operator_mode"] is False
 
 
-def test_operator_mode_allows_exactly_one_write(client: TestClient) -> None:
+def test_operator_mode_allows_exactly_two_writes(client: TestClient) -> None:
     from starlette.routing import Mount, Route
 
     writes: list[str] = []
@@ -182,13 +186,14 @@ def test_operator_mode_allows_exactly_one_write(client: TestClient) -> None:
             writes.append(route.path)
         elif isinstance(route, Mount):
             assert client.get(route.path + "/dashboard.css").status_code == 200
-    assert writes == ["/operator/launch/{wi_id}"]
+    assert sorted(writes) == ["/operator/cancel/{wi_id}", "/operator/launch/{wi_id}"]
     for path in ("/", "/issues", "/issues/1", "/findings", "/findings/1", "/runs", "/report"):
         assert client.get(path).status_code == 200, path
         for method in ("POST", "PUT", "PATCH", "DELETE"):
             assert client.request(method, path).status_code == 405, (method, path)
     for method in ("PUT", "PATCH", "DELETE"):
         assert client.request(method, "/operator/launch/1").status_code == 405
+        assert client.request(method, "/operator/cancel/1").status_code == 405
     assert client.get("/healthz").json()["operator_mode"] is True
 
 
@@ -707,6 +712,19 @@ def _devin_transport(calls: list[httpx.Request]) -> httpx.MockTransport:
                     "end_cursor": None,
                 },
             )
+        if request.method == "DELETE" and path.endswith("/sessions/devin-abc"):
+            return httpx.Response(
+                200,
+                json={
+                    "session_id": "devin-abc",
+                    "status": "exit",
+                    "status_detail": None,
+                    "acus_consumed": 1.25,
+                    "pull_requests": [],
+                },
+            )
+        if request.method == "DELETE" and path.endswith("/sessions/devin-404"):
+            return httpx.Response(404, json={"detail": "no such session"})
         if request.method == "GET" and path.endswith("/sessions/devin-bad"):
             return httpx.Response(200, json={"session_id": "devin-bad", "status": "weird"})
         if request.method == "GET" and path.endswith("/sessions/devin-404"):
@@ -750,6 +768,14 @@ def test_devin_rest_request_and_response_shapes() -> None:
     listed = client.list_sessions(tags=["wi-1"])
     assert [s.session_id for s in listed] == ["s1", "s2"]
     assert calls[-1].url.params["after"] == "c1"
+
+    stopped = client.terminate_session("devin-abc")
+    assert calls[-1].method == "DELETE"
+    assert calls[-1].url.path == "/v3/organizations/org-test/sessions/devin-abc"
+    assert calls[-1].url.params.get("archive") is None
+    assert stopped.status is DevinStatus.exit and stopped.acus_consumed == 1.25
+    with pytest.raises(DevinError, match="404"):
+        client.terminate_session("devin-404")
 
     with pytest.raises(DevinError, match="SessionResponse"):
         client.get_session("devin-bad")

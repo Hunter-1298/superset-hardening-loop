@@ -528,13 +528,17 @@ ol.steps li { padding: 3px 0; font-size: 13.5px; }
 /* buttons */
 .btn-launch { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; text-align: center; }
 .btn-launch:hover { background: #175838; border-color: #175838; color: #fff; }
+.btn-stop { background: #fff; border-color: var(--danger); color: var(--danger); font-weight: 600; text-align: center; }
+.btn-stop:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-sm { padding: 4px 10px; min-height: 28px; font-size: 13px; }
 .next-text { font-size: 13px; color: var(--ink-2); }
+.card-lede { padding: 0 16px 10px; font-size: 13px; color: var(--ink-2); }
+.launch-panel .btn-stop { margin-top: 8px; }
 
 /* queue and cards */
 .card-danger { border-color: var(--danger); }
 .card-danger .section-head h2 { color: var(--danger); }
-.queue-item .state { display: flex; align-items: center; }
+.queue-item .state { display: flex; align-items: center; gap: 8px; }
 .queue-item .meta .badge { font-size: 12.5px; }
 table.data .w-next { min-width: 160px; }
 

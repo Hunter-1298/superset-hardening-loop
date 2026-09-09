@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ "Devin stopped" if result.ok else "Stop refused" }} · Work item #{{ result.work_item_id }}{% endblock %}
+{% block content %}
+{% if result.ok %}
+{{ ui.page_header("Devin stopped", "Work item #" ~ result.work_item_id ~ (" · " ~ wi.title if wi else "") ~ ". The session is terminated and the item now needs attention; relaunch it whenever you are ready.", crumbs=[("Work items", "/issues"), ("Work item #" ~ result.work_item_id, "/issues/" ~ result.work_item_id), ("Stopped", None)]) }}
+<div class="notice notice-success" role="status">
+  <p><strong>Session terminated.</strong>
+  {% if result.session_url %}<a href="{{ result.session_url }}" target="_blank" rel="noopener">Open the Devin session</a>{% elif result.session_id %}<span class="mono">{{ result.session_id }}</span>{% endif %}
+  {% if result.acus_consumed is not none %} · {{ result.acus_consumed|num }} ACU used{% endif %}</p>
+  <p><a href="/issues/{{ result.work_item_id }}">Back to the work item</a>.</p>
+</div>
+{% else %}
+{{ ui.page_header("Stop " ~ ("refused" if result.outcome == "rejected" else "failed"), "Work item #" ~ result.work_item_id ~ (" · " ~ wi.title if wi else "") ~ ". " ~ ("Nothing changed." if result.outcome == "rejected" else "The session may still be running; the work item was not changed."), crumbs=[("Work items", "/issues"), ("Work item #" ~ result.work_item_id, "/issues/" ~ result.work_item_id), ("Stop", None)]) }}
+<div class="notice notice-{{ 'warning' if result.outcome == 'rejected' else 'danger' }}" role="alert">
+  <p><strong>{{ "Refused." if result.outcome == "rejected" else "Failed." }}</strong> {% if block %}{{ cancel_block_text[block] }}{% else %}<span class="mono">{{ result.reason }}</span>{% endif %}</p>
+  {% if result.outcome != "rejected" %}<p>The failure is recorded on the session. Check {% if result.session_url %}<a href="{{ result.session_url }}" target="_blank" rel="noopener">the session at Devin</a>{% else %}the session at Devin{% endif %} and try again.</p>{% endif %}
+  <p><a href="/issues/{{ result.work_item_id }}">Back to the work item</a></p>
+</div>
+{% endif %}
+{% endblock %}

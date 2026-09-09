@@ -161,6 +161,111 @@ def stage_counts(by_state: dict[str, int]) -> dict[Stage, int]:
     return counts
 
 
+class Fixability(StrEnum):
+    """How directly a work item's findings can be turned into a merged fix. Derived from the
+    work kind: a dependency upgrade has a fixed version to move to, hardening kinds need a
+    config change, no-fix findings can only be assessed, and disagreements need triage first."""
+
+    upgrade = "upgrade"
+    hardening = "hardening"
+    assessment = "assessment"
+    triage = "triage"
+
+
+FIXABILITY_LABELS: dict[Fixability, Label] = {
+    Fixability.upgrade: Label(
+        "Fix available", Tone.success, "A fixed version exists; Devin bumps the pin"
+    ),
+    Fixability.hardening: Label(
+        "Config change", Tone.info, "Image or deployment hardening, not a version bump"
+    ),
+    Fixability.assessment: Label(
+        "No fix yet",
+        Tone.neutral,
+        "No upstream fix; Devin assesses reachability and drafts OpenVEX",
+    ),
+    Fixability.triage: Label(
+        "Needs triage", Tone.warning, "Scanners disagree; decide which is right first"
+    ),
+}
+
+FIXABILITY_OF_KIND: dict[Kind, Fixability] = {
+    Kind.dependency_upgrade: Fixability.upgrade,
+    Kind.container_hardening: Fixability.hardening,
+    Kind.helm_deploy_config: Fixability.hardening,
+    Kind.no_fix_reachability: Fixability.assessment,
+    Kind.scanner_disagreement: Fixability.triage,
+}
+
+# Most to least direct path to a merged fix.
+FIXABILITY_ORDER: tuple[Fixability, ...] = (
+    Fixability.upgrade,
+    Fixability.hardening,
+    Fixability.assessment,
+    Fixability.triage,
+)
+
+# The order an operator scans the full list in: things moving now, then things to start (most
+# fixable first), then things waiting on a person, then the done pile.
+_STAGE_ORDER: dict[Stage, int] = {
+    Stage.devin: 0,
+    Stage.pr: 1,
+    Stage.review: 2,
+    Stage.ready: 3,
+    Stage.attention: 4,
+    Stage.merged: 5,
+    Stage.verified: 6,
+    Stage.closed: 7,
+}
+
+
+def fixability_of(kind: object) -> Fixability:
+    """Fixability for a work kind (enum, number or name). Unknown kinds need triage."""
+    if isinstance(kind, Kind):
+        return FIXABILITY_OF_KIND[kind]
+    raw = str(kind)
+    try:
+        return FIXABILITY_OF_KIND[Kind(int(raw)) if raw.isdigit() else Kind[raw]]
+    except (ValueError, KeyError):
+        return Fixability.triage
+
+
+def fixability(value: object) -> Label:
+    """Label for a `Fixability`, or for a work kind via its fixability."""
+    if isinstance(value, Fixability):
+        return FIXABILITY_LABELS[value]
+    parsed = parse_fixability(str(value)) if value is not None else None
+    return FIXABILITY_LABELS[parsed if parsed is not None else fixability_of(value)]
+
+
+def parse_fixability(value: str | None) -> Fixability | None:
+    if not value:
+        return None
+    try:
+        return Fixability(value)
+    except ValueError:
+        return None
+
+
+def kinds_for_fixability(fix: Fixability) -> tuple[Kind, ...]:
+    return tuple(k for k, f in FIXABILITY_OF_KIND.items() if f is fix)
+
+
+def fixability_rank(kind: object, launchable: bool | None) -> tuple[int, int]:
+    """Sort key among ready items: launchable now beats blocked, then the most direct fix wins.
+    `launchable` is None when the server cannot say (read-only mode), which sorts by kind only."""
+    return (0 if launchable in (None, True) else 1, FIXABILITY_ORDER.index(fixability_of(kind)))
+
+
+def work_item_sort_key(
+    state: object, kind: object, severity_rank: int, item_id: int, launchable: bool | None
+) -> tuple[int, int, int, int, int]:
+    """Operator ordering for a mixed list of work items; see `_STAGE_ORDER`."""
+    st = stage_of(state)
+    launch_rank, fix_rank = fixability_rank(kind, launchable) if st is Stage.ready else (0, 0)
+    return (_STAGE_ORDER[st], launch_rank, fix_rank, -severity_rank, item_id)
+
+
 def pipeline_position(state: object) -> int | None:
     """Index of the state's stage on the happy path, or None for attention/closed."""
     s = stage_of(state)
@@ -515,6 +620,7 @@ BLOCKED_REASON_PREFIXES: dict[str, str] = {
     "invalid_transition": "The controller refused a state transition",
     "acu_cap_exceeded": "ACU cap exceeded",
     "retries_exhausted": "Retries exhausted",
+    "operator_cancelled": "Stopped by an operator",
 }
 
 

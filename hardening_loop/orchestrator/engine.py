@@ -64,7 +64,14 @@ from hardening_loop.orchestrator.closer import (
     sightings_for,
     validate_closing_run,
 )
-from hardening_loop.orchestrator.launch import LaunchAction, LaunchPreview, LaunchResult
+from hardening_loop.orchestrator.launch import (
+    CancelPreview,
+    CancelResult,
+    LaunchAction,
+    LaunchPreview,
+    LaunchResult,
+    cancel_block_for,
+)
 from hardening_loop.orchestrator.launch import preview as launch_preview_for
 from hardening_loop.orchestrator.policy import (
     diff_policy_violations,
@@ -708,17 +715,39 @@ class Orchestrator:
                 raise LookupError(f"work item {work_item_id} not found")
             return self._launch_preview(db, wi)
 
-    def _launch_preview(self, db: DbSession, wi: WorkItem) -> LaunchPreview:
+    def launch_previews(self, work_item_ids: Sequence[int]) -> dict[int, LaunchPreview]:
+        """`launch_preview` for many items from one consistent read of the shared capacity and
+        budget figures. Unknown ids are skipped."""
+        with session_scope(self.engine) as db:
+            shared = self._launch_shared(db)
+            items = db.exec(select(WorkItem).where(col(WorkItem.id).in_(list(work_item_ids)))).all()
+            return {
+                wi.id: self._launch_preview(db, wi, shared) for wi in items if wi.id is not None
+            }
+
+    def _launch_shared(self, db: DbSession) -> tuple[int, int, AcuBudgetPosition]:
+        return (
+            self._pending_scan_run_count(db),
+            self._active_session_count(db),
+            self._acu_budget_position(db),
+        )
+
+    def _launch_preview(
+        self,
+        db: DbSession,
+        wi: WorkItem,
+        shared: tuple[int, int, AcuBudgetPosition] | None = None,
+    ) -> LaunchPreview:
         assert wi.id is not None
-        budget = self._acu_budget_position(db)
+        pending, active, budget = shared or self._launch_shared(db)
         return launch_preview_for(
-            pending_scans=self._pending_scan_run_count(db),
+            pending_scans=pending,
             work_item_id=wi.id,
             state=wi.state,
             severity=wi.severity,
             has_issue=wi.issue_number is not None,
             acu_cap=wi.acu_cap,
-            active_sessions=self._active_session_count(db),
+            active_sessions=active,
             max_concurrent_sessions=self.settings.max_concurrent_sessions,
             acu_consumed=budget.consumed,
             acu_outstanding=budget.outstanding,
@@ -726,6 +755,154 @@ class Orchestrator:
             repo=self.repo,
             branch=REMEDIATION_BRANCH,
         )
+
+    # ------------------------------------------------------------------ operator cancel
+
+    def cancel_preview(self, work_item_id: int) -> CancelPreview:
+        """Whether an operator can stop the Devin session working on `work_item_id`."""
+        with session_scope(self.engine) as db:
+            wi = db.get(WorkItem, work_item_id)
+            if wi is None:
+                raise LookupError(f"work item {work_item_id} not found")
+            return self._cancel_preview(db, wi)
+
+    def _cancel_preview(self, db: DbSession, wi: WorkItem) -> CancelPreview:
+        assert wi.id is not None
+        row = (
+            db.exec(select(Session).where(Session.devin_id == wi.active_session_id)).first()
+            if wi.active_session_id
+            else None
+        )
+        return CancelPreview(
+            work_item_id=wi.id,
+            state=wi.state,
+            block=cancel_block_for(
+                wi.state, has_session=row is not None, has_pr=wi.pr_number is not None
+            ),
+            session_id=row.devin_id if row else None,
+            session_url=row.url if row else None,
+            acus_consumed=row.acus_consumed if row else 0.0,
+            acu_cap=wi.acu_cap,
+        )
+
+    def cancel(self, work_item_id: int, *, operator: str) -> CancelResult:
+        """Explicit operator stop of the one session working on a work item. Terminates the
+        session at Devin (irreversible), records its final ACUs, and parks the item in
+        `needs_human` with the operator named in the blocked reason, so the dashboard offers a
+        relaunch (which creates a fresh session: a terminated one is never adopted) or the
+        tracking issue can be closed by hand. The GitHub issue gets a comment; nothing about the
+        PR side is touched because a cancellable item has no PR yet."""
+        with write_scope(self.engine) as db:
+            wi = db.get(WorkItem, work_item_id)
+            if wi is None:
+                raise LookupError(f"work item {work_item_id} not found")
+            pv = self._cancel_preview(db, wi)
+            if not pv.eligible or pv.session_id is None:
+                reason = pv.block.value if pv.block else "ineligible"
+                self._event(
+                    db,
+                    entity_type="work_item",
+                    entity_id=work_item_id,
+                    event="operator_cancel_refused",
+                    from_state=wi.state.value,
+                    to_state=wi.state.value,
+                    reason=f"{reason}; operator={operator}",
+                    actor="operator",
+                )
+                return CancelResult("rejected", work_item_id, reason)
+            row = db.exec(select(Session).where(Session.devin_id == pv.session_id)).first()
+            assert row is not None and row.id is not None
+            # The request is on record before the irreversible call, so a crash between the two
+            # leaves an explanation for the session the next poll finds exited; the write lock is
+            # not held across the network call.
+            self._event(
+                db,
+                entity_type="work_item",
+                entity_id=work_item_id,
+                event="operator_cancel_requested",
+                from_state=wi.state.value,
+                to_state=wi.state.value,
+                reason=f"session={pv.session_id}; operator={operator}",
+                actor="operator",
+            )
+            db.commit()
+            try:
+                snap = self.devin.terminate_session(pv.session_id)
+            except Exception as exc:
+                self._event(
+                    db,
+                    entity_type="work_item",
+                    entity_id=work_item_id,
+                    event="operator_cancel_failed",
+                    from_state=wi.state.value,
+                    to_state=wi.state.value,
+                    reason=f"devin:{exc}; operator={operator}"[:500],
+                    actor="operator",
+                )
+                return CancelResult(
+                    "failed",
+                    work_item_id,
+                    f"terminate_session failed: {exc}"[:300],
+                    session_id=pv.session_id,
+                    session_url=pv.session_url,
+                )
+            now = self.clock.now()
+            row.status = snap.status.value
+            row.status_detail = snap.status_detail.value if snap.status_detail else None
+            row.acus_consumed = snap.acus_consumed
+            row.structured_output = snap.structured_output
+            row.pull_requests = [p.model_dump() for p in snap.pull_requests]
+            row.last_polled_at = now
+            row.finished_at = row.finished_at or now
+            db.add(row)
+            db.add(
+                SessionPoll(
+                    session_id=row.id,
+                    polled_at=now,
+                    status=snap.status.value,
+                    status_detail=row.status_detail,
+                    acus_consumed=snap.acus_consumed,
+                    decision="terminated",
+                    reason=f"operator {operator} stopped the session from the dashboard",
+                )
+            )
+            self._event(
+                db,
+                entity_type="session",
+                entity_id=row.id,
+                event="operator_cancelled",
+                from_state=WorkItemState.session_active.value,
+                to_state=snap.status.value,
+                reason=f"operator={operator}; acus={snap.acus_consumed:.2f}",
+                actor="operator",
+            )
+            self._wi(
+                db,
+                wi,
+                WorkItemEvent.operator_cancelled,
+                f"operator_cancelled:{operator} stopped the Devin session after "
+                f"{snap.acus_consumed:.2f} ACU",
+                actor="operator",
+            )
+            if wi.issue_number is not None:
+                try:
+                    self.gh.comment_issue(
+                        self.repo,
+                        wi.issue_number,
+                        f"Operator `{operator}` stopped the Devin session from the dashboard "
+                        f"after {snap.acus_consumed:.2f} ACU. Relaunch from the dashboard or "
+                        f"add the `{HumanLabel.retry.value}` label to try again.",
+                    )
+                except Exception as exc:
+                    log.warning("cancel comment on #%s failed: %s", wi.issue_number, exc)
+            return CancelResult(
+                "cancelled",
+                work_item_id,
+                wi.blocked_reason or "operator_cancelled",
+                session_id=pv.session_id,
+                session_url=pv.session_url,
+                acus_consumed=snap.acus_consumed,
+            )
 
     def launch(self, work_item_id: int, *, operator: str) -> LaunchResult:
         """Explicit operator dispatch of one work item. Records the decision as an event and as a
