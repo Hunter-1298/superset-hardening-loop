@@ -6,6 +6,13 @@
 {% set more_active = filters.state or filters.kind or filters.level or filters.depth or filters.queue %}
 {{ ui.page_header("Work items", total ~ " work item" ~ ("" if total == 1 else "s") ~ " on " ~ branch ~ ", most fixable first. Each one groups related findings and gets one GitHub issue and one Devin session.") }}
 
+{% if in_flight %}
+<section class="card card-progress" aria-labelledby="flight-title">
+  {{ ui.section_head("Devin in progress", id="flight-title", count=in_flight_total, more_href="/issues?stage=devin", more_text="All") }}
+  {% include "_in_flight.html" %}
+</section>
+{% endif %}
+
 <section class="section" aria-label="Work items">
 <nav class="tabs" aria-label="Stage">
   <a href="/issues"{% if not filters.stage and not filters.queue %} aria-current="page"{% endif %}>All <span class="count">{{ total }}</span></a>

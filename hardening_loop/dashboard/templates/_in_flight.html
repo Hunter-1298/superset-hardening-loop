@@ -1,0 +1,17 @@
+{% if in_flight %}
+<ol class="list-plain" aria-label="In progress">
+  {% for w in in_flight %}
+  {% set s = session_by_wi.get(w.id) %}
+  <li class="queue-item">
+    <div>
+      <a class="title" href="/issues/{{ w.id }}">{{ w.title }}</a>
+      <div class="meta">{{ ui.severity_badge(w.severity) }} <span class="mono">#{{ w.id }}</span>{% if s %} · {{ s.acus_consumed|num }} of {{ w.acu_cap|num(0) }} ACU{% endif %}</div>
+      <div class="links small">{{ ui.links(w, s.url if s and s.url else None) }}</div>
+    </div>
+    <div class="state">{{ ui.stage_badge(w.state) }}{% if operator and w.state.value == "session_active" and not w.pr_url %}<div class="links small"><a class="btn btn-stop btn-sm" href="/operator/cancel/{{ w.id }}">Stop</a></div>{% endif %}</div>
+  </li>
+  {% endfor %}
+</ol>
+{% else %}
+{{ ui.empty("No Devin session running", "Launch one from a work item that is ready to fix.", compact=True) }}
+{% endif %}

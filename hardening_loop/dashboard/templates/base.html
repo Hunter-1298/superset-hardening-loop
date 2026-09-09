@@ -63,6 +63,22 @@
       toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
   })();
+  (function () {
+    var forms = document.querySelectorAll('form[method="post"]');
+    for (var i = 0; i < forms.length; i++) {
+      forms[i].addEventListener('submit', function (ev) {
+        var form = ev.currentTarget;
+        if (form.dataset.submitted) { ev.preventDefault(); return; }
+        form.dataset.submitted = '1';
+        var buttons = form.querySelectorAll('button[type="submit"]');
+        for (var j = 0; j < buttons.length; j++) {
+          buttons[j].disabled = true;
+          buttons[j].setAttribute('aria-busy', 'true');
+          buttons[j].textContent = 'Working…';
+        }
+      });
+    }
+  })();
 </script>
 </body>
 </html>

@@ -347,8 +347,19 @@ def test_duplicate_launch_is_refused_without_a_second_session(
     r = client.post(f"/operator/launch/{wi.id}", data=_form(ctx))
     assert r.status_code == 409
     body = _text(r)
-    assert "Launch refused" in body and "already working on this item" in body
+    assert "Devin is already working on this item" in body
+    assert "did not start a second session" in body
+    assert "Launch refused" not in body
+    assert "Open the Devin session" in body
+    assert f'href="/operator/cancel/{wi.id}"' in r.text
     assert len(_devin(orch).created_requests()) == 1
+
+    # the running item leads the Work items page whatever the filter
+    for path in ("/issues", "/issues?stage=ready", "/issues?fix=hardening"):
+        html = client.get(path).text
+        assert "Devin in progress" in html
+        assert html.index(f'href="/issues/{wi.id}"') < html.index('class="tabs"')
+        assert f'href="/operator/cancel/{wi.id}">Stop</a>' in html
     with session_scope(orch.engine) as db:
         names = [
             e.event
